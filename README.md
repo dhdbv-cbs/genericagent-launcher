@@ -4,6 +4,13 @@
 
 这个项目不是重新实现一套智能体内核，而是给 GenericAgent 提供一个更适合普通用户上手的 Windows 桌面入口，把下载、配置、启动、聊天和常见设置集中到一个界面里。
 
+## 下载
+
+- 直接下载 exe：
+  [Releases / GenericAgentLauncher.exe](https://github.com/dhdbv-cbs/genericagent-launcher/releases/latest)
+
+如果你只是普通用户，优先使用 Release 页面里的 `GenericAgentLauncher.exe`。
+
 ## 致谢
 
 感谢 [GenericAgent 原作者 lsdefine](https://github.com/lsdefine/GenericAgent)。
@@ -78,6 +85,29 @@ python launcher.py
 ```bash
 build.bat
 ```
+
+## 为什么源码文件不多
+
+这个仓库的源码文件看起来比较少，这是正常的。
+
+原因是这个仓库本身只负责“启动器”这一层，而不是把 GenericAgent 整个内核重新实现一遍。当前主要结构就是：
+
+- `launcher.py`
+  启动器主界面，包含下载、聊天、设置、API 配置、通讯渠道管理等桌面交互
+- `bridge.py`
+  启动器和 GenericAgent 内核之间的桥接层，负责进程通信和事件转发
+- `GenericAgentLauncher.spec`
+  PyInstaller 打包配置
+- `build.bat`
+  Windows 下的打包脚本
+
+也就是说：
+
+- 这个仓库“文件少”，不代表内容少
+- 主要功能大量集中在 `launcher.py`
+- 真正的 Agent 能力、模型调用、工具执行和原生前端仍然来自上游 GenericAgent
+
+如果以后功能继续增加，仓库当然也可以再拆模块，但当前这种体量下，文件数量少本身并不是问题，关键是行为是否稳定、配置是否清晰、打包是否可靠
 
 ## 依赖说明
 

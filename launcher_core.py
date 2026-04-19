@@ -86,6 +86,29 @@ def save_config(cfg):
         print(f"[Config] save failed: {e}")
 
 
+def _resolve_config_path(path):
+    raw = str(path or "").strip()
+    if not raw:
+        return ""
+    if os.path.isabs(raw):
+        return os.path.normpath(raw)
+    return os.path.normpath(os.path.join(APP_DIR, raw))
+
+
+def _make_config_relative_path(path):
+    raw = str(path or "").strip()
+    if not raw:
+        return ""
+    abs_path = os.path.abspath(raw)
+    try:
+        rel = os.path.relpath(abs_path, APP_DIR)
+    except Exception:
+        return abs_path
+    if rel.startswith(".."):
+        return abs_path
+    return rel
+
+
 def is_valid_agent_dir(path):
     return bool(
         path
@@ -104,7 +127,9 @@ def _system_python_commands():
     except Exception:
         pass
     if cfg_py:
-        candidates.append([cfg_py])
+        resolved = _resolve_config_path(cfg_py)
+        if resolved:
+            candidates.append([resolved])
     if os.name == "nt":
         candidates += [["py", "-3"], ["python"], ["python3"]]
     else:

@@ -1603,6 +1603,29 @@ class QtChatWindow(QMainWindow):
         self.locate_hint_label.setWordWrap(True)
         self.locate_hint_label.setObjectName("mutedText")
         card_box.addWidget(self.locate_hint_label)
+
+        py_label = QLabel("Python 可执行文件（可选）")
+        py_label.setObjectName("mutedText")
+        card_box.addWidget(py_label)
+        py_row = QHBoxLayout()
+        py_row.setSpacing(8)
+        self.locate_python_edit = QLineEdit()
+        self.locate_python_edit.setPlaceholderText("留空则自动探测；可填 python.exe 路径，支持相对路径")
+        self.locate_python_edit.setText(str(self.cfg.get("python_exe") or "").strip())
+        self.locate_python_edit.returnPressed.connect(self._locate_enter_chat)
+        py_row.addWidget(self.locate_python_edit, 1)
+        py_browse_btn = QPushButton("浏览可执行文件…")
+        py_browse_btn.setStyleSheet(self._action_button_style())
+        py_browse_btn.clicked.connect(self._choose_python_executable)
+        py_row.addWidget(py_browse_btn, 0)
+        card_box.addLayout(py_row)
+        self.locate_python_hint_label = QLabel(
+            "💡  提示：这里建议选择具体的 python.exe。"
+            "如果你用 uv 管理多版本 Python，也请填写 uv 实际创建的解释器路径，而不是 uv.exe 本身。"
+        )
+        self.locate_python_hint_label.setWordWrap(True)
+        self.locate_python_hint_label.setObjectName("mutedText")
+        card_box.addWidget(self.locate_python_hint_label)
         body_layout.addWidget(card)
 
         self.locate_status_card = QFrame()
@@ -1782,6 +1805,9 @@ class QtChatWindow(QMainWindow):
         self.download_private_hint.setWordWrap(True)
         self.download_private_hint.setObjectName("mutedText")
         footer_box.addWidget(self.download_private_hint)
+        self.download_private_only_checkbox = QCheckBox("仅配置虚拟环境，不下载原项目（要求目标目录已存在有效 GenericAgent）")
+        self.download_private_only_checkbox.setObjectName("mutedText")
+        footer_box.addWidget(self.download_private_only_checkbox)
         actions = QHBoxLayout()
         actions.setSpacing(10)
         self.download_btn = QPushButton("开始下载")
@@ -1792,7 +1818,12 @@ class QtChatWindow(QMainWindow):
         self.download_private_btn = QPushButton("下载并配置 3.12 虚拟环境")
         self.download_private_btn.setStyleSheet(self._action_button_style())
         self.download_private_btn.setFixedHeight(44)
-        self.download_private_btn.clicked.connect(lambda: self._start_download_repo(private_python=True))
+        self.download_private_btn.clicked.connect(
+            lambda: self._start_download_repo(
+                private_python=True,
+                private_only=bool(getattr(self, "download_private_only_checkbox", None) and self.download_private_only_checkbox.isChecked()),
+            )
+        )
         actions.addWidget(self.download_private_btn, 1)
         footer_box.addLayout(actions)
         layout.addWidget(footer, 0)
@@ -2185,6 +2216,8 @@ class QtChatWindow(QMainWindow):
             self.download_private_btn.setText(
                 "构建中…" if self._download_running and self._download_mode == "private_python" else "下载并配置 3.12 虚拟环境"
             )
+        if hasattr(self, "download_private_only_checkbox"):
+            self.download_private_only_checkbox.setEnabled(not self._download_running)
         if hasattr(self, "download_progress"):
             if self._download_running:
                 self.download_progress.setRange(0, 0)
@@ -2204,7 +2237,7 @@ class QtChatWindow(QMainWindow):
             lz.save_config(self.cfg)
             self._refresh_download_state()
 
-    def _start_download_repo(self, private_python=False):
+    def _start_download_repo(self, private_python=False, private_only=False):
         parent = str(self.install_parent or "").strip()
         if not parent or not os.path.isdir(parent):
             QMessageBox.warning(self, "位置无效", "请选择有效的安装位置。")
@@ -2213,6 +2246,10 @@ class QtChatWindow(QMainWindow):
             self.download_log.clear()
             self._append_download_log(f"[{datetime.now().strftime('%H:%M:%S')}] 准备开始下载")
         target = os.path.join(parent, "GenericAgent")
+        if private_python and private_only and not os.path.exists(target):
+            QMessageBox.warning(self, "目录不存在", "你勾选了“仅配置虚拟环境”，但目标目录里还没有 GenericAgent。\n\n请先下载原项目，或取消该勾选。")
+            self._append_download_log(f"[{datetime.now().strftime('%H:%M:%S')}] 仅配置虚拟环境失败：目标目录不存在 {target}")
+            return
         if os.path.exists(target):
             if QMessageBox.question(self, "目录已存在", f"{target}\n\n已存在。是否直接使用它作为 GenericAgent 目录？") != QMessageBox.Yes:
                 return
@@ -2227,14 +2264,21 @@ class QtChatWindow(QMainWindow):
                 QMessageBox.warning(self, "目录无效", "该目录存在但不是有效的 GenericAgent 目录。")
                 self._append_download_log(f"[{datetime.now().strftime('%H:%M:%S')}] 目录存在，但不是有效的 GenericAgent 根目录：{target}")
                 return
+        elif private_python and private_only:
+            QMessageBox.warning(self, "目录不存在", "你勾选了“仅配置虚拟环境”，但目标目录里还没有 GenericAgent。\n\n请先下载原项目，或取消该勾选。")
+            self._append_download_log(f"[{datetime.now().strftime('%H:%M:%S')}] 仅配置虚拟环境失败：目标目录不存在 {target}")
+            return
         self._download_running = True
         self._download_mode = "private_python" if private_python else "clone"
         self._refresh_download_state()
-        self.download_status_label.setText("正在准备私有 3.12 环境…" if private_python else "正在检查 Git 并开始下载…")
+        if private_python and private_only:
+            self.download_status_label.setText("正在为现有 GenericAgent 配置私有 3.12 环境…")
+        else:
+            self.download_status_label.setText("正在准备私有 3.12 环境…" if private_python else "正在检查 Git 并开始下载…")
         self._append_download_log(f"[{datetime.now().strftime('%H:%M:%S')}] 目标目录：{target}")
         self.cfg["install_parent"] = parent
         lz.save_config(self.cfg)
-        threading.Thread(target=self._run_clone_repo, args=(target, private_python), daemon=True).start()
+        threading.Thread(target=self._run_clone_repo, args=(target, private_python, private_only), daemon=True).start()
 
     def _private_python_spec(self):
         machine = (platform.machine() or "").lower()
@@ -2436,9 +2480,14 @@ class QtChatWindow(QMainWindow):
             return None, f"私有 3.12 虚拟环境已创建，但载入 GenericAgent 失败：{detail}"
         return paths["venv_python"], None
 
-    def _run_clone_repo(self, target, private_python=False):
+    def _run_clone_repo(self, target, private_python=False, private_only=False):
         try:
-            if not lz.is_valid_agent_dir(target):
+            if private_python and private_only:
+                if not lz.is_valid_agent_dir(target):
+                    self._event_queue.put({"event": "clone_error", "msg": "仅配置虚拟环境时，目标目录必须已经是有效的 GenericAgent 根目录。"})
+                    return
+                self._event_queue.put({"event": "clone_status", "msg": "已跳过源码下载，继续为现有目录配置私有 3.12 环境。"})
+            elif not lz.is_valid_agent_dir(target):
                 try:
                     subprocess.run(
                         ["git", "--version"],
@@ -4292,11 +4341,19 @@ class QtChatWindow(QMainWindow):
             self.enter_chat_btn.setEnabled(valid)
         if hasattr(self, "locate_path_edit"):
             self.locate_path_edit.setText(self.agent_dir or "")
+        if hasattr(self, "locate_python_edit"):
+            self.locate_python_edit.setText(str(self.cfg.get("python_exe") or "").strip())
         if hasattr(self, "locate_status_label"):
+            py_cfg = str(self.cfg.get("python_exe") or "").strip()
+            if py_cfg:
+                py_resolved = lz._resolve_config_path(py_cfg)
+                py_text = f"\nPython 可执行文件：{py_cfg}\n解析后：{py_resolved}"
+            else:
+                py_text = "\nPython 可执行文件：未指定（将自动探测）"
             self.locate_status_label.setText(
-                f"当前目录有效，可以直接载入：\n{self.agent_dir}"
+                (f"当前目录有效，可以直接载入：\n{self.agent_dir}{py_text}")
                 if valid else
-                "当前还没有有效的 GenericAgent 目录。请先浏览并选择正确的项目根目录。"
+                ("当前还没有有效的 GenericAgent 目录。请先浏览并选择正确的项目根目录。" + py_text)
             )
         self._refresh_download_state()
         if hasattr(self, "settings_status_label"):
@@ -4313,8 +4370,42 @@ class QtChatWindow(QMainWindow):
             if hasattr(self, "locate_path_edit"):
                 self.locate_path_edit.setText(path)
 
+    def _choose_python_executable(self):
+        current = ""
+        if hasattr(self, "locate_python_edit"):
+            current = self.locate_python_edit.text().strip()
+        start_dir = os.path.dirname(lz._resolve_config_path(current)) if current else os.path.expanduser("~")
+        if not os.path.isdir(start_dir):
+            start_dir = os.path.expanduser("~")
+        if os.name == "nt":
+            path, _ = QFileDialog.getOpenFileName(
+                self,
+                "选择 Python 可执行文件",
+                start_dir,
+                "Executable (*.exe);;All Files (*)",
+            )
+        else:
+            path, _ = QFileDialog.getOpenFileName(
+                self,
+                "选择 Python 可执行文件",
+                start_dir,
+                "All Files (*)",
+            )
+        if path and hasattr(self, "locate_python_edit"):
+            self.locate_python_edit.setText(lz._make_config_relative_path(path))
+
     def _locate_enter_chat(self):
         raw = self.locate_path_edit.text().strip() if hasattr(self, "locate_path_edit") else self.agent_dir
+        py_raw = self.locate_python_edit.text().strip() if hasattr(self, "locate_python_edit") else ""
+        if py_raw:
+            resolved = lz._resolve_config_path(py_raw)
+            if not os.path.isfile(resolved):
+                QMessageBox.warning(self, "Python 路径无效", f"未找到可执行文件：\n{resolved}")
+                return
+            self.cfg["python_exe"] = lz._make_config_relative_path(resolved)
+        else:
+            self.cfg.pop("python_exe", None)
+        lz.save_config(self.cfg)
         self._set_agent_dir(raw)
         self._enter_chat()
 
@@ -5531,7 +5622,7 @@ class QtChatWindow(QMainWindow):
             python_exe = str(ev.get("python_exe") or "").strip()
             private_python = bool(ev.get("private_python"))
             if python_exe:
-                self.cfg["python_exe"] = python_exe
+                self.cfg["python_exe"] = lz._make_config_relative_path(python_exe)
                 lz.save_config(self.cfg)
             if target:
                 self._set_agent_dir(target)

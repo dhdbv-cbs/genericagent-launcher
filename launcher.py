@@ -6434,8 +6434,9 @@ class Launcher(ctk.CTk):
                              anchor="w")
         head.pack(anchor="w", pady=(0, 4))
 
-        content_frame = ctk.CTkFrame(wrap_container, fg_color="transparent")
+        content_frame = ctk.CTkFrame(wrap_container, fg_color="transparent", width=1, height=1)
         content_frame.pack(fill="x", anchor="w")
+        content_frame.pack_propagate(True)
 
         if final:
             self._render_assistant_content(content_frame, text or "…", wrap=wrap, streaming=False)
@@ -6501,10 +6502,12 @@ class Launcher(ctk.CTk):
         if prefix_ok and live_ok:
             return prefix_frame, live_frame
         self._clear_assistant_content(cf)
-        prefix_frame = ctk.CTkFrame(cf, fg_color="transparent")
+        prefix_frame = ctk.CTkFrame(cf, fg_color="transparent", width=1, height=1)
         prefix_frame.pack(fill="x", anchor="w")
-        live_frame = ctk.CTkFrame(cf, fg_color="transparent")
+        prefix_frame.pack_propagate(True)
+        live_frame = ctk.CTkFrame(cf, fg_color="transparent", width=1, height=1)
         live_frame.pack(fill="x", anchor="w")
+        live_frame.pack_propagate(True)
         cf._stream_prefix_frame = prefix_frame
         cf._stream_live_frame = live_frame
         return prefix_frame, live_frame

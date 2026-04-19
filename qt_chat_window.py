@@ -36,16 +36,36 @@ from PySide6.QtWidgets import (
 import launcher as lz
 
 
+def _lz_dark(value, fallback: str) -> str:
+    if isinstance(value, (tuple, list)) and len(value) >= 2:
+        return str(value[1])
+    if isinstance(value, str) and value:
+        return value
+    return fallback
+
+
 C = {
-    "bg": QColor("#0b1020"),
-    "panel": QColor("#111827"),
-    "card": QColor("#172033"),
-    "card_hover": QColor("#1d2940"),
-    "border": QColor("#273449"),
-    "text": "#e5e7eb",
-    "muted": "#94a3b8",
-    "accent": "#60a5fa",
-    "danger": "#ef4444",
+    "bg": QColor(_lz_dark(lz.COLOR_APP_BG, "#1c1e22")),
+    "panel": QColor(_lz_dark(lz.COLOR_PANEL, "#23262c")),
+    "surface": QColor(_lz_dark(lz.COLOR_SURFACE, "#1c1e22")),
+    "sidebar_bg": QColor(_lz_dark(lz.COLOR_SIDEBAR_BG, "#181a1e")),
+    "card": QColor(_lz_dark(lz.COLOR_CARD, "#2a2d33")),
+    "card_hover": QColor(_lz_dark(lz.COLOR_CARD_HOVER, "#34383f")),
+    "field_bg": QColor(_lz_dark(lz.COLOR_FIELD_BG, "#14161a")),
+    "field_alt": QColor(_lz_dark(lz.COLOR_FIELD_ALT, "#262a31")),
+    "border": QColor(_lz_dark(lz.COLOR_DIVIDER, "#3a3f47")),
+    "active": QColor(_lz_dark(lz.COLOR_ACTIVE, "#2d3544")),
+    "active_hover": QColor(_lz_dark(lz.COLOR_ACTIVE_HOVER, "#34405a")),
+    "code_bg": QColor(_lz_dark(lz.COLOR_CODE_BG, "#14161a")),
+    "text": _lz_dark(lz.COLOR_TEXT, "#e8ecf2"),
+    "text_soft": _lz_dark(lz.COLOR_TEXT_SOFT, "#cfd4dc"),
+    "muted": _lz_dark(lz.COLOR_MUTED, "#8a8f99"),
+    "code_text": _lz_dark(lz.COLOR_CODE_TEXT, "#dde1e7"),
+    "accent": _lz_dark(lz.COLOR_ACCENT, "#4f8cff"),
+    "accent_hover": _lz_dark(lz.COLOR_ACCENT_HOVER, "#3a75e0"),
+    "danger": _lz_dark(lz.COLOR_DANGER_BG, "#c24848"),
+    "danger_hover": _lz_dark(lz.COLOR_DANGER_BG_HOVER, "#a13a3a"),
+    "danger_text": _lz_dark(lz.COLOR_DANGER_TEXT, "#ea7070"),
 }
 
 SCROLLBAR_STYLE = """
@@ -66,24 +86,24 @@ _SVG_TRASH = '<svg viewBox="0 0 24 24" fill="none" stroke="{c}" stroke-width="2"
 _SVG_SEND = '<svg viewBox="0 0 24 24" fill="none" stroke="{c}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2 11 13"/><path d="m22 2-7 20-4-9-9-4Z"/></svg>'
 _SVG_STOP = '<svg viewBox="0 0 24 24" fill="{c}" stroke="none"><rect width="10" height="10" x="7" y="7" rx="1.5" ry="1.5"/></svg>'
 
-_MD_CSS = """
-body { color: #e5e7eb; font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif; font-size: 13px; line-height: 1.65; }
-h1 { color: #f8fafc; font-size: 20px; font-weight: 700; border-bottom: 1px solid #334155; padding-bottom: 4px; margin-top: 16px; }
-h2 { color: #f8fafc; font-size: 17px; font-weight: 700; border-bottom: 1px solid #334155; padding-bottom: 3px; margin-top: 14px; }
-h3 { color: #f8fafc; font-size: 15px; font-weight: 600; margin-top: 12px; }
-code { background: rgba(51,65,85,0.65); color: #c4b5fd; padding: 1px 4px; border-radius: 3px; font-family: Consolas, "Courier New", monospace; font-size: 12px; }
-pre  { background: rgba(15,23,42,0.96); border: 1px solid #334155; border-radius: 8px; padding: 10px 12px; margin: 8px 0; }
-pre code { background: transparent; padding: 0; color: #e2e8f0; }
-a { color: #60a5fa; text-decoration: none; }
-a:hover { text-decoration: underline; }
-blockquote { border-left: 3px solid #3b82f6; margin: 8px 0; padding: 4px 0 4px 12px; color: #94a3b8; }
-table { border-collapse: collapse; margin: 8px 0; }
-th, td { border: 1px solid #334155; padding: 5px 10px; }
-th { background: rgba(51,65,85,0.45); color: #e2e8f0; font-weight: 700; }
-hr { border: none; border-top: 1px solid #334155; margin: 12px 0; }
-ul, ol { padding-left: 22px; margin: 4px 0; }
-li { margin: 2px 0; }
-p { margin: 6px 0; }
+_MD_CSS = f"""
+body {{ color: {C['text_soft']}; font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif; font-size: 13px; line-height: 1.65; }}
+h1 {{ color: {C['text']}; font-size: 20px; font-weight: 700; border-bottom: 1px solid {C['border'].name()}; padding-bottom: 4px; margin-top: 16px; }}
+h2 {{ color: {C['text']}; font-size: 17px; font-weight: 700; border-bottom: 1px solid {C['border'].name()}; padding-bottom: 3px; margin-top: 14px; }}
+h3 {{ color: {C['text']}; font-size: 15px; font-weight: 600; margin-top: 12px; }}
+code {{ background: {C['field_alt'].name()}; color: {C['code_text']}; padding: 1px 4px; border-radius: 3px; font-family: Consolas, "Courier New", monospace; font-size: 12px; }}
+pre  {{ background: {C['code_bg'].name()}; border: 1px solid {C['border'].name()}; border-radius: 8px; padding: 10px 12px; margin: 8px 0; }}
+pre code {{ background: transparent; padding: 0; color: {C['code_text']}; }}
+a {{ color: {C['accent']}; text-decoration: none; }}
+a:hover {{ text-decoration: underline; }}
+blockquote {{ border-left: 3px solid {C['accent']}; margin: 8px 0; padding: 4px 0 4px 12px; color: {C['muted']}; }}
+table {{ border-collapse: collapse; margin: 8px 0; }}
+th, td {{ border: 1px solid {C['border'].name()}; padding: 5px 10px; }}
+th {{ background: {C['field_alt'].name()}; color: {C['text']}; font-weight: 700; }}
+hr {{ border: none; border-top: 1px solid {C['border'].name()}; margin: 12px 0; }}
+ul, ol {{ padding-left: 22px; margin: 4px 0; }}
+li {{ margin: 2px 0; }}
+p {{ margin: 6px 0; }}
 """
 
 _ICON_CACHE: dict[str, QIcon] = {}
@@ -209,7 +229,7 @@ class TurnFold(QFrame):
         self._expanded = False
 
         self.setStyleSheet(
-            "QFrame { background: rgba(148,163,184,0.06); border: 1px solid rgba(148,163,184,0.14); border-radius: 10px; }"
+            f"QFrame {{ background: {C['field_alt'].name()}; border: none; border-radius: 8px; }}"
         )
         layout = QVBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
@@ -218,8 +238,8 @@ class TurnFold(QFrame):
         self._button = QPushButton(f"▸ {self._title}")
         self._button.setCursor(QCursor(Qt.PointingHandCursor))
         self._button.setStyleSheet(
-            "QPushButton { background: rgba(51,65,85,0.65); color: #cbd5e1; border: none; border-radius: 8px; text-align: left; padding: 8px 10px; font-size: 12px; font-weight: 600; }"
-            "QPushButton:hover { background: rgba(71,85,105,0.72); }"
+            f"QPushButton {{ background: {C['card_hover'].name()}; color: {C['text_soft']}; border: none; border-radius: 6px; text-align: left; padding: 8px 10px; font-size: 12px; font-weight: 600; }}"
+            f"QPushButton:hover {{ background: {C['card'].name()}; }}"
         )
         self._button.clicked.connect(self.toggle)
         layout.addWidget(self._button)
@@ -231,7 +251,7 @@ class TurnFold(QFrame):
         self._body.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._body.document().setDefaultStyleSheet(_MD_CSS)
         self._body.setStyleSheet(
-            "QTextBrowser { background: transparent; border: none; color: #dbe4ef; font-size: 13px; }"
+            f"QTextBrowser {{ background: transparent; border: none; color: {C['text_soft']}; font-size: 13px; }}"
         )
         self._body.hide()
         layout.addWidget(self._body)
@@ -263,91 +283,70 @@ class MessageRow(QWidget):
         self._text = text or ""
         self._role = role
         self._finished = True
+        self._stream_prefix_signature = None
+        self._stream_live_browser = None
 
         is_user = role == "user"
-        self.setStyleSheet("background: rgba(59,130,246,0.06);" if is_user else "background: transparent;")
+        self.setStyleSheet("background: transparent;")
 
         outer = QHBoxLayout(self)
-        outer.setContentsMargins(18, 10, 18, 10)
-        outer.setSpacing(12)
+        outer.setContentsMargins(16, 6, 16, 6)
+        outer.setSpacing(0)
         outer.setAlignment(Qt.AlignTop)
 
-        avatar = QLabel()
-        avatar.setFixedSize(30, 30)
-        avatar.setAlignment(Qt.AlignCenter)
-        svg_data = _SVG_USER if is_user else _SVG_BOT
-        avatar_color = "#cbd5e1" if is_user else "#93c5fd"
-        from PySide6.QtSvg import QSvgRenderer
-
-        pm = QPixmap(30, 30)
-        pm.fill(QColor(0, 0, 0, 0))
-        renderer = QSvgRenderer(QByteArray(svg_data.replace("{c}", avatar_color).encode()))
-        painter = QPainter(pm)
-        renderer.render(painter)
-        painter.end()
-        avatar.setPixmap(pm)
-        avatar.setStyleSheet(
-            "QLabel { background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.10); border-radius: 15px; }"
-        )
-        outer.addWidget(avatar, 0, Qt.AlignTop)
-
-        right = QVBoxLayout()
-        right.setContentsMargins(0, 0, 0, 0)
-        right.setSpacing(4)
-
-        role_lbl = QLabel("你" if is_user else "助手")
-        role_lbl.setStyleSheet("color: #cbd5e1; font-size: 12px; font-weight: 700;")
-        right.addWidget(role_lbl)
-
         if is_user:
+            outer.addStretch(1)
+            bubble = QFrame()
+            bubble.setMaximumWidth(960)
+            bubble.setStyleSheet(
+                f"QFrame {{ background: {C['accent']}; border: none; border-radius: 14px; }}"
+            )
+            bubble_layout = QVBoxLayout(bubble)
+            bubble_layout.setContentsMargins(14, 10, 14, 10)
+            bubble_layout.setSpacing(0)
             label = QLabel(self._text)
             label.setWordWrap(True)
             label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-            label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
-            label.setStyleSheet("QLabel { color: #e5e7eb; font-size: 14px; line-height: 1.6; }")
+            label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
+            label.setStyleSheet("QLabel { color: white; font-size: 14px; line-height: 1.6; }")
+            bubble_layout.addWidget(label)
+            outer.addWidget(bubble, 0, Qt.AlignRight | Qt.AlignTop)
             self._label = label
             self._content_layout = None
-            right.addWidget(label)
+            self._action_row = None
+            self._bubble = bubble
         else:
+            wrap = QWidget()
+            wrap_layout = QVBoxLayout(wrap)
+            wrap_layout.setContentsMargins(6, 0, 80, 0)
+            wrap_layout.setSpacing(4)
+
+            role_row = QHBoxLayout()
+            role_row.setContentsMargins(0, 0, 0, 0)
+            role_row.setSpacing(0)
+            role_lbl = QLabel("助手")
+            role_lbl.setStyleSheet(f"color: {C['muted']}; font-size: 12px; font-weight: 500;")
+            role_row.addWidget(role_lbl)
+            role_row.addStretch(1)
+            wrap_layout.addLayout(role_row)
+
             host = QWidget()
             host_layout = QVBoxLayout(host)
             host_layout.setContentsMargins(0, 0, 0, 0)
             host_layout.setSpacing(6)
             self._content_layout = host_layout
+            wrap_layout.addWidget(host)
+
+            outer.addWidget(wrap, 1, Qt.AlignLeft | Qt.AlignTop)
             self._label = None
-            right.addWidget(host)
-
-            actions = QWidget()
-            action_layout = QHBoxLayout(actions)
-            action_layout.setContentsMargins(0, 4, 0, 0)
-            action_layout.setSpacing(4)
-            copy_btn = QPushButton()
-            copy_btn.setCursor(QCursor(Qt.PointingHandCursor))
-            copy_btn.setIcon(_svg_icon("copy", _SVG_COPY))
-            copy_btn.setIconSize(QSize(15, 15))
-            copy_btn.setFixedSize(26, 24)
-            copy_btn.setStyleSheet(
-                "QPushButton { background: transparent; border: none; border-radius: 4px; padding: 3px; } "
-                "QPushButton:hover { background: rgba(51,65,85,0.7); }"
-            )
-            copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(self._text))
-            action_layout.addWidget(copy_btn)
-            action_layout.addStretch()
-            actions.hide()
-            self._action_row = actions
-            right.addWidget(actions)
-
-        outer.addLayout(right, 1)
+            self._action_row = None
+            self._bubble = None
         self.set_text(self._text)
 
     def enterEvent(self, event):
-        if getattr(self, "_action_row", None) is not None and self._finished:
-            self._action_row.show()
         super().enterEvent(event)
 
     def leaveEvent(self, event):
-        if getattr(self, "_action_row", None) is not None:
-            self._action_row.hide()
         super().leaveEvent(event)
 
     def resizeEvent(self, event):
@@ -364,6 +363,8 @@ class MessageRow(QWidget):
             widget = item.widget()
             if widget is not None:
                 widget.deleteLater()
+        self._stream_prefix_signature = None
+        self._stream_live_browser = None
 
     def _make_browser(self, markdown_text: str) -> QTextBrowser:
         browser = QTextBrowser()
@@ -374,16 +375,18 @@ class MessageRow(QWidget):
         browser.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         browser.document().setDefaultStyleSheet(_MD_CSS)
         browser.setStyleSheet(
-            "QTextBrowser { background: transparent; color: #e5e7eb; border: none; padding: 0; font-size: 14px; }"
+            f"QTextBrowser {{ background: transparent; color: {C['text_soft']}; border: none; padding: 0; font-size: 14px; }}"
         )
         browser.setHtml(_md_to_html(markdown_text))
         _fit_browser_height(browser)
         return browser
 
+    def _set_browser_markdown(self, browser: QTextBrowser, markdown_text: str) -> None:
+        browser.setHtml(_md_to_html(markdown_text))
+        _fit_browser_height(browser)
+
     def set_finished(self, done: bool):
         self._finished = done
-        if not done and getattr(self, "_action_row", None) is not None:
-            self._action_row.hide()
         self.set_text(self._text)
 
     def set_text(self, text: str):
@@ -393,10 +396,40 @@ class MessageRow(QWidget):
             self._label.adjustSize()
             return
 
-        self._clear_assistant_widgets()
         segments = lz.fold_turns(self._text)
         if not segments:
             segments = [{"type": "text", "content": self._text or "…"}]
+
+        if not self._finished:
+            last = segments[-1]
+            last_type = str(last.get("type") or "text")
+            if last_type == "text":
+                prefix_segments = segments[:-1]
+                live_content = last.get("content") or ""
+            else:
+                prefix_segments = segments
+                live_content = ""
+            prefix_signature = tuple(
+                (
+                    str(seg.get("type") or "text"),
+                    str(seg.get("title") or ""),
+                    str(seg.get("content") or ""),
+                )
+                for seg in prefix_segments
+            )
+            browser = getattr(self, "_stream_live_browser", None)
+            try:
+                browser_ok = browser is not None and browser.parent() is not None
+            except Exception:
+                browser_ok = False
+            if prefix_signature == self._stream_prefix_signature and browser_ok:
+                self._set_browser_markdown(
+                    browser,
+                    _assistant_segment_markdown(live_content, streaming=True),
+                )
+                return
+
+        self._clear_assistant_widgets()
 
         for idx, seg in enumerate(segments):
             content = seg.get("content") or ""
@@ -408,6 +441,24 @@ class MessageRow(QWidget):
             shown = _assistant_segment_markdown(content, streaming=(not self._finished and is_last))
             browser = self._make_browser(shown)
             self._content_layout.addWidget(browser)
+            if not self._finished and is_last:
+                self._stream_live_browser = browser
+
+        if not self._finished:
+            last = segments[-1]
+            last_type = str(last.get("type") or "text")
+            if last_type == "text":
+                prefix_segments = segments[:-1]
+            else:
+                prefix_segments = segments
+            self._stream_prefix_signature = tuple(
+                (
+                    str(seg.get("type") or "text"),
+                    str(seg.get("title") or ""),
+                    str(seg.get("content") or ""),
+                )
+                for seg in prefix_segments
+            )
 
 
 class QtChatWindow(QMainWindow):
@@ -475,12 +526,15 @@ class QtChatWindow(QMainWindow):
                 padding: 10px 12px;
                 margin: 3px 0;
             }}
+            QListWidget::item:hover {{
+                background: {C['card'].name()};
+            }}
             QListWidget::item:selected {{
-                background: rgba(59,130,246,0.16);
-                border: 1px solid rgba(96,165,250,0.22);
+                background: {C['active'].name()};
+                border: 1px solid {C['active_hover'].name()};
             }}
             QLineEdit, QTextEdit {{
-                background: rgba(15,23,42,0.78);
+                background: {C['field_bg'].name()};
                 border: 1px solid {C['border'].name()};
                 border-radius: 12px;
                 color: {C['text']};
@@ -488,15 +542,15 @@ class QtChatWindow(QMainWindow):
                 selection-background-color: rgba(96,165,250,0.35);
             }}
             QPushButton {{
-                background: rgba(23,32,51,0.96);
+                background: {C['field_alt'].name()};
                 border: 1px solid {C['border'].name()};
                 border-radius: 10px;
                 color: {C['text']};
                 padding: 8px 12px;
             }}
-            QPushButton:hover {{ background: rgba(29,41,64,0.98); }}
+            QPushButton:hover {{ background: {C['card_hover'].name()}; }}
             QComboBox {{
-                background: rgba(15,23,42,0.78);
+                background: {C['field_bg'].name()};
                 border: 1px solid {C['border'].name()};
                 border-radius: 10px;
                 padding: 7px 10px;
@@ -518,14 +572,14 @@ class QtChatWindow(QMainWindow):
 
         sidebar = QFrame()
         sidebar.setStyleSheet(
-            f"QFrame {{ background: {C['panel'].name()}; border-right: 1px solid {C['border'].name()}; }}"
+            f"QFrame {{ background: {C['sidebar_bg'].name()}; border-right: 1px solid {C['border'].name()}; }}"
         )
         side_layout = QVBoxLayout(sidebar)
         side_layout.setContentsMargins(14, 14, 14, 14)
         side_layout.setSpacing(10)
 
         title = QLabel("会话")
-        title.setStyleSheet("font-size: 18px; font-weight: 700; color: #f8fafc;")
+        title.setStyleSheet(f"font-size: 15px; font-weight: 700; color: {C['text_soft']};")
         side_layout.addWidget(title)
 
         btn_row = QHBoxLayout()
@@ -559,32 +613,26 @@ class QtChatWindow(QMainWindow):
         main = QFrame()
         main.setStyleSheet(f"QFrame {{ background: {C['bg'].name()}; }}")
         main_layout = QVBoxLayout(main)
-        main_layout.setContentsMargins(18, 14, 18, 14)
-        main_layout.setSpacing(12)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
 
         head = QFrame()
         head.setStyleSheet(
-            f"QFrame {{ background: {C['panel'].name()}; border: 1px solid {C['border'].name()}; border-radius: 16px; }}"
+            f"QFrame {{ background: {C['panel'].name()}; border: none; }}"
         )
+        head.setFixedHeight(56)
         head_layout = QHBoxLayout(head)
-        head_layout.setContentsMargins(16, 14, 16, 14)
+        head_layout.setContentsMargins(18, 10, 18, 10)
         head_layout.setSpacing(12)
 
-        title_box = QVBoxLayout()
-        title_box.setContentsMargins(0, 0, 0, 0)
-        title_box.setSpacing(2)
-        self.chat_title = QLabel("未选择会话")
-        self.chat_title.setStyleSheet("font-size: 18px; font-weight: 700; color: #f8fafc;")
-        title_box.addWidget(self.chat_title)
+        self.chat_title = QLabel("GenericAgent")
+        self.chat_title.setStyleSheet(f"font-size: 14px; font-weight: 700; color: {C['text_soft']};")
         self.mode_label = QLabel("当前无活动会话")
-        self.mode_label.setStyleSheet("font-size: 12px; color: #94a3b8;")
-        title_box.addWidget(self.mode_label)
-        head_layout.addLayout(title_box, 1)
-
-        self.llm_combo = QComboBox()
-        self.llm_combo.setMinimumWidth(260)
-        self.llm_combo.currentIndexChanged.connect(self._on_llm_changed)
-        head_layout.addWidget(self.llm_combo)
+        self.mode_label.setStyleSheet(f"font-size: 12px; color: {C['muted']};")
+        self.mode_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        head_layout.addWidget(self.chat_title, 0, Qt.AlignVCenter)
+        head_layout.addStretch(1)
+        head_layout.addWidget(self.mode_label, 0, Qt.AlignRight | Qt.AlignVCenter)
 
         main_layout.addWidget(head)
 
@@ -603,56 +651,77 @@ class QtChatWindow(QMainWindow):
 
         footer = QFrame()
         footer.setStyleSheet(
-            f"QFrame {{ background: {C['panel'].name()}; border: 1px solid {C['border'].name()}; border-radius: 16px; }}"
+            f"QFrame {{ background: {C['panel'].name()}; border: none; }}"
         )
         footer_layout = QVBoxLayout(footer)
-        footer_layout.setContentsMargins(14, 12, 14, 12)
-        footer_layout.setSpacing(10)
+        footer_layout.setContentsMargins(16, 14, 16, 14)
+        footer_layout.setSpacing(0)
 
-        stats_row = QHBoxLayout()
-        stats_row.setSpacing(12)
-        self.status_label = QLabel("正在启动桥接进程…")
-        self.status_label.setStyleSheet("font-size: 12px; color: #cbd5e1;")
-        stats_row.addWidget(self.status_label, 1)
-        self.token_label = QLabel("")
-        self.token_label.setStyleSheet("font-size: 12px; color: #94a3b8;")
-        stats_row.addWidget(self.token_label, 0, Qt.AlignRight)
-        footer_layout.addLayout(stats_row)
+        composer = QFrame()
+        composer.setStyleSheet(
+            f"QFrame {{ background: {C['card'].name()}; border: none; border-radius: 14px; }}"
+        )
+        composer_layout = QVBoxLayout(composer)
+        composer_layout.setContentsMargins(12, 10, 12, 8)
+        composer_layout.setSpacing(8)
 
         self.input_box = InputTextEdit(self._handle_send)
         self.input_box.setPlaceholderText("输入消息，Enter 发送，Shift+Enter 换行")
-        self.input_box.setMinimumHeight(92)
+        self.input_box.setMinimumHeight(78)
         self.input_box.setMaximumHeight(220)
-        footer_layout.addWidget(self.input_box)
+        composer_layout.addWidget(self.input_box)
 
-        action_row = QHBoxLayout()
-        action_row.setSpacing(8)
-        self.hint_label = QLabel("聊天主区由 Qt 渲染，会话与官方导入逻辑沿用启动器存档。")
-        self.hint_label.setStyleSheet("font-size: 12px; color: #94a3b8;")
-        action_row.addWidget(self.hint_label, 1)
+        tool_row = QHBoxLayout()
+        tool_row.setSpacing(8)
+
+        self.llm_combo = QComboBox()
+        self.llm_combo.setMinimumWidth(220)
+        self.llm_combo.setMaximumWidth(320)
+        self.llm_combo.currentIndexChanged.connect(self._on_llm_changed)
+        tool_row.addWidget(self.llm_combo)
+        tool_row.addStretch(1)
 
         self.stop_btn = QPushButton("中断")
         self.stop_btn.setIcon(_svg_icon("stop", _SVG_STOP, "#ffffff"))
         self.stop_btn.setEnabled(False)
         self.stop_btn.setStyleSheet(
-            "QPushButton { background: rgba(239,68,68,0.92); border: none; border-radius: 10px; color: white; padding: 8px 14px; }"
-            "QPushButton:hover { background: rgba(248,113,113,0.95); }"
-            "QPushButton:disabled { background: rgba(127,29,29,0.45); color: rgba(255,255,255,0.65); }"
+            f"QPushButton {{ background: transparent; border: none; border-radius: 8px; color: {C['danger_text']}; padding: 8px 12px; }}"
+            f"QPushButton:hover {{ background: rgba(194,72,72,0.18); }}"
+            f"QPushButton:disabled {{ color: rgba(255,255,255,0.40); background: transparent; }}"
         )
         self.stop_btn.clicked.connect(self._abort)
-        action_row.addWidget(self.stop_btn)
+        tool_row.addWidget(self.stop_btn)
 
         self.send_btn = QPushButton("发送")
-        self.send_btn.setIcon(_svg_icon("send", _SVG_SEND, "#111827"))
+        self.send_btn.setIcon(_svg_icon("send", _SVG_SEND, "#ffffff"))
         self.send_btn.setStyleSheet(
-            "QPushButton { background: #e2e8f0; border: none; border-radius: 10px; color: #111827; padding: 8px 16px; font-weight: 700; }"
-            "QPushButton:hover { background: #f8fafc; }"
+            f"QPushButton {{ background: {C['accent']}; border: none; border-radius: 8px; color: white; padding: 8px 16px; font-weight: 700; }}"
+            f"QPushButton:hover {{ background: {C['accent_hover']}; }}"
             "QPushButton:disabled { background: #64748b; color: #e2e8f0; }"
         )
         self.send_btn.clicked.connect(self._handle_send)
-        action_row.addWidget(self.send_btn)
+        tool_row.addWidget(self.send_btn)
 
-        footer_layout.addLayout(action_row)
+        composer_layout.addLayout(tool_row)
+
+        self.session_token_tree_label = QLabel("Token 估算\n└ 暂无数据")
+        self.session_token_tree_label.setStyleSheet(
+            f"font-size: 12px; color: {C['muted']}; font-family: Consolas, 'Microsoft YaHei UI';"
+        )
+        self.session_token_tree_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        self.session_token_tree_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        composer_layout.addWidget(self.session_token_tree_label)
+
+        self.session_mode_label = QLabel("当前会话：新进程，尚未发送消息")
+        self.session_mode_label.setStyleSheet(f"font-size: 12px; color: {C['muted']};")
+        composer_layout.addWidget(self.session_mode_label)
+
+        self.status_label = QLabel("正在启动桥接进程…")
+        self.status_label.setStyleSheet(f"font-size: 12px; color: {C['text_soft']};")
+        composer_layout.addWidget(self.status_label)
+
+        self.token_label = self.session_token_tree_label
+        footer_layout.addWidget(composer)
         main_layout.addWidget(footer)
 
         root.addWidget(sidebar)
@@ -830,46 +899,93 @@ class QtChatWindow(QMainWindow):
     def _update_header_labels(self):
         session = self.current_session
         if not session:
-            self.chat_title.setText("未选择会话")
             self.mode_label.setText("当前无活动会话")
+            self._refresh_session_mode_label()
             return
-        self.chat_title.setText(session.get("title") or "未命名会话")
-        parts = [_session_source_label(session)]
+        title = str(session.get("title") or "未命名会话").strip() or "未命名会话"
+        parts = [title, _session_source_label(session)]
         pid = session.get("process_pid")
         if pid:
             parts.append(f"进程 {pid}")
         if session.get("imported_from"):
             parts.append("官方恢复上下文")
         self.mode_label.setText(" | ".join(parts))
+        self._refresh_session_mode_label()
 
     def _refresh_token_label(self):
         session = self.current_session
         if not isinstance(session, dict):
-            self.token_label.setText("")
+            self.session_token_tree_label.setText("Token 估算\n└ 暂无数据")
             return
         self._ensure_session_usage_metadata(session)
+        summary = self._session_token_summary(include_live=True)
+        if summary["total_tokens"] == 0 and summary["live_output_tokens"] == 0:
+            self.session_token_tree_label.setText("Token 估算\n└ 暂无数据")
+            return
+        last_line = (
+            f"└ 本轮流式 {summary['live_output_tokens']}"
+            if summary["live_output_tokens"] > 0
+            else f"└ 轮次 {summary['turns']}"
+        )
+        mode = summary.get("mode") or "estimate_chars_div_2_5"
+        if mode == "provider_usage":
+            title = "Token 计数（真实）"
+        elif mode == "mixed_provider_and_estimate":
+            title = "Token 计数（混合）"
+        else:
+            title = "Token 计数（估算）"
+        if summary["channel_label"]:
+            title += f" · {summary['channel_label']}"
+        self.session_token_tree_label.setText(
+            f"{title}\n"
+            f"├ 输入 {summary['input_tokens']}\n"
+            f"├ 输出 {summary['output_tokens']}\n"
+            f"├ 总计 {summary['total_tokens']}\n"
+            f"{last_line}"
+        )
+
+    def _session_token_summary(self, include_live: bool = False):
+        session = self.current_session or {}
         usage = session.get("token_usage") or {}
-        inp = int(usage.get("input_tokens", 0) or 0)
-        out = int(usage.get("output_tokens", 0) or 0)
-        if self._busy and self._current_stream_text:
-            live_out = lz._estimate_tokens(self._current_stream_text)
+        events = list(usage.get("events") or [])
+        input_tokens = int(usage.get("input_tokens", 0) or 0)
+        output_tokens = int(usage.get("output_tokens", 0) or 0)
+        total_tokens = int(usage.get("total_tokens", input_tokens + output_tokens) or (input_tokens + output_tokens))
+        live_output_tokens = 0
+        if include_live and self._busy and self._current_stream_text:
+            live_output_tokens = lz._estimate_tokens(self._current_stream_text)
             target = None
-            for ev in reversed(usage.get("events", []) or []):
+            for ev in reversed(events):
                 if self._active_token_event_ts is not None and float(ev.get("ts", 0) or 0) == float(self._active_token_event_ts):
                     target = ev
                     break
             if target is not None:
-                out = max(0, out - int(target.get("output_tokens", 0) or 0) + live_out)
-        total = inp + out
-        mode = str(usage.get("mode") or "estimate_chars_div_2_5").strip()
-        prefix = "会话 Tokens"
-        if mode == "provider_usage":
-            prefix += "（真实）"
-        elif mode == "mixed_provider_and_estimate":
-            prefix += "（部分真实）"
+                output_tokens = max(0, output_tokens - int(target.get("output_tokens", 0) or 0) + live_output_tokens)
+                total_tokens = input_tokens + output_tokens
+        return {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": total_tokens,
+            "turns": int(usage.get("turns", 0) or 0),
+            "mode": str(usage.get("mode") or "estimate_chars_div_2_5").strip(),
+            "channel_label": str(
+                session.get("channel_label")
+                or usage.get("channel_label")
+                or lz._usage_channel_label(session.get("channel_id") or usage.get("channel_id") or "launcher")
+            ).strip(),
+            "live_output_tokens": live_output_tokens,
+        }
+
+    def _refresh_session_mode_label(self):
+        label = getattr(self, "session_mode_label", None)
+        if label is None:
+            return
+        current = self.current_session or {}
+        pid = current.get("process_pid")
+        if pid:
+            label.setText(f"当前会话：进程 {pid}")
         else:
-            prefix += "（估算）"
-        self.token_label.setText(f"{prefix}: 入 {inp} / 出 {out} / 总 {total}")
+            label.setText("当前会话：新进程，尚未发送消息")
 
     def _on_scroll_changed(self, value: int):
         bar = self.scroll.verticalScrollBar()

@@ -1,4 +1,5 @@
 """GenericAgent 启动器 - 现代化中文前端"""
+import html
 import os, sys, json, subprocess, threading, queue, uuid, time, re
 from datetime import datetime
 from urllib.parse import urlparse
@@ -19,11 +20,24 @@ except ImportError:
 
 from PIL import Image
 
+try:
+    import markdown as _markdown
+except Exception:
+    _markdown = None
+
+try:
+    from tkhtmlview import HTMLLabel
+except Exception:
+    HTMLLabel = None
+
 REPO_URL = "https://github.com/lsdefine/GenericAgent"
 APP_DIR = os.path.dirname(os.path.abspath(sys.argv[0]))
 CONFIG_PATH = os.path.join(APP_DIR, "launcher_config.json")
 WX_BOT_API = "https://ilinkai.weixin.qq.com"
 WX_TOKEN_PATH = os.path.join(os.path.expanduser("~"), ".wxbot", "token.json")
+LEGACY_RESTORE_VERSION = 3
+TOKEN_ESTIMATE_DIVISOR = 2.5
+TOKEN_USAGE_VERSION = 1
 
 
 def _bridge_script_path():
@@ -33,6 +47,14 @@ def _bridge_script_path():
     else:
         base = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(base, "bridge.py")
+
+
+def _qt_chat_command(agent_dir):
+    target = os.path.abspath(agent_dir)
+    if getattr(sys, "frozen", False):
+        return [sys.executable, "--qt-chat", target]
+    py = _find_system_python() or sys.executable
+    return [py, os.path.abspath(__file__), "--qt-chat", target]
 
 
 def _find_system_python():
@@ -362,21 +384,35 @@ def sessions_dir(agent_dir):
     return d
 
 
+def _canon_path(path):
+    raw = str(path or "").strip()
+    if not raw:
+        return ""
+    try:
+        return os.path.normcase(os.path.abspath(os.path.normpath(raw)))
+    except Exception:
+        return os.path.normcase(os.path.normpath(raw))
+
+
 def list_sessions(agent_dir):
     """返回按 置顶/更新时间 排序的会话元信息列表。"""
     d = sessions_dir(agent_dir)
     out = []
     for fn in os.listdir(d):
-        if not fn.endswith(".json"): continue
+        if not fn.endswith(".json") or fn.startswith("."):
+            continue
         fp = os.path.join(d, fn)
         try:
             with open(fp, "r", encoding="utf-8") as f:
                 data = json.load(f)
+            if not isinstance(data, dict):
+                continue
             out.append({
                 "id": data.get("id") or fn[:-5],
                 "title": data.get("title") or "(未命名)",
                 "updated_at": data.get("updated_at", 0),
                 "pinned": bool(data.get("pinned", False)),
+                "imported_from": _canon_path(data.get("imported_from")),
                 "path": fp,
             })
         except Exception:
@@ -389,11 +425,19 @@ def load_session(agent_dir, sid):
     fp = os.path.join(sessions_dir(agent_dir), f"{sid}.json")
     if not os.path.isfile(fp): return None
     with open(fp, "r", encoding="utf-8") as f:
-        return json.load(f)
+        data = json.load(f)
+    if not isinstance(data, dict):
+        return None
+    _normalize_session_paths_inplace(data)
+    _normalize_token_usage_inplace(data)
+    return data
 
 
-def save_session(agent_dir, session):
-    session["updated_at"] = time.time()
+def save_session(agent_dir, session, *, touch=True):
+    _normalize_session_paths_inplace(session)
+    _normalize_token_usage_inplace(session)
+    if touch:
+        session["updated_at"] = time.time()
     fp = os.path.join(sessions_dir(agent_dir), f"{session['id']}.json")
     with open(fp, "w", encoding="utf-8") as f:
         json.dump(session, f, ensure_ascii=False, indent=2)
@@ -415,7 +459,7 @@ def load_import_blacklist(agent_dir):
     if not os.path.isfile(fp): return set()
     try:
         with open(fp, "r", encoding="utf-8") as f:
-            return set(json.load(f) or [])
+            return {_canon_path(item) for item in (json.load(f) or []) if str(item or "").strip()}
     except Exception:
         return set()
 
@@ -423,8 +467,9 @@ def load_import_blacklist(agent_dir):
 def save_import_blacklist(agent_dir, items):
     fp = _blacklist_path(agent_dir)
     try:
+        normalized = sorted({_canon_path(item) for item in (items or []) if str(item or "").strip()})
         with open(fp, "w", encoding="utf-8") as f:
-            json.dump(sorted(items), f, ensure_ascii=False, indent=2)
+            json.dump(normalized, f, ensure_ascii=False, indent=2)
     except Exception as e:
         print(f"[blacklist] {e}")
 
@@ -453,6 +498,240 @@ def _signature_is_tail(full_sig, tail_sig):
     if len(tail_sig) > len(full_sig):
         return False
     return full_sig[-len(tail_sig):] == tail_sig
+
+
+_MODEL_RESPONSES_RE = re.compile(r"model_responses_(\d+)\.txt$", re.IGNORECASE)
+
+
+def _session_pid_from_log_path(path):
+    match = _MODEL_RESPONSES_RE.search(str(path or ""))
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except Exception:
+        return None
+
+
+def _official_log_path(agent_dir, process_pid):
+    if not agent_dir or not process_pid:
+        return ""
+    return _canon_path(os.path.join(
+        agent_dir, "temp", "model_responses", f"model_responses_{int(process_pid)}.txt"
+    ))
+
+
+def _session_known_official_paths(data):
+    if not isinstance(data, dict):
+        return set()
+    paths = set()
+    for raw in (
+        data.get("imported_from"),
+        data.get("official_log_path"),
+        data.get("restored_from_official"),
+    ):
+        path = _canon_path(raw)
+        if path:
+            paths.add(path)
+    return paths
+
+
+def _is_under_dir(path, root):
+    try:
+        path_norm = os.path.normcase(os.path.abspath(path))
+        root_norm = os.path.normcase(os.path.abspath(root))
+    except Exception:
+        return False
+    return path_norm == root_norm or path_norm.startswith(root_norm + os.sep)
+
+
+_FILE_TAG_RE = re.compile(r"\[FILE:([^\]]+)\]")
+
+
+def imported_session_needs_refresh(data, log_mtime=0):
+    if legacy_session_needs_refresh(data):
+        return True
+    if not data or not data.get("imported_from"):
+        return False
+    try:
+        known_mtime = float(data.get("official_log_mtime", 0) or 0)
+    except Exception:
+        known_mtime = 0
+    if not log_mtime:
+        return False
+    return log_mtime > known_mtime + 1
+
+
+def _same_session_source(a, b):
+    aa = _canon_path(a)
+    bb = _canon_path(b)
+    return bool(aa and bb and aa == bb)
+
+
+def _estimate_tokens(text):
+    try:
+        return int(len(str(text or "")) / TOKEN_ESTIMATE_DIVISOR)
+    except Exception:
+        return 0
+
+
+def _usage_channel_label(channel_id):
+    cid = str(channel_id or "").strip().lower()
+    if cid == "launcher":
+        return "启动器"
+    if cid in ("official", "official_import", "unknown"):
+        return "官方导入"
+    spec = COMM_CHANNEL_INDEX.get(cid)
+    if spec:
+        return spec.get("label", cid)
+    return cid or "未知"
+
+
+def _usage_mode_from_sources(sources):
+    normalized = {
+        str(item or "estimate").strip().lower() or "estimate"
+        for item in (sources or [])
+    }
+    if not normalized:
+        return "estimate_chars_div_2_5"
+    if normalized == {"provider"}:
+        return "provider_usage"
+    if "provider" in normalized:
+        return "mixed_provider_and_estimate"
+    return "estimate_chars_div_2_5"
+
+
+def _usage_mode_label(mode):
+    mode = str(mode or "estimate_chars_div_2_5").strip().lower()
+    if mode == "provider_usage":
+        return "真实"
+    if mode == "mixed_provider_and_estimate":
+        return "混合"
+    return "估算"
+
+
+def _fallback_token_events_from_bubbles(bubbles, base_ts=0, channel_id="unknown", model_name=""):
+    events = []
+    ts = float(base_ts or time.time())
+    for bubble in bubbles or []:
+        role = bubble.get("role")
+        tokens = _estimate_tokens(bubble.get("text", ""))
+        if role == "user":
+            events.append({
+                "ts": ts + len(events),
+                "input_tokens": tokens,
+                "output_tokens": 0,
+                "total_tokens": tokens,
+                "channel_id": channel_id,
+                "model": model_name,
+            })
+            continue
+        if role == "assistant":
+            if events:
+                last = events[-1]
+                if int(last.get("output_tokens", 0) or 0) == 0:
+                    last["output_tokens"] = tokens
+                    last["total_tokens"] = int(last.get("input_tokens", 0) or 0) + tokens
+                    continue
+            events.append({
+                "ts": ts + len(events),
+                "input_tokens": 0,
+                "output_tokens": tokens,
+                "total_tokens": tokens,
+                "channel_id": channel_id,
+                "model": model_name,
+            })
+    return events
+
+
+def _normalize_token_usage_inplace(session):
+    if not isinstance(session, dict):
+        return session
+    default_channel = str(
+        session.get("channel_id")
+        or ("launcher" if not session.get("imported_from") else "official")
+    ).strip().lower()
+    usage = session.get("token_usage")
+    if not isinstance(usage, dict):
+        usage = {}
+    events = usage.get("events")
+    if not isinstance(events, list):
+        events = []
+
+    normalized_events = []
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+        try:
+            ts = float(ev.get("ts", session.get("updated_at", time.time())) or time.time())
+        except Exception:
+            ts = time.time()
+        inp = int(ev.get("input_tokens", 0) or 0)
+        out = int(ev.get("output_tokens", 0) or 0)
+        normalized_events.append({
+            "ts": ts,
+            "input_tokens": inp,
+            "output_tokens": out,
+            "total_tokens": int(ev.get("total_tokens", inp + out) or (inp + out)),
+            "channel_id": str(ev.get("channel_id") or default_channel).strip().lower(),
+            "model": str(ev.get("model") or "").strip(),
+            "usage_source": str(ev.get("usage_source") or "estimate").strip().lower() or "estimate",
+            "cached_tokens": int(ev.get("cached_tokens", 0) or 0),
+            "cache_creation_input_tokens": int(ev.get("cache_creation_input_tokens", 0) or 0),
+            "cache_read_input_tokens": int(ev.get("cache_read_input_tokens", 0) or 0),
+            "api_calls": int(ev.get("api_calls", 0) or 0),
+        })
+
+    if not normalized_events:
+        normalized_events = _fallback_token_events_from_bubbles(
+            session.get("bubbles") or [],
+            base_ts=session.get("created_at") or session.get("updated_at") or time.time(),
+            channel_id=default_channel,
+            model_name=str(usage.get("last_model") or "").strip(),
+        )
+
+    input_tokens = sum(int(ev.get("input_tokens", 0) or 0) for ev in normalized_events)
+    output_tokens = sum(int(ev.get("output_tokens", 0) or 0) for ev in normalized_events)
+    sources = {str(ev.get("usage_source") or "estimate").strip().lower() or "estimate" for ev in normalized_events}
+    if sources == {"provider"}:
+        mode = "provider_usage"
+    elif "provider" in sources:
+        mode = "mixed_provider_and_estimate"
+    else:
+        mode = "estimate_chars_div_2_5"
+
+    usage = {
+        "version": TOKEN_USAGE_VERSION,
+        "mode": mode,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": input_tokens + output_tokens,
+        "turns": sum(1 for ev in normalized_events if int(ev.get("input_tokens", 0) or 0) > 0),
+        "events": normalized_events,
+        "channel_id": default_channel,
+        "channel_label": _usage_channel_label(default_channel),
+        "last_model": str(usage.get("last_model") or "").strip(),
+        "api_calls": sum(int(ev.get("api_calls", 0) or 0) for ev in normalized_events),
+    }
+    session["channel_id"] = default_channel
+    session["channel_label"] = _usage_channel_label(default_channel)
+    session["token_usage"] = usage
+    return session
+
+
+def _normalize_session_paths_inplace(session):
+    if not isinstance(session, dict):
+        return session
+    for key in ("imported_from", "official_log_path"):
+        if session.get(key):
+            session[key] = _canon_path(session.get(key))
+    legacy_restored = session.pop("restored_from_official", "")
+    if session.get("imported_from"):
+        source = (legacy_restored
+                  or session.get("official_log_path")
+                  or session.get("imported_from"))
+        session["official_log_path"] = _canon_path(source)
+    return session
 
 
 # ---------- mykey.py 解析 / 生成 ----------
@@ -585,6 +864,18 @@ COMM_CHANNEL_SPECS = [
 ]
 
 COMM_CHANNEL_INDEX = {spec["id"]: spec for spec in COMM_CHANNEL_SPECS}
+
+_CHANNEL_START_RE = re.compile(
+    r"^====\s+(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s+start\s+([a-z0-9_]+)\s+====$",
+    re.IGNORECASE,
+)
+_CHANNEL_MESSAGE_PATTERNS = {
+    "wechat": re.compile(r"^\[WX\]\s+收到:\s+(.*)$"),
+    "qq": re.compile(r"^\[QQ\]\s+message from .*?:\s+(.*)$"),
+    "feishu": re.compile(r"^收到消息\s+\[[^\]]+\]\s+\([^)]*\):\s+(.*)$"),
+    "wecom": re.compile(r"^\[WeCom\]\s+message from .*?:\s+(.*)$"),
+    "dingtalk": re.compile(r"^\[DingTalk\]\s+message from .*?:\s+(.*)$"),
+}
 
 
 def _looks_like_config_name(name):
@@ -963,18 +1254,10 @@ def fold_turns(text):
 
 
 def legacy_session_needs_refresh(data):
-    """旧版导入会话只保存了摘要气泡，需要重新按 richer parser 导入一次。"""
+    """旧版导入会话解析版本落后，需要重新导入。"""
     if not data or not data.get("imported_from"):
         return False
-    if int(data.get("legacy_restore_version", 0) or 0) >= 2:
-        return False
-    for bubble in data.get("bubbles", []):
-        if bubble.get("role") != "assistant":
-            continue
-        text = bubble.get("text", "") or ""
-        if "LLM Running (Turn " in text:
-            return False
-    return True
+    return int(data.get("legacy_restore_version", 0) or 0) < LEGACY_RESTORE_VERSION
 
 
 class FoldSection(ctk.CTkFrame):
@@ -1048,6 +1331,93 @@ def _normalize_markup(text):
         lambda m: f"\n```file_content\n{m.group(1).strip()}\n```\n", text)
     # 3×换行压缩
     return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+def _assistant_visible_markup(text):
+    """把内部摘要从可见内容中剥离，只保留真正给用户看的回复。"""
+    raw = text or ""
+    summaries = [m.strip() for m in _RE_SUMMARY.findall(raw) if m.strip()]
+    visible = _RE_SUMMARY.sub("", raw)
+    visible = _normalize_markup(visible)
+    visible = _FILE_TAG_RE.sub(r"\1", visible).strip()
+    if visible:
+        return visible
+    return "\n\n".join(summaries).strip()
+
+
+def _md_to_html(text):
+    source = (text or "").strip()
+    if not source:
+        return "<p>…</p>"
+    if _markdown is not None:
+        try:
+            return _markdown.markdown(
+                source,
+                extensions=["fenced_code", "tables", "nl2br", "sane_lists"],
+            )
+        except Exception:
+            pass
+
+    html_parts, in_code, in_ul = [], False, False
+    for raw in source.split("\n"):
+        stripped = raw.strip()
+        if stripped.startswith("```"):
+            if in_code:
+                html_parts.append("</code></pre>")
+            else:
+                html_parts.append("<pre><code>")
+            in_code = not in_code
+            continue
+        if in_code:
+            html_parts.append(html.escape(raw))
+            continue
+
+        line = html.escape(raw)
+        line = re.sub(r"`([^`]+)`", r"<code>\1</code>", line)
+        line = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", line)
+        line = re.sub(r"\*(.+?)\*", r"<i>\1</i>", line)
+        line = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r'<a href="\2">\1</a>', line)
+
+        if re.match(r"^#{1,6}\s", stripped):
+            lvl = len(stripped.split()[0])
+            line = f"<h{min(lvl, 6)}>{html.escape(stripped[lvl:].strip())}</h{min(lvl, 6)}>"
+        elif re.match(r"^-{3,}$|^_{3,}$|^\*{3,}$", stripped):
+            line = "<hr>"
+        elif stripped.startswith(">"):
+            if in_ul:
+                html_parts.append("</ul>")
+                in_ul = False
+            line = f"<blockquote>{html.escape(stripped[1:].strip())}</blockquote>"
+        elif re.match(r"^\s*[-*+]\s", raw):
+            content = re.sub(r"^\s*[-*+]\s", "", raw)
+            if not in_ul:
+                html_parts.append("<ul>")
+                in_ul = True
+            line = f"<li>{html.escape(content)}</li>"
+        else:
+            if in_ul:
+                html_parts.append("</ul>")
+                in_ul = False
+            line = f"<p>{line}</p>" if stripped else ""
+
+        html_parts.append(line)
+
+    if in_code:
+        html_parts.append("</code></pre>")
+    if in_ul:
+        html_parts.append("</ul>")
+    return "\n".join(part for part in html_parts if part)
+
+
+def _strip_turn_marker(text):
+    return _TURN_RE.sub("", text or "", count=1).strip()
+
+
+def _turn_marker_title(text):
+    m = _TURN_RE.search(text or "")
+    if not m:
+        return ""
+    return m.group(1).strip("*").strip()
 
 
 def render_rich(parent, text, wraplength,
@@ -1175,8 +1545,14 @@ class Launcher(ctk.CTk):
         self._state_request_seq = 0
         self._abort_requested = False
         self._current_stream_text = ""
+        self._active_token_event_ts = None
         self._current_settings_panel = None
         self._channel_procs = {}
+        self.current_session = None
+        self._legacy_refresh_job = None
+        self._pending_official_restore = None
+        self._qt_chat_proc = None
+        self._qt_chat_waiter = None
 
         self.container = ctk.CTkFrame(self, fg_color="transparent")
         self.container.pack(fill="both", expand=True, padx=36, pady=28)
@@ -1193,6 +1569,66 @@ class Launcher(ctk.CTk):
     def clear(self):
         for w in self.container.winfo_children():
             w.destroy()
+
+    def _visible_session(self):
+        return self.current_session
+
+    def _is_review_mode(self):
+        return False
+
+    def _session_source_label(self, data):
+        if not isinstance(data, dict):
+            return "历史"
+        if data.get("session_source_label"):
+            return str(data.get("session_source_label"))
+        if data.get("imported_from"):
+            return "官方导入"
+        return "启动器"
+
+    def _refresh_session_mode_label(self):
+        label = getattr(self, "session_mode_label", None)
+        if label is None or not label.winfo_exists():
+            return
+        current = self.current_session or {}
+        pid = current.get("process_pid")
+        if pid:
+            label.configure(
+                text=f"当前会话：进程 {pid}",
+                text_color=COLOR_MUTED,
+            )
+        else:
+            label.configure(
+                text="当前会话：新进程，尚未发送消息",
+                text_color=COLOR_MUTED,
+            )
+
+    def _session_official_log(self, data):
+        if not isinstance(data, dict):
+            return ""
+        candidates = [
+            _canon_path(data.get("imported_from")),
+            _canon_path(data.get("official_log_path")),
+        ]
+        for path in candidates:
+            if path and os.path.isfile(path):
+                return path
+        for path in candidates:
+            if path:
+                return path
+        return ""
+
+    def _session_external_paths(self, data):
+        if not isinstance(data, dict):
+            return []
+        agent_dir = self.agent_dir.get().strip()
+        model_root = os.path.join(agent_dir, "temp", "model_responses")
+        paths = []
+        for path in _session_known_official_paths(data):
+            if not path or path in paths:
+                continue
+            if _is_under_dir(path, model_root):
+                paths.append(path)
+        return paths
 
     def _normalize_appearance_mode(self, mode):
         return "light" if str(mode).strip().lower() == "light" else "dark"
@@ -1573,6 +2009,22 @@ class Launcher(ctk.CTk):
                         messagebox.showerror("错误", str(e))))
 
     # ---------- 载入内核 ----------
+    def _open_qt_chat_window(self, path):
+        if self._qt_chat_proc is not None and self._qt_chat_proc.poll() is None:
+            messagebox.showinfo("Qt 聊天", "Qt 聊天窗口已经打开。")
+            return True
+        try:
+            cmd = _qt_chat_command(path)
+            self._qt_chat_proc = subprocess.Popen(
+                cmd,
+                cwd=APP_DIR if not getattr(sys, "frozen", False) else None,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" and getattr(sys, "frozen", False) else 0,
+            )
+        except Exception as e:
+            messagebox.showerror("Qt 聊天窗口启动失败", str(e))
+            return False
+        return True
+
     def launch_kernel(self):
         path = self.agent_dir.get().strip()
         if not is_valid_agent_dir(path):
@@ -1683,7 +2135,11 @@ class Launcher(ctk.CTk):
                 self._api_setup_reason = ""
                 threading.Thread(target=self._event_reader,
                                   args=(proc,), daemon=True).start()
-                ui(lambda: (self.show_chat(), self.after(300, self._start_autostart_channels)))
+                ui(lambda: (
+                    self.show_chat(),
+                    self.after(150, self._continue_pending_official_restore),
+                    self.after(300, self._start_autostart_channels),
+                ))
         except Exception as e:
             import traceback
             tb = traceback.format_exc()
@@ -1711,6 +2167,7 @@ class Launcher(ctk.CTk):
             self._stream_update(ev.get("text", ""))
         elif et == "done":
             final_text = ev.get("text", "")
+            provider_usage = ev.get("usage") if isinstance(ev.get("usage"), dict) else None
             if self._abort_requested:
                 final_text = self._format_interrupted_text(final_text)
             self._stream_done(final_text)
@@ -1722,8 +2179,50 @@ class Launcher(ctk.CTk):
                 session_id = self.current_session.get("id")
                 self.current_session["bubbles"].append(
                     {"role": "assistant", "text": final_text})
+                self._ensure_session_usage_metadata(self.current_session)
+                usage = self.current_session.get("token_usage") or {}
+                events = usage.get("events") or []
+                output_tokens = _estimate_tokens(final_text)
+                target = None
+                active_ts = getattr(self, "_active_token_event_ts", None)
+                for ev_item in reversed(events):
+                    if active_ts is not None and float(ev_item.get("ts", 0) or 0) == float(active_ts):
+                        target = ev_item
+                        break
+                    if int(ev_item.get("output_tokens", 0) or 0) == 0:
+                        target = ev_item
+                        break
+                if target is None:
+                    target = {
+                        "ts": time.time(),
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "total_tokens": 0,
+                        "channel_id": str(self.current_session.get("channel_id") or "launcher").strip().lower(),
+                        "model": self._current_llm_name(),
+                    }
+                    events.append(target)
+                if provider_usage:
+                    target["input_tokens"] = int(provider_usage.get("input_tokens", target.get("input_tokens", 0)) or 0)
+                    target["output_tokens"] = int(provider_usage.get("output_tokens", output_tokens) or 0)
+                    target["total_tokens"] = int(provider_usage.get("total_tokens", target["input_tokens"] + target["output_tokens"]) or (target["input_tokens"] + target["output_tokens"]))
+                    target["usage_source"] = "provider"
+                    target["cached_tokens"] = int(provider_usage.get("cached_tokens", 0) or 0)
+                    target["cache_creation_input_tokens"] = int(provider_usage.get("cache_creation_input_tokens", 0) or 0)
+                    target["cache_read_input_tokens"] = int(provider_usage.get("cache_read_input_tokens", 0) or 0)
+                    target["api_calls"] = int(provider_usage.get("api_calls", 0) or 0)
+                else:
+                    target["output_tokens"] = output_tokens
+                    target["total_tokens"] = int(target.get("input_tokens", 0) or 0) + output_tokens
+                    target["usage_source"] = str(target.get("usage_source") or "estimate")
+                target["model"] = target.get("model") or self._current_llm_name()
+                usage["events"] = events
+                usage["last_model"] = target.get("model") or ""
+                self.current_session["token_usage"] = usage
+                self._active_token_event_ts = None
                 self._persist_current_session()
                 self._request_backend_state(session_id)
+                self._refresh_session_token_views()
         elif et == "aborted":
             self._abort_requested = True
             try:
@@ -1751,6 +2250,8 @@ class Launcher(ctk.CTk):
             self._auto_import_legacy()
         elif et == "legacy_restored":
             self._on_legacy_restored(ev)
+        elif et == "official_restored":
+            self._on_official_restored(ev)
         elif et == "llm_switched":
             self.llms = ev.get("llms", self.llms)
             self._refresh_llm_selector()
@@ -1763,10 +2264,14 @@ class Launcher(ctk.CTk):
 
     def _send_cmd(self, obj):
         try:
+            if getattr(self, "bridge_proc", None) is None or self.bridge_proc.poll() is not None:
+                raise RuntimeError("内核进程未运行")
             self.bridge_proc.stdin.write(json.dumps(obj, ensure_ascii=False) + "\n")
             self.bridge_proc.stdin.flush()
+            return True
         except Exception as e:
             messagebox.showerror("通信失败", f"内核管道错误：{e}")
+            return False
 
     def _request_backend_state(self, session_id=None):
         if not session_id:
@@ -1798,6 +2303,138 @@ class Launcher(ctk.CTk):
         if self.current_session and self.current_session.get("id") == session_id:
             self.current_session = target
         self._persist_session_data(target)
+
+    def _schedule_legacy_refresh(self, delay_ms=12000):
+        job = getattr(self, "_legacy_refresh_job", None)
+        if job:
+            try:
+                self.after_cancel(job)
+            except Exception:
+                pass
+        self._legacy_refresh_job = self.after(delay_ms, self._poll_legacy_sessions)
+
+    def _poll_legacy_sessions(self):
+        self._legacy_refresh_job = None
+        proc = getattr(self, "bridge_proc", None)
+        if proc is not None and proc.poll() is None:
+            try:
+                self._send_cmd({"cmd": "list_legacy"})
+            except Exception:
+                pass
+        self._schedule_legacy_refresh()
+
+    def _refresh_official_sessions(self):
+        if getattr(self, "bridge_proc", None) is None or self.bridge_proc.poll() is not None:
+            messagebox.showinfo("无法刷新", "当前内核未运行，暂时不能扫描官方会话。")
+            return
+        try:
+            save_import_blacklist(self.agent_dir.get().strip(), set())
+        except Exception as e:
+            messagebox.showerror("刷新失败", f"无法清空黑名单：{e}")
+            return
+        self._pending_import_queue = []
+        self._pending_legacy_meta = None
+        self._importing = False
+        self._legacy_items = []
+        self._send_cmd({"cmd": "list_legacy"})
+
+    def _continue_pending_official_restore(self):
+        pending = getattr(self, "_pending_official_restore", None) or {}
+        fp = pending.get("file", "")
+        if not fp:
+            return
+        if not os.path.isfile(fp):
+            self._pending_official_restore = None
+            messagebox.showerror("恢复失败", f"未找到官方日志：\n{fp}")
+            return
+        self._send_cmd({"cmd": "restore_official", "file": fp})
+
+    def _stop_bridge_process(self):
+        try:
+            if getattr(self, "bridge_proc", None) and self.bridge_proc.poll() is None:
+                try:
+                    self.bridge_proc.stdin.write('{"cmd":"quit"}\n')
+                    self.bridge_proc.stdin.flush()
+                except Exception:
+                    pass
+                try:
+                    self.bridge_proc.terminate()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        self.bridge_proc = None
+
+    def _delete_session_external_state(self, data, *, blacklist_on_fail=True):
+        paths = self._session_external_paths(data)
+        if not paths:
+            return []
+        agent_dir = self.agent_dir.get().strip()
+        blacklist = load_import_blacklist(agent_dir)
+        failed = []
+        for path in paths:
+            try:
+                if os.path.isfile(path):
+                    os.remove(path)
+                blacklist.discard(path)
+            except Exception:
+                failed.append(path)
+                if blacklist_on_fail:
+                    blacklist.add(path)
+        try:
+            save_import_blacklist(agent_dir, blacklist)
+        except Exception:
+            pass
+        return failed
+
+    def _restore_imported_session(self, data):
+        fp = self._session_official_log(data)
+        if not fp:
+            messagebox.showerror("无法恢复", "这条官方导入历史没有对应的官方日志引用。")
+            return
+        if not os.path.isfile(fp):
+            messagebox.showerror("无法恢复", f"对应的官方日志不存在：\n{fp}")
+            return
+        self._pending_official_restore = {
+            "file": fp,
+            "source_session": json.loads(json.dumps(data, ensure_ascii=False)),
+        }
+        self._restart_bridge()
+
+    def _bind_session_to_current_bridge(self, session):
+        if not isinstance(session, dict):
+            return session
+        process_pid = getattr(getattr(self, "bridge_proc", None), "pid", None)
+        session["process_pid"] = process_pid
+        if not session.get("imported_from"):
+            session["official_log_path"] = _official_log_path(self.agent_dir.get(), process_pid)
+        return session
+
+    def _on_official_restored(self, ev):
+        pending = getattr(self, "_pending_official_restore", None) or {}
+        self._pending_official_restore = None
+        err = (ev.get("error") or "").strip()
+        if err:
+            messagebox.showerror("恢复失败", err)
+            return
+        source = pending.get("source_session") or {}
+        file_path = ev.get("file") or self._session_official_log(source)
+        self.current_session = dict(source)
+        self.current_session["updated_at"] = time.time()
+        self._bind_session_to_current_bridge(self.current_session)
+        self.current_session["official_log_path"] = file_path
+        self.current_session.setdefault("session_source_label", "官方导入")
+        self.current_session.setdefault("backend_history", [])
+        self.current_session.setdefault("agent_history", [])
+        self._ensure_session_usage_metadata(self.current_session)
+        self._persist_current_session()
+        self._request_backend_state(self.current_session.get("id"))
+        self._reset_chat_area(greeting=None)
+        for bubble in self.current_session.get("bubbles", []):
+            self._add_bubble(bubble.get("role", "assistant"),
+                             bubble.get("text", ""), final=True)
+        self._refresh_sessions()
+        self._refresh_session_mode_label()
 
     def _finish_generation_ui(self):
         try:
@@ -1833,12 +2470,12 @@ class Launcher(ctk.CTk):
         self.container.pack(fill="both", expand=True, padx=0, pady=0)
 
         # 会话状态（仅首次进入聊天时初始化；重启/切换视图保留）
-        if not hasattr(self, "current_session"):
-            self.current_session = None
         self._bubble_labels = []
         self._bubble_rows = []
+        self._assistant_widgets = []
         self._fold_sections = []
         self._current_assistant_content = None
+        self._current_assistant_widget = None
         self._current_stream_text = ""
         if not hasattr(self, "_legacy_items"): self._legacy_items = []
         if not hasattr(self, "_pending_import_queue"): self._pending_import_queue = []
@@ -1875,11 +2512,13 @@ class Launcher(ctk.CTk):
             self._idle_thread_started = True
             threading.Thread(target=self._idle_monitor, daemon=True).start()
 
-        # 若已有当前会话，回放气泡
-        if self.current_session:
-            for b in self.current_session.get("bubbles", []):
+        # 若已有当前可见会话，回放气泡
+        visible = self._visible_session()
+        if visible:
+            for b in visible.get("bubbles", []):
                 self._add_bubble(b.get("role", "assistant"),
-                                  b.get("text", ""), final=True)
+                                 b.get("text", ""), final=True)
+        self._refresh_session_mode_label()
 
     def _enter_api_setup_mode(self, reason=None):
         self._setup_mode_no_kernel = True
@@ -1967,6 +2606,12 @@ class Launcher(ctk.CTk):
                           fg_color="transparent", hover_color=COLOR_CARD,
                           text_color=COLOR_TEXT_SOFT,
                           command=self._open_search).pack(padx=10, pady=4)
+            ctk.CTkButton(self.sidebar, text="↻", width=36, height=36,
+                          font=("Segoe UI Symbol", 13),
+                          corner_radius=8,
+                          fg_color="transparent", hover_color=COLOR_CARD,
+                          text_color=COLOR_TEXT_SOFT,
+                          command=self._refresh_official_sessions).pack(padx=10, pady=4)
         else:
             new_row = ctk.CTkFrame(self.sidebar, fg_color="transparent")
             new_row.pack(fill="x", padx=14, pady=(0, 6))
@@ -1982,6 +2627,14 @@ class Launcher(ctk.CTk):
                           fg_color="transparent", hover_color=COLOR_FIELD_ALT,
                           text_color=COLOR_TEXT_SOFT,
                           command=self._open_search).pack(
+                side="left", fill="x", expand=True)
+            refresh_row = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+            refresh_row.pack(fill="x", padx=14, pady=(0, 10))
+            ctk.CTkButton(refresh_row, text="↻  刷新官方会话", anchor="w",
+                          height=32, font=FONT_BODY, corner_radius=8,
+                          fg_color="transparent", hover_color=COLOR_FIELD_ALT,
+                          text_color=COLOR_TEXT_SOFT,
+                          command=self._refresh_official_sessions).pack(
                 side="left", fill="x", expand=True)
             # 分组标题
             ctk.CTkLabel(self.sidebar, text="更早", font=FONT_SMALL,
@@ -2281,6 +2934,19 @@ class Launcher(ctk.CTk):
                                         command=self._toggle_appearance_mode)
         self.theme_btn.pack(side="right", padx=(0, 2))
         self._refresh_theme_button()
+        self.qt_chat_btn = ctk.CTkButton(
+            top,
+            text="Qt 聊天",
+            width=86,
+            height=34,
+            font=FONT_SMALL,
+            corner_radius=8,
+            fg_color="transparent",
+            hover_color=COLOR_CARD,
+            text_color=COLOR_TEXT_SOFT,
+            command=self._open_qt_chat_from_chat,
+        )
+        self.qt_chat_btn.pack(side="right", padx=(0, 4))
 
         # LLM 列表
         self.llm_var = ctk.StringVar(value="(无LLM)")
@@ -2293,9 +2959,11 @@ class Launcher(ctk.CTk):
         self._msg_row = 0
         self._bubble_labels = []
         self._bubble_rows = []
+        self._assistant_widgets = []
         self._fold_sections = []
         self._current_assistant_label = None
         self._current_assistant_content = None
+        self._current_assistant_widget = None
         self._live_label = None
         self._stream_frozen = 0
         self._pending_stream_text = None
@@ -2337,6 +3005,40 @@ class Launcher(ctk.CTk):
                                        hover_color=COLOR_ACCENT_HOVER,
                                        command=self._send)
         self.send_btn.pack(side="right")
+
+        self.session_token_tree_label = ctk.CTkLabel(
+            inner,
+            text="Token 估算\n└ 暂无数据",
+            font=("Consolas", 11),
+            text_color=COLOR_MUTED,
+            anchor="w",
+            justify="left",
+        )
+        self.session_token_tree_label.pack(fill="x", padx=12, pady=(0, 4))
+
+        self.session_mode_label = ctk.CTkLabel(
+            inner,
+            text="",
+            font=FONT_SMALL,
+            text_color=COLOR_MUTED,
+            anchor="w",
+            justify="left",
+        )
+        self.session_mode_label.pack(fill="x", padx=12, pady=(0, 8))
+        self._refresh_session_mode_label()
+        self._refresh_session_token_views()
+
+    def _open_qt_chat_from_chat(self):
+        path = self.agent_dir.get().strip()
+        if not is_valid_agent_dir(path):
+            messagebox.showerror("目录无效", "当前 GenericAgent 目录无效。")
+            return
+        if self.current_session is not None:
+            try:
+                self._persist_current_session()
+            except Exception:
+                pass
+        self._open_qt_chat_window(path)
 
     # ---------- 设置视图（替换主区） ----------
     SETTINGS_CATEGORIES = [
@@ -4005,33 +4707,416 @@ class Launcher(ctk.CTk):
                          justify="left", wraplength=620,
                          text_color=COLOR_TEXT).pack(side="left", fill="x", expand=True)
 
-    def _build_usage_panel(self, parent):
-        wrap = ctk.CTkFrame(parent, fg_color="transparent")
-        wrap.pack(fill="both", expand=True, pady=(12, 0))
+    def _current_llm_name(self):
+        for llm in (getattr(self, "llms", []) or []):
+            if llm.get("current"):
+                return str(llm.get("name") or "").strip()
+        value = str(getattr(getattr(self, "llm_var", None), "get", lambda: "")() or "").strip()
+        if "." in value:
+            return value.split(".", 1)[1].strip()
+        return value
 
-        ctk.CTkLabel(wrap, text="使用计数",
+    def _channel_log_runs(self, channel_id):
+        channel_id = str(channel_id or "").strip().lower()
+        pattern = _CHANNEL_MESSAGE_PATTERNS.get(channel_id)
+        if not pattern:
+            return []
+        agent_dir = self.agent_dir.get().strip()
+        log_path = os.path.join(agent_dir, "temp", "launcher_channels", f"{channel_id}.log")
+        if not os.path.isfile(log_path):
+            return []
+        try:
+            mtime = os.path.getmtime(log_path)
+        except Exception:
+            mtime = 0
+        cache = getattr(self, "_channel_log_runs_cache", {})
+        cached = cache.get(channel_id)
+        if cached and cached.get("path") == log_path and cached.get("mtime") == mtime:
+            return cached.get("runs", [])
+
+        runs = []
+        current = None
+        try:
+            lines = open(log_path, "r", encoding="utf-8", errors="replace").read().splitlines()
+        except Exception:
+            lines = []
+        for raw in lines:
+            line = raw.strip()
+            m = _CHANNEL_START_RE.match(line)
+            if m:
+                if current and current.get("messages"):
+                    runs.append(current)
+                try:
+                    ts = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S").timestamp()
+                except Exception:
+                    ts = 0
+                current = {"ts": ts, "messages": []}
+                continue
+            if current is None:
+                continue
+            hit = pattern.search(line)
+            if not hit:
+                continue
+            text = _normalize_session_text(hit.group(1))
+            if text:
+                current["messages"].append(text)
+        if current and current.get("messages"):
+            runs.append(current)
+
+        cache[channel_id] = {"path": log_path, "mtime": mtime, "runs": runs}
+        self._channel_log_runs_cache = cache
+        return runs
+
+    def _guess_session_channel(self, session):
+        if not isinstance(session, dict):
+            return "official"
+        existing = str(session.get("channel_id") or "").strip().lower()
+        if existing and existing not in ("official", "unknown", "official_import"):
+            return existing
+        if not session.get("imported_from"):
+            return "launcher"
+        signature = _session_user_signature(session.get("bubbles") or [])
+        if not signature:
+            return "official"
+        try:
+            target_ts = float(session.get("updated_at", 0) or 0)
+        except Exception:
+            target_ts = 0
+
+        best_channel = "official"
+        best_score = 0
+        for spec in COMM_CHANNEL_SPECS:
+            cid = spec["id"]
+            for run in self._channel_log_runs(cid):
+                msgs = tuple(run.get("messages") or ())
+                if not msgs:
+                    continue
+                score = 0
+                if msgs == signature:
+                    score = len(signature) + 10
+                elif _signature_is_tail(msgs, signature):
+                    score = len(signature) + 6
+                elif _signature_is_tail(signature, msgs):
+                    score = len(msgs) + 3
+                if not score:
+                    continue
+                if target_ts and run.get("ts"):
+                    delta = abs(float(run["ts"]) - target_ts)
+                    if delta <= 600:
+                        score += 4
+                    elif delta <= 3600:
+                        score += 2
+                if score > best_score:
+                    best_score = score
+                    best_channel = cid
+        return best_channel
+
+    def _ensure_session_usage_metadata(self, session):
+        if not isinstance(session, dict):
+            return False
+        before_channel = str(session.get("channel_id") or "").strip().lower()
+        before_usage = json.dumps(session.get("token_usage") or {}, ensure_ascii=False, sort_keys=True)
+        _normalize_token_usage_inplace(session)
+        guessed = self._guess_session_channel(session)
+        session["channel_id"] = guessed
+        session["channel_label"] = _usage_channel_label(guessed)
+        usage = session.get("token_usage") or {}
+        usage["channel_id"] = guessed
+        usage["channel_label"] = _usage_channel_label(guessed)
+        for ev in usage.get("events", []) or []:
+            if str(ev.get("channel_id") or "").strip().lower() in ("", "official", "unknown", "official_import"):
+                ev["channel_id"] = guessed
+        session["token_usage"] = usage
+        after_usage = json.dumps(session.get("token_usage") or {}, ensure_ascii=False, sort_keys=True)
+        return before_channel != guessed or before_usage != after_usage
+
+    def _session_token_summary(self, session=None, include_live=False):
+        session = session or self.current_session
+        if not isinstance(session, dict):
+            return {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
+                "live_output_tokens": 0,
+                "turns": 0,
+                "channel_label": "",
+                "mode": "estimate_chars_div_2_5",
+            }
+        self._ensure_session_usage_metadata(session)
+        usage = session.get("token_usage") or {}
+        live_output = 0
+        if include_live and session is self.current_session and getattr(self, "_busy", False):
+            live_output = _estimate_tokens(getattr(self, "_current_stream_text", "") or "")
+        input_tokens = int(usage.get("input_tokens", 0) or 0)
+        output_tokens = int(usage.get("output_tokens", 0) or 0)
+        return {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
+            "live_output_tokens": live_output,
+            "turns": int(usage.get("turns", 0) or 0),
+            "channel_label": str(session.get("channel_label") or usage.get("channel_label") or "").strip(),
+            "mode": str(usage.get("mode") or "estimate_chars_div_2_5").strip(),
+        }
+
+    def _refresh_session_token_views(self):
+        label = getattr(self, "session_token_tree_label", None)
+        if label is None or not label.winfo_exists():
+            return
+        summary = self._session_token_summary(include_live=True)
+        if summary["total_tokens"] == 0 and summary["live_output_tokens"] == 0:
+            label.configure(text="Token 估算\n└ 暂无数据")
+            return
+        last_line = (
+            f"└ 本轮流式 {summary['live_output_tokens']}"
+            if summary["live_output_tokens"] > 0
+            else f"└ 轮次 {summary['turns']}"
+        )
+        mode = summary.get("mode") or "estimate_chars_div_2_5"
+        if mode == "provider_usage":
+            title = "Token 计数（真实）"
+        elif mode == "mixed_provider_and_estimate":
+            title = "Token 计数（混合）"
+        else:
+            title = "Token 计数（估算）"
+        if summary["channel_label"]:
+            title += f" · {summary['channel_label']}"
+        label.configure(
+            text=(
+                f"{title}\n"
+                f"├ 输入 {summary['input_tokens']}\n"
+                f"├ 输出 {summary['output_tokens']}\n"
+                f"├ 总计 {summary['total_tokens']}\n"
+                f"{last_line}"
+            )
+        )
+
+    def _collect_usage_stats(self, lookback_days=7):
+        channel_stats = {}
+        day_stats = {}
+        now = time.time()
+        today_key = datetime.fromtimestamp(now).strftime("%Y-%m-%d")
+        lookback_cutoff = now - max(1, int(lookback_days)) * 86400
+        today_total = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "sources": set()}
+        recent_total = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "sources": set()}
+        all_total = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "sources": set()}
+
+        for meta in self._get_session_cache(force=True):
+            try:
+                session = load_session(self.agent_dir.get(), meta["id"])
+            except Exception:
+                session = None
+            if not session:
+                continue
+            changed = self._ensure_session_usage_metadata(session)
+            if changed:
+                self._persist_session_data(session)
+            usage = session.get("token_usage") or {}
+            channel_id = str(session.get("channel_id") or usage.get("channel_id") or "official").strip().lower()
+            channel_row = channel_stats.setdefault(channel_id, {
+                "channel_id": channel_id,
+                "label": _usage_channel_label(channel_id),
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
+                "turns": 0,
+                "sessions": set(),
+                "last_active": 0,
+                "sources": set(),
+            })
+            channel_row["sessions"].add(session.get("id"))
+            channel_row["last_active"] = max(channel_row["last_active"], float(session.get("updated_at", 0) or 0))
+
+            events = list(usage.get("events") or [])
+            if not events:
+                events = _fallback_token_events_from_bubbles(
+                    session.get("bubbles") or [],
+                    base_ts=session.get("updated_at") or session.get("created_at") or now,
+                    channel_id=channel_id,
+                    model_name=usage.get("last_model") or "",
+                )
+
+            for ev in events:
+                inp = int(ev.get("input_tokens", 0) or 0)
+                out = int(ev.get("output_tokens", 0) or 0)
+                total = int(ev.get("total_tokens", inp + out) or (inp + out))
+                try:
+                    ts = float(ev.get("ts", session.get("updated_at", now)) or now)
+                except Exception:
+                    ts = now
+                day_key = datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+                row = day_stats.setdefault(day_key, {
+                    "date": day_key,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "total_tokens": 0,
+                    "turns": 0,
+                    "channels": {},
+                    "sources": set(),
+                })
+                source = str(ev.get("usage_source") or "estimate").strip().lower() or "estimate"
+                row["input_tokens"] += inp
+                row["output_tokens"] += out
+                row["total_tokens"] += total
+                row["turns"] += 1 if inp > 0 else 0
+                row["channels"][channel_id] = row["channels"].get(channel_id, 0) + total
+                row["sources"].add(source)
+
+                channel_row["input_tokens"] += inp
+                channel_row["output_tokens"] += out
+                channel_row["total_tokens"] += total
+                channel_row["turns"] += 1 if inp > 0 else 0
+                channel_row["sources"].add(source)
+
+                all_total["input_tokens"] += inp
+                all_total["output_tokens"] += out
+                all_total["total_tokens"] += total
+                all_total["sources"].add(source)
+                if day_key == today_key:
+                    today_total["input_tokens"] += inp
+                    today_total["output_tokens"] += out
+                    today_total["total_tokens"] += total
+                    today_total["sources"].add(source)
+                if ts >= lookback_cutoff:
+                    recent_total["input_tokens"] += inp
+                    recent_total["output_tokens"] += out
+                    recent_total["total_tokens"] += total
+                    recent_total["sources"].add(source)
+
+        channels = sorted(
+            [
+                {
+                    **row,
+                    "sessions": len(row["sessions"]),
+                    "mode": _usage_mode_from_sources(row.get("sources")),
+                }
+                for row in channel_stats.values()
+            ],
+            key=lambda x: (x["total_tokens"], x["last_active"]),
+            reverse=True,
+        )
+        days = sorted(day_stats.values(), key=lambda x: x["date"], reverse=True)
+        for item in (today_total, recent_total, all_total):
+            item["mode"] = _usage_mode_from_sources(item.get("sources"))
+        for row in days:
+            row["mode"] = _usage_mode_from_sources(row.get("sources"))
+        return {
+            "today": today_total,
+            "recent": recent_total,
+            "all": all_total,
+            "channels": channels,
+            "days": days[: max(1, int(lookback_days))],
+        }
+
+    def _build_usage_panel(self, parent):
+        scroll = ctk.CTkScrollableFrame(parent, fg_color="transparent")
+        scroll.pack(fill="both", expand=True, pady=(12, 0))
+
+        ctk.CTkLabel(scroll, text="使用计数",
                      font=("Microsoft YaHei UI", 18, "bold"),
                      anchor="w").pack(fill="x", pady=(4, 6))
         ctk.CTkLabel(
-            wrap,
-            text=("这里后续计划展示 API 调用次数、消息条数、会话数量、最近活跃时间等统计信息。\n"
-                  "当前先保留占位，避免上传到 GitHub 时暴露未完成的杂项设置入口。"),
+            scroll,
+            text=("标注说明：真实 = 直接读取模型接口返回的 usage；估算 = 按字符数 / 2.5 回推；混合 = 同一统计范围里两者都有。\n"
+                  "旧会话、官方导入历史、以及不返回 usage 的渠道，仍可能只能显示估算。"),
             font=FONT_SUB, text_color=COLOR_MUTED, justify="left",
-            anchor="w", wraplength=720
+            anchor="w", wraplength=760
         ).pack(fill="x")
 
-        card = ctk.CTkFrame(wrap, fg_color=COLOR_CARD, corner_radius=12)
-        card.pack(fill="x", pady=(18, 0))
-        ctk.CTkLabel(card, text="功能占位",
+        stats = self._collect_usage_stats(lookback_days=7)
+
+        summary_row = ctk.CTkFrame(scroll, fg_color="transparent")
+        summary_row.pack(fill="x", pady=(18, 0))
+        for idx, (title, item) in enumerate((
+            ("今天", stats["today"]),
+            ("近 7 天", stats["recent"]),
+            ("累计", stats["all"]),
+        )):
+            card = ctk.CTkFrame(summary_row, fg_color=COLOR_CARD, corner_radius=12)
+            card.grid(row=0, column=idx, sticky="nsew", padx=(0 if idx == 0 else 8, 0))
+            summary_row.grid_columnconfigure(idx, weight=1)
+            ctk.CTkLabel(card, text=title,
+                         font=("Microsoft YaHei UI", 14, "bold"),
+                         anchor="w").pack(fill="x", padx=16, pady=(14, 4))
+            ctk.CTkLabel(
+                card,
+                text=(
+                    f"{_usage_mode_label(item.get('mode'))}\n"
+                    f"总计 {item['total_tokens']}\n"
+                    f"输入 {item['input_tokens']}\n"
+                    f"输出 {item['output_tokens']}"
+                ),
+                font=("Consolas", 12),
+                text_color=COLOR_TEXT_SOFT,
+                justify="left",
+                anchor="w",
+            ).pack(fill="x", padx=16, pady=(0, 14))
+
+        channel_card = ctk.CTkFrame(scroll, fg_color=COLOR_CARD, corner_radius=12)
+        channel_card.pack(fill="x", pady=(18, 0))
+        ctk.CTkLabel(channel_card, text="按渠道",
                      font=("Microsoft YaHei UI", 15, "bold"),
-                     anchor="w").pack(fill="x", padx=18, pady=(16, 4))
-        ctk.CTkLabel(
-            card,
-            text=("统计面板尚未接入真实数据。\n"
-                  "后续可以在这里汇总模型使用、渠道调用、错误次数和会话活跃度。"),
-            font=FONT_SMALL, text_color=COLOR_MUTED,
-            justify="left", anchor="w", wraplength=680
-        ).pack(fill="x", padx=18, pady=(0, 16))
+                     anchor="w").pack(fill="x", padx=18, pady=(16, 8))
+        channels = stats.get("channels") or []
+        if not channels:
+            ctk.CTkLabel(channel_card, text="暂无可统计的会话数据",
+                         font=FONT_SMALL, text_color=COLOR_MUTED,
+                         anchor="w").pack(fill="x", padx=18, pady=(0, 16))
+        else:
+            for row in channels:
+                line = ctk.CTkFrame(channel_card, fg_color="transparent")
+                line.pack(fill="x", padx=18, pady=6)
+                ctk.CTkLabel(line, text=f"{row['label']} · {_usage_mode_label(row.get('mode'))}",
+                             font=FONT_BODY, anchor="w",
+                             text_color=COLOR_TEXT).pack(side="left")
+                try:
+                    last_active = datetime.fromtimestamp(row.get("last_active", 0) or 0).strftime("%m-%d %H:%M")
+                except Exception:
+                    last_active = "-"
+                ctk.CTkLabel(
+                    line,
+                    text=(
+                        f"总 {row['total_tokens']}  入 {row['input_tokens']}  出 {row['output_tokens']}  "
+                        f"轮次 {row['turns']}  会话 {row['sessions']}  最近 {last_active}"
+                    ),
+                    font=("Consolas", 11),
+                    text_color=COLOR_MUTED,
+                    anchor="e",
+                    justify="right",
+                ).pack(side="right")
+
+        day_card = ctk.CTkFrame(scroll, fg_color=COLOR_CARD, corner_radius=12)
+        day_card.pack(fill="x", pady=(18, 20))
+        ctk.CTkLabel(day_card, text="最近几天",
+                     font=("Microsoft YaHei UI", 15, "bold"),
+                     anchor="w").pack(fill="x", padx=18, pady=(16, 8))
+        days = stats.get("days") or []
+        if not days:
+            ctk.CTkLabel(day_card, text="最近几天没有可用统计",
+                         font=FONT_SMALL, text_color=COLOR_MUTED,
+                         anchor="w").pack(fill="x", padx=18, pady=(0, 16))
+        else:
+            for row in days:
+                line = ctk.CTkFrame(day_card, fg_color="transparent")
+                line.pack(fill="x", padx=18, pady=6)
+                ctk.CTkLabel(line, text=row["date"],
+                             font=FONT_BODY, anchor="w",
+                             text_color=COLOR_TEXT).pack(side="left")
+                parts = []
+                for cid, total in sorted(row.get("channels", {}).items(), key=lambda kv: kv[1], reverse=True)[:3]:
+                    parts.append(f"{_usage_channel_label(cid)} {total}")
+                detail = " / ".join(parts) if parts else "无渠道细分"
+                ctk.CTkLabel(
+                    line,
+                    text=(
+                        f"总 {row['total_tokens']}  入 {row['input_tokens']}  出 {row['output_tokens']}  "
+                        f"轮次 {row['turns']}  {_usage_mode_label(row.get('mode'))}  |  {detail}"
+                    ),
+                    font=("Consolas", 11),
+                    text_color=COLOR_MUTED,
+                    anchor="e",
+                    justify="right",
+                ).pack(side="right")
 
     def _build_schedule_panel(self, parent):
         wrap = ctk.CTkFrame(parent, fg_color="transparent")
@@ -4067,11 +5152,13 @@ class Launcher(ctk.CTk):
         for w in self.main_area.winfo_children():
             w.destroy()
         self._build_chat_main(self.main_area)
-        # 回放当前会话气泡
-        if self.current_session:
-            for b in self.current_session.get("bubbles", []):
+        visible = self._visible_session()
+        if visible:
+            for b in visible.get("bubbles", []):
                 self._add_bubble(b.get("role", "assistant"),
                                   b.get("text", ""), final=True)
+        self._refresh_session_mode_label()
+        self._refresh_session_token_views()
 
     def _on_resize(self, event=None):
         if event is not None and event.widget is not self:
@@ -4094,11 +5181,300 @@ class Launcher(ctk.CTk):
             for lbl in self._bubble_labels:
                 try: lbl.configure(wraplength=wrap)
                 except Exception: pass
+            for widget in getattr(self, "_assistant_widgets", []):
+                try:
+                    mode = getattr(widget, "_mode", "")
+                    if mode == "rich":
+                        self._render_markdown_text(widget, getattr(widget, "_source_text", ""), wrap=wrap)
+                    elif mode == "html":
+                        self._render_assistant_html(widget, getattr(widget, "_source_text", ""))
+                    else:
+                        widget.configure(height=self._assistant_textbox_height(
+                            getattr(widget, "_display_text", ""),
+                            wrap=wrap,
+                        ))
+                except Exception:
+                    pass
             for fs in self._fold_sections:
                 try: fs.set_wrap(wrap)
                 except Exception: pass
         except Exception:
             pass
+
+    def _assistant_display_text(self, text):
+        shown = self._assistant_rich_source(text)
+        shown = re.sub(r"\*\*(.*?)\*\*", r"\1", shown)
+        shown = re.sub(r"(?<!`)`([^`\n]+)`(?!`)", r"\1", shown)
+        if shown:
+            return shown
+        raw = (text or "").strip()
+        return raw or "…"
+
+    def _assistant_rich_source(self, text):
+        shown = _assistant_visible_markup(text or "").strip()
+        return shown or ((text or "").strip() or "…")
+
+    def _assistant_html_document(self, text):
+        fg = self._tk_theme_color(COLOR_TEXT_SOFT)
+        heading = self._tk_theme_color(COLOR_TEXT)
+        muted = self._tk_theme_color(COLOR_MUTED)
+        code_fg = self._tk_theme_color(COLOR_CODE_TEXT)
+        code_bg = self._tk_theme_color(COLOR_CODE_BG)
+        link = self._tk_theme_color(COLOR_ACCENT)
+        body = _md_to_html(self._assistant_rich_source(text))
+        body = body.replace(
+            "<pre>",
+            f'<pre style="background-color:{code_bg}; color:{code_fg}; font-family:Consolas, Courier New; font-size:13px">'
+        )
+        body = re.sub(
+            r"<code([^>]*)>",
+            rf'<code\1 style="background-color:{code_bg}; color:{code_fg}; font-family:Consolas, Courier New; font-size:13px">',
+            body,
+        )
+        body = body.replace("<blockquote>", f'<blockquote style="color:{muted}">')
+        body = body.replace("<h1>", f'<h1 style="color:{heading}; font-size:22px">')
+        body = body.replace("<h2>", f'<h2 style="color:{heading}; font-size:18px">')
+        body = body.replace("<h3>", f'<h3 style="color:{heading}; font-size:16px">')
+        body = body.replace("<a ", f'<a style="color:{link}; text-decoration:underline" ')
+        return (
+            f'<div style="color:{fg}; font-family:Microsoft YaHei UI, Segoe UI; font-size:14px">'
+            f"{body}"
+            "</div>"
+        )
+
+    def _assistant_textbox_height(self, text, wrap=None):
+        if wrap is None:
+            wrap = self._cur_wrap()
+        lines = (text or "").splitlines() or [""]
+        chars_per_line = max(18, int(wrap / 9.5))
+        estimated = 0
+        for line in lines:
+            estimated += max(1, (len(line) // chars_per_line) + 1)
+        return max(44, min(420, estimated * 22 + 12))
+
+    def _set_assistant_widget_text(self, widget, text):
+        if widget is None:
+            return
+        display = self._assistant_display_text(text)
+        try:
+            widget._display_text = display
+            widget.configure(state="normal", height=self._assistant_textbox_height(display))
+            widget.delete("1.0", "end")
+            widget.insert("1.0", display)
+            widget.configure(state="disabled")
+        except Exception:
+            pass
+
+    def _make_assistant_widget(self, parent, text):
+        box = ctk.CTkTextbox(
+            parent,
+            height=self._assistant_textbox_height(self._assistant_display_text(text)),
+            font=FONT_BODY,
+            fg_color=COLOR_FIELD_BG,
+            text_color=COLOR_TEXT_SOFT,
+            wrap="word",
+            corner_radius=8,
+            border_width=0,
+            activate_scrollbars=False,
+        )
+        box.pack(fill="x", anchor="w", pady=(2, 2))
+        box._mode = "stream"
+        self._set_assistant_widget_text(box, text)
+        return box
+
+    def _stream_segment_text(self, text):
+        body = _strip_turn_marker(text or "")
+        if body:
+            return body.rstrip() + "\n\n▌"
+        marker = _turn_marker_title(text or "")
+        return (marker or "处理中…") + "\n\n▌"
+
+    def _final_segment_text(self, text):
+        body = _strip_turn_marker(text or "")
+        return body or ((text or "").strip() or "…")
+
+    def _render_markdown_inline(self, widget, text, base_tags=()):
+        pattern = re.compile(r"(\[([^\]]+)\]\(([^)]+)\)|\*\*([^*]+)\*\*|(?<!`)`([^`\n]+)`(?!`)|\*([^*\n]+)\*)")
+        pos = 0
+        for m in pattern.finditer(text or ""):
+            if m.start() > pos:
+                widget.insert("end", text[pos:m.start()], base_tags + ("body",))
+            if m.group(2) is not None:
+                widget.insert("end", m.group(2), base_tags + ("link",))
+            elif m.group(4) is not None:
+                widget.insert("end", m.group(4), base_tags + ("bold",))
+            elif m.group(5) is not None:
+                widget.insert("end", m.group(5), base_tags + ("inline_code",))
+            elif m.group(6) is not None:
+                widget.insert("end", m.group(6), base_tags + ("italic",))
+            pos = m.end()
+        if pos < len(text or ""):
+            widget.insert("end", text[pos:], base_tags + ("body",))
+
+    def _render_markdown_text(self, widget, text, wrap=None):
+        source = self._assistant_rich_source(text)
+        widget._source_text = source
+        widget._mode = "rich"
+        if wrap is None:
+            wrap = self._cur_wrap()
+        chars_per_line = max(18, int(wrap / 9.5))
+        bg = self._tk_theme_color(COLOR_FIELD_BG)
+        fg = self._tk_theme_color(COLOR_TEXT_SOFT)
+        muted = self._tk_theme_color(COLOR_MUTED)
+        code_bg = self._tk_theme_color(COLOR_CODE_BG)
+        code_fg = self._tk_theme_color(COLOR_CODE_TEXT)
+        widget.configure(state="normal", wrap="word", bg=bg, fg=fg, insertbackground=fg)
+        widget.delete("1.0", "end")
+        widget.tag_configure("body", font=FONT_BODY, foreground=fg, spacing1=2, spacing3=4)
+        widget.tag_configure("bold", font=(FONT_BODY[0], FONT_BODY[1], "bold"))
+        widget.tag_configure("italic", font=(FONT_BODY[0], FONT_BODY[1], "italic"))
+        widget.tag_configure("inline_code", font=FONT_MONO, foreground=code_fg, background=code_bg)
+        widget.tag_configure("quote", foreground=muted, lmargin1=14, lmargin2=14, spacing1=2, spacing3=4)
+        widget.tag_configure("code_block", font=FONT_MONO, foreground=code_fg, background=code_bg, lmargin1=10, lmargin2=10, spacing1=4, spacing3=6)
+        widget.tag_configure("list", lmargin1=14, lmargin2=28, spacing1=1, spacing3=1)
+        widget.tag_configure("link", foreground=self._tk_theme_color(COLOR_ACCENT), underline=True)
+        widget.tag_configure("h1", font=(FONT_BODY[0], 18, "bold"), foreground=self._tk_theme_color(COLOR_TEXT), spacing1=6, spacing3=4)
+        widget.tag_configure("h2", font=(FONT_BODY[0], 16, "bold"), foreground=self._tk_theme_color(COLOR_TEXT), spacing1=6, spacing3=4)
+        widget.tag_configure("h3", font=(FONT_BODY[0], 14, "bold"), foreground=self._tk_theme_color(COLOR_TEXT), spacing1=4, spacing3=3)
+        widget.tag_configure("rule", foreground=muted, justify="center", spacing1=4, spacing3=4)
+
+        lines = source.splitlines()
+        i = 0
+        in_code = False
+        estimated = 0
+        while i < len(lines):
+            line = lines[i]
+            stripped = line.strip()
+            if stripped.startswith("```"):
+                in_code = not in_code
+                if not in_code:
+                    widget.insert("end", "\n")
+                i += 1
+                continue
+            if in_code:
+                widget.insert("end", line + "\n", ("code_block",))
+                estimated += max(1, (len(line) // chars_per_line) + 1)
+                i += 1
+                continue
+            if stripped and "|" in stripped and i + 1 < len(lines) and re.match(r"^\s*\|?[\-\s:|]+\|?\s*$", lines[i + 1].strip()):
+                table_lines = [line, lines[i + 1]]
+                i += 2
+                while i < len(lines) and "|" in lines[i]:
+                    table_lines.append(lines[i])
+                    i += 1
+                block = "\n".join(table_lines)
+                widget.insert("end", block + "\n\n", ("code_block",))
+                estimated += sum(max(1, (len(tl) // chars_per_line) + 1) for tl in table_lines) + 1
+                continue
+            if re.match(r"^#{1,6}\s", stripped):
+                lvl = len(stripped.split()[0])
+                title = stripped[lvl:].strip()
+                widget.insert("end", title + "\n", (f"h{min(lvl, 3)}",))
+                estimated += max(1, (len(title) // chars_per_line) + 1)
+                i += 1
+                continue
+            if re.match(r"^-{3,}$|^_{3,}$|^\*{3,}$", stripped):
+                widget.insert("end", "─" * 36 + "\n", ("rule",))
+                estimated += 1
+                i += 1
+                continue
+            if stripped.startswith(">"):
+                quote = stripped[1:].strip()
+                widget.insert("end", "▎ ", ("quote",))
+                self._render_markdown_inline(widget, quote, ("quote",))
+                widget.insert("end", "\n")
+                estimated += max(1, (len(quote) // chars_per_line) + 1)
+                i += 1
+                continue
+            m_ul = re.match(r"^\s*[-*+]\s+(.*)$", line)
+            m_ol = re.match(r"^\s*(\d+)\.\s+(.*)$", line)
+            if m_ul or m_ol:
+                prefix = "• " if m_ul else f"{m_ol.group(1)}. "
+                content = m_ul.group(1) if m_ul else m_ol.group(2)
+                widget.insert("end", prefix, ("list", "body"))
+                self._render_markdown_inline(widget, content, ("list",))
+                widget.insert("end", "\n")
+                estimated += max(1, ((len(prefix) + len(content)) // chars_per_line) + 1)
+                i += 1
+                continue
+            if stripped:
+                self._render_markdown_inline(widget, line)
+                widget.insert("end", "\n\n")
+                estimated += max(1, (len(line) // chars_per_line) + 1) + 1
+            else:
+                widget.insert("end", "\n")
+                estimated += 1
+            i += 1
+        widget.configure(height=max(44, min(420, estimated * 22 + 12)))
+        widget.configure(state="disabled")
+
+    def _render_assistant_html(self, widget, text):
+        source = self._assistant_rich_source(text)
+        widget._source_text = source
+        widget._mode = "html"
+        widget.configure(state="normal")
+        widget.set_html(self._assistant_html_document(source), strip=False)
+        widget.update_idletasks()
+        widget.fit_height()
+        widget.update_idletasks()
+        if widget.yview()[1] < 1:
+            widget.fit_height()
+        widget.configure(state="disabled")
+
+    def _make_assistant_rich_widget(self, parent, text):
+        if HTMLLabel is not None:
+            box = HTMLLabel(
+                parent,
+                html="",
+                background=self._tk_theme_color(COLOR_FIELD_BG),
+                fg=self._tk_theme_color(COLOR_TEXT_SOFT),
+                relief="flat",
+                bd=0,
+                highlightthickness=0,
+                padx=10,
+                pady=8,
+                cursor="arrow",
+            )
+            box.pack(fill="x", anchor="w", pady=(2, 2))
+            self._render_assistant_html(box, text)
+            return box
+
+        box = tk.Text(
+            parent,
+            relief="flat",
+            bd=0,
+            highlightthickness=0,
+            wrap="word",
+            padx=10,
+            pady=8,
+            cursor="arrow",
+        )
+        box.pack(fill="x", anchor="w", pady=(2, 2))
+        self._render_markdown_text(box, text)
+        return box
+
+    def _clear_tracked_children(self, parent):
+        if parent is None:
+            return
+        for child in list(parent.winfo_children()):
+            self._clear_tracked_children(child)
+            if child in getattr(self, "_assistant_widgets", []):
+                try:
+                    self._assistant_widgets.remove(child)
+                except Exception:
+                    pass
+            if child in getattr(self, "_fold_sections", []):
+                try:
+                    self._fold_sections.remove(child)
+                except Exception:
+                    pass
+            try:
+                child.destroy()
+            except Exception:
+                pass
+
+    def _clear_assistant_content(self, parent):
+        self._clear_tracked_children(parent)
 
     # ---------- 侧边栏会话列表渲染 ----------
     def _session_meta_from_data(self, data):
@@ -4110,6 +5486,8 @@ class Launcher(ctk.CTk):
             "title": data.get("title") or "(未命名)",
             "updated_at": data.get("updated_at", 0),
             "pinned": bool(data.get("pinned", False)),
+            "source_label": self._session_source_label(data),
+            "imported_from": _canon_path(data.get("imported_from")),
             "path": os.path.join(sessions_dir(self.agent_dir.get()), f"{sid}.json"),
         }
 
@@ -4136,6 +5514,21 @@ class Launcher(ctk.CTk):
                 return True
         return False
 
+    def _find_session_by_official_source(self, source_path):
+        wanted = _canon_path(source_path)
+        if not wanted:
+            return None
+        for meta in self._get_session_cache(force=True):
+            try:
+                data = load_session(self.agent_dir.get(), meta["id"])
+            except Exception:
+                data = None
+            if not data:
+                continue
+            if wanted in _session_known_official_paths(data):
+                return data
+        return None
+
     def _upsert_session_meta(self, data):
         meta = self._session_meta_from_data(data or {})
         if meta is None:
@@ -4153,17 +5546,45 @@ class Launcher(ctk.CTk):
         cache = self._get_session_cache(force=False)
         self._sessions_cache = [m for m in cache if m.get("id") != sid]
 
+    def _sessions_view_signature(self, items):
+        current_id = (self._visible_session() or {}).get("id")
+        selected = tuple(sorted(getattr(self, "_batch_selected", set()) or ()))
+        return (
+            bool(getattr(self, "sidebar_collapsed", False)),
+            bool(getattr(self, "_batch_mode", False)),
+            current_id,
+            selected,
+            tuple(
+                (
+                    m.get("id"),
+                    m.get("title"),
+                    m.get("updated_at"),
+                    bool(m.get("pinned", False)),
+                    m.get("source_label"),
+                    m.get("imported_from"),
+                )
+                for m in items
+            ),
+        )
+
     def _refresh_sessions(self, force=False):
+        if not hasattr(self, "sess_list") or self.sess_list is None or not self.sess_list.winfo_exists():
+            return
+        items = list(self._get_session_cache(force=force))
+        signature = self._sessions_view_signature(items)
+        if not force and signature == getattr(self, "_last_sessions_view_signature", None):
+            return
         for w in self.sess_list.winfo_children():
             w.destroy()
-        items = list(self._get_session_cache(force=force))
         if not items:
             ctk.CTkLabel(self.sess_list, text="（暂无历史）",
                          font=FONT_SMALL, text_color=COLOR_MUTED).pack(pady=20)
+            self._last_sessions_view_signature = signature
             return
-        cur_id = (self.current_session or {}).get("id")
+        cur_id = (self._visible_session() or {}).get("id")
         for m in items:
             self._make_session_card(m, active=(m["id"] == cur_id))
+        self._last_sessions_view_signature = signature
 
     def _make_session_card(self, meta, active=False):
         batch = getattr(self, "_batch_mode", False)
@@ -4267,7 +5688,9 @@ class Launcher(ctk.CTk):
             date_txt = datetime.fromtimestamp(meta["updated_at"]).strftime("%m-%d %H:%M")
         except Exception:
             date_txt = ""
-        ctk.CTkLabel(info, text=date_txt, font=FONT_SMALL,
+        source_txt = (meta.get("source_label") or "").strip()
+        subtitle = f"{source_txt} · {date_txt}" if source_txt and date_txt else (source_txt or date_txt)
+        ctk.CTkLabel(info, text=subtitle, font=FONT_SMALL,
                      text_color=COLOR_MUTED, anchor="w").pack(anchor="w")
 
         def enter(e): card.configure(fg_color=hb)
@@ -4315,19 +5738,9 @@ class Launcher(ctk.CTk):
         data = load_session(self.agent_dir.get(), meta["id"])
         if not data: return
         data["pinned"] = not data.get("pinned", False)
-        # 保留更新时间，不刷成现在
-        original_updated = data.get("updated_at", time.time())
-        save_session(self.agent_dir.get(), data)
-        data["updated_at"] = original_updated
-        try:
-            with open(os.path.join(sessions_dir(self.agent_dir.get()),
-                                    f"{data['id']}.json"),
-                       "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-        except Exception: pass
+        self._persist_session_data(data, touch=False, refresh=False)
         if self.current_session and self.current_session.get("id") == data["id"]:
             self.current_session["pinned"] = data["pinned"]
-        self._upsert_session_meta(data)
         self._refresh_sessions()
 
     def _rename_session(self, meta):
@@ -4337,10 +5750,9 @@ class Launcher(ctk.CTk):
         data = load_session(self.agent_dir.get(), meta["id"])
         if not data: return
         data["title"] = new[:60]
-        save_session(self.agent_dir.get(), data)
+        self._persist_session_data(data, touch=False, refresh=False)
         if self.current_session and self.current_session.get("id") == data["id"]:
             self.current_session["title"] = data["title"]
-        self._upsert_session_meta(data)
         self._refresh_sessions()
 
     def _prompt_text(self, title, prompt, initial=""):
@@ -4530,20 +5942,26 @@ class Launcher(ctk.CTk):
     def _delete_session(self, meta):
         if not messagebox.askyesno("删除会话", f"确定删除「{meta['title']}」？"):
             return
-        # 若来自原生日志导入，把原文件加入黑名单，防止下次启动重新导入
         data = load_session(self.agent_dir.get(), meta["id"])
-        imported_from = (data or {}).get("imported_from", "")
-        if imported_from:
-            bl = load_import_blacklist(self.agent_dir.get())
-            bl.add(imported_from)
-            save_import_blacklist(self.agent_dir.get(), bl)
+        failed_paths = []
+        if self.current_session and self.current_session.get("id") == meta["id"]:
+            self._stop_bridge_process()
+            failed_paths = self._delete_session_external_state(data)
+        else:
+            failed_paths = self._delete_session_external_state(data)
         delete_session(self.agent_dir.get(), meta["id"])
         self._remove_session_meta(meta["id"])
         if self.current_session and self.current_session.get("id") == meta["id"]:
-            self.current_session = None
-            self._send_cmd({"cmd": "new_session"})
+            self._restart_bridge()
+        elif not self._visible_session():
             self._reset_chat_area(greeting=None)
+            self._refresh_session_mode_label()
         self._refresh_sessions()
+        if failed_paths:
+            messagebox.showerror(
+                "删除不完整",
+                "启动器会话已删除，但以下官方日志未能删除：\n\n" + "\n".join(failed_paths),
+            )
 
     # ---------- 批量删除模式 ----------
     def _batch_enter(self, preselect=None):
@@ -4578,21 +5996,28 @@ class Launcher(ctk.CTk):
                 f"确定删除 {len(sids)} 个会话？此操作不可撤销。"):
             return
         ad = self.agent_dir.get()
-        bl = load_import_blacklist(ad)
+        restart_live = False
+        failed_paths = []
         for sid in sids:
             data = load_session(ad, sid)
-            imported_from = (data or {}).get("imported_from", "")
-            if imported_from:
-                bl.add(imported_from)
+            if self.current_session and self.current_session.get("id") == sid:
+                restart_live = True
+                self._stop_bridge_process()
+            failed_paths.extend(self._delete_session_external_state(data))
             delete_session(ad, sid)
             self._remove_session_meta(sid)
-            if self.current_session and self.current_session.get("id") == sid:
-                self.current_session = None
-                self._send_cmd({"cmd": "new_session"})
-                self._reset_chat_area(greeting=None)
-        try: save_import_blacklist(ad, bl)
-        except Exception: pass
+        if not self._visible_session():
+            self._reset_chat_area(greeting=None)
+            self._refresh_session_mode_label()
+        if restart_live:
+            self._restart_bridge()
         self._batch_exit()
+        if failed_paths:
+            failed_paths = sorted(set(failed_paths))
+            messagebox.showerror(
+                "删除不完整",
+                "以下官方日志未能删除：\n\n" + "\n".join(failed_paths),
+            )
 
     def _render_batch_bar(self):
         # 清掉旧的
@@ -4651,27 +6076,26 @@ class Launcher(ctk.CTk):
     # ---------- 自动导入 GenericAgent 原生历史 ----------
     def _auto_import_legacy(self):
         """收到 legacy_list 后：为尚未导入且未被黑名单屏蔽的文件逐个建档。"""
-        self._prune_duplicate_imported_sessions()
-        try:
-            existing = {}
-            for meta in self._get_session_cache(force=True):
-                data = load_session(self.agent_dir.get(), meta["id"])
-                if data and data.get("imported_from"):
-                    existing[data["imported_from"]] = data
-        except Exception:
-            existing = {}
         blacklist = load_import_blacklist(self.agent_dir.get())
+        queued = {_canon_path(item.get("file", "")) for item in getattr(self, "_pending_import_queue", [])}
+        pending_meta = getattr(self, "_pending_legacy_meta", None) or {}
+        if pending_meta.get("file"):
+            queued.add(_canon_path(pending_meta.get("file", "")))
         for m in self._legacy_items:
-            fp = m.get("file", "")
-            if fp in blacklist:
+            fp = _canon_path(m.get("file", ""))
+            if not fp or fp in blacklist or fp in queued:
                 continue
-            existing_data = existing.get(fp)
-            if existing_data and not legacy_session_needs_refresh(existing_data):
+            existing_data = self._find_session_by_official_source(fp)
+            if existing_data and not existing_data.get("imported_from"):
+                continue
+            if existing_data and not imported_session_needs_refresh(existing_data, m.get("mtime", 0)):
                 continue
             item = dict(m)
+            item["file"] = fp
             if existing_data:
                 item["existing_session"] = existing_data
             self._pending_import_queue.append(item)
+            queued.add(fp)
         if self._pending_import_queue and not self._importing:
             self._process_next_import()
 
@@ -4750,19 +6174,9 @@ class Launcher(ctk.CTk):
         agent_history = ev.get("agent_history") or []
         existing = meta.get("existing_session") or {}
         if bubbles:
-            duplicate_live = self._find_duplicate_live_session(
-                bubbles,
-                meta.get("mtime", time.time()),
-            )
-            if duplicate_live is not None:
-                fp = meta.get("file", "")
-                if fp:
-                    try:
-                        bl = load_import_blacklist(self.agent_dir.get())
-                        bl.add(fp)
-                        save_import_blacklist(self.agent_dir.get(), bl)
-                    except Exception:
-                        pass
+            fp = _canon_path(meta.get("file", ""))
+            existing_by_source = self._find_session_by_official_source(fp)
+            if existing_by_source and not existing_by_source.get("imported_from"):
                 self.after(30, self._process_next_import)
                 return
             title = ""
@@ -4778,10 +6192,15 @@ class Launcher(ctk.CTk):
                 "bubbles": bubbles,
                 "backend_history": existing.get("backend_history") or [],
                 "agent_history": agent_history,
-                "imported_from": meta.get("file", ""),
+                "imported_from": _canon_path(meta.get("file", "")),
+                "official_log_path": _canon_path(meta.get("file", "")),
+                "official_log_mtime": meta.get("mtime", time.time()),
+                "process_pid": _session_pid_from_log_path(_canon_path(meta.get("file", ""))),
+                "session_source_label": existing.get("session_source_label") or "官方日志",
                 "pinned": existing.get("pinned", False),
-                "legacy_restore_version": 2,
+                "legacy_restore_version": LEGACY_RESTORE_VERSION,
             }
+            self._ensure_session_usage_metadata(session)
             try: save_session(self.agent_dir.get(), session)
             except Exception as e: print(f"[auto-import] {e}")
             self._upsert_session_meta(session)
@@ -4793,22 +6212,50 @@ class Launcher(ctk.CTk):
             return
         data = load_session(self.agent_dir.get(), meta["id"])
         if not data:
-            messagebox.showerror("加载失败", "会话文件无法读取。")
+            replacement = None
+            wanted_source = _canon_path(meta.get("imported_from"))
+            if wanted_source:
+                for newer in self._get_session_cache(force=True):
+                    if _same_session_source(newer.get("imported_from"), wanted_source):
+                        replacement = newer
+                        break
+            self._refresh_sessions(force=True)
+            if replacement:
+                self.after(30, lambda m=replacement: self._load_session(m))
+                return
+            messagebox.showerror(
+                "会话已变化",
+                "这条会话刚被刷新、重导入或删除了，旧条目已经失效。\n\n请重新点击侧边栏里的最新会话。"
+            )
             return
-        # 先把状态送入内核
+        if self.current_session and self.current_session.get("id") == data.get("id"):
+            self.current_session = data
+            self._reset_chat_area(greeting=None)
+            for bubble in data.get("bubbles", []):
+                self._add_bubble(bubble.get("role", "assistant"),
+                                 bubble.get("text", ""), final=True)
+            self._upsert_session_meta(data)
+            self._refresh_sessions()
+            self._refresh_session_mode_label()
+            return
+        if data.get("imported_from"):
+            self._restore_imported_session(data)
+            return
         self._send_cmd({
             "cmd": "set_state",
             "backend_history": data.get("backend_history") or [],
             "agent_history": data.get("agent_history") or [],
         })
         self.current_session = data
-        # 重绘气泡（不加系统提示）
+        self._bind_session_to_current_bridge(self.current_session)
+        self._persist_current_session()
         self._reset_chat_area(greeting=None)
-        for b in data.get("bubbles", []):
-            self._add_bubble(b.get("role", "assistant"),
-                             b.get("text", ""), final=True)
+        for bubble in data.get("bubbles", []):
+            self._add_bubble(bubble.get("role", "assistant"),
+                             bubble.get("text", ""), final=True)
         self._upsert_session_meta(data)
         self._refresh_sessions()
+        self._refresh_session_mode_label()
 
     def _reset_chat_area(self, greeting=None):
         for w in self.msg_area.winfo_children():
@@ -4818,12 +6265,15 @@ class Launcher(ctk.CTk):
         self._current_assistant_content = None
         self._bubble_labels = []
         self._bubble_rows = []
+        self._assistant_widgets = []
         self._fold_sections = []
+        self._current_assistant_widget = None
         self._live_label = None
         self._stream_frozen = 0
         self._pending_stream_text = None
         self._stream_render_scheduled = False
         self._current_stream_text = ""
+        self._active_token_event_ts = None
         self._busy = False
         self._abort_requested = False
         try:
@@ -4832,6 +6282,7 @@ class Launcher(ctk.CTk):
             pass
         if greeting:
             self._add_bubble("assistant", greeting)
+        self._refresh_session_token_views()
 
     def _ensure_session(self, first_user_text):
         """首次发送消息时为当前对话创建存档。"""
@@ -4839,15 +6290,24 @@ class Launcher(ctk.CTk):
             return
         title = (first_user_text or "新会话").strip().replace("\n", " ")
         title = title[:30] + ("…" if len(first_user_text) > 30 else "")
+        process_pid = getattr(getattr(self, "bridge_proc", None), "pid", None)
         self.current_session = {
             "id": uuid.uuid4().hex[:12],
             "title": title or "新会话",
             "created_at": time.time(),
             "updated_at": time.time(),
             "bubbles": [],
+            "process_pid": process_pid,
+            "official_log_path": _official_log_path(self.agent_dir.get(), process_pid),
+            "session_source_label": "启动器",
+            "channel_id": "launcher",
+            "channel_label": _usage_channel_label("launcher"),
             "backend_history": [],
             "agent_history": [],
         }
+        self._bind_session_to_current_bridge(self.current_session)
+        self._ensure_session_usage_metadata(self.current_session)
+        self._refresh_session_mode_label()
 
     def _persist_current_session(self):
         """把当前消息气泡写入存档；内核状态在 done 事件后异步拉取补入。"""
@@ -4855,16 +6315,16 @@ class Launcher(ctk.CTk):
             return
         self._persist_session_data(self.current_session)
 
-    def _persist_session_data(self, session):
+    def _persist_session_data(self, session, *, touch=True, refresh=True):
         if not session:
             return
         was_known = self._session_meta_known(session.get("id"))
         try:
-            save_session(self.agent_dir.get(), session)
+            save_session(self.agent_dir.get(), session, touch=touch)
         except Exception as e:
             print(f"[save_session] {e}")
         self._upsert_session_meta(session)
-        if not was_known:
+        if refresh and not was_known:
             self._refresh_sessions()
 
     def _on_switch_llm(self, selection):
@@ -4935,13 +6395,10 @@ class Launcher(ctk.CTk):
         if getattr(self, "_busy", False):
             messagebox.showinfo("忙碌中", "当前任务还在运行，请稍候。")
             return
-        self._send_cmd({"cmd": "new_session"})
-        self.current_session = None
-        self._reset_chat_area(greeting=None)
-        self._refresh_sessions()
+        self._restart_bridge()
 
     def _add_bubble(self, role, text, final=False):
-        """role: 'user' | 'assistant'。final=True 时对 assistant 内容立即做折叠渲染。"""
+        """role: 'user' | 'assistant'。assistant 统一使用单控件渲染。"""
         row = ctk.CTkFrame(self.msg_area, fg_color="transparent")
         row.grid(row=self._msg_row, column=0, sticky="ew", padx=16, pady=6)
         row.columnconfigure(0, weight=1)
@@ -4972,7 +6429,7 @@ class Launcher(ctk.CTk):
         wrap_container.grid(row=0, column=0, sticky="ew", padx=(6, 80))
         wrap_container.columnconfigure(0, weight=1)
 
-        head = ctk.CTkLabel(wrap_container, text="🤖 GenericAgent",
+        head = ctk.CTkLabel(wrap_container, text="助手",
                              font=FONT_SMALL, text_color=COLOR_MUTED,
                              anchor="w")
         head.pack(anchor="w", pady=(0, 4))
@@ -4981,12 +6438,12 @@ class Launcher(ctk.CTk):
         content_frame.pack(fill="x", anchor="w")
 
         if final:
-            self._render_assistant_content(content_frame, text, wrap)
+            self._render_assistant_content(content_frame, text or "…", wrap=wrap, streaming=False)
             self._current_assistant_label = None
             self._current_assistant_content = None
+            self._current_assistant_widget = None
             self._current_stream_text = ""
         else:
-            # 流式：content_frame 保持为空容器；_stream_update 负责填充
             self._current_assistant_label = None
             self._current_assistant_content = content_frame
             self._stream_frozen = 0
@@ -4995,6 +6452,7 @@ class Launcher(ctk.CTk):
             self._stream_render_scheduled = False
             self._last_stream_render_time = 0
             self._current_stream_text = ""
+            self._render_assistant_content(content_frame, "", wrap=wrap, streaming=True)
 
         self.after(30, self._scroll_bottom)
         return wrap_container
@@ -5007,31 +6465,136 @@ class Launcher(ctk.CTk):
             w = 760
         return max(240, w - 200)
 
-    def _render_assistant_content(self, cf, text, wrap=None):
-        """一次性渲染全部段（用于历史会话加载、非流式场景）。"""
-        if wrap is None: wrap = self._cur_wrap()
+    def _stream_layout_signature(self, text):
         segments = fold_turns(text or "")
-        if len(segments) <= 1:
-            widgets = render_rich(cf, text or "…", wrap)
-            self._bubble_labels.extend(
-                [w for w in widgets if isinstance(w, ctk.CTkLabel)])
-            return
-        for seg in segments:
-            if seg["type"] == "fold":
-                fs = FoldSection(cf, seg["title"], seg["content"], wrap)
+        if not segments:
+            segments = [{"type": "text", "content": text or "…"}]
+        last = segments[-1]
+        last_type = str(last.get("type") or "text")
+        if last_type == "text":
+            prefix_segments = segments[:-1]
+            stream_text = last.get("content") or ""
+        else:
+            prefix_segments = segments
+            stream_text = ""
+        prefix_signature = tuple(
+            (
+                str(seg.get("type") or "text"),
+                str(seg.get("title") or ""),
+                str(seg.get("content") or ""),
+            )
+            for seg in prefix_segments
+        )
+        return segments, prefix_segments, prefix_signature, last_type, stream_text
+
+    def _ensure_stream_hosts(self, cf):
+        prefix_frame = getattr(cf, "_stream_prefix_frame", None)
+        live_frame = getattr(cf, "_stream_live_frame", None)
+        try:
+            prefix_ok = prefix_frame is not None and prefix_frame.winfo_exists()
+        except Exception:
+            prefix_ok = False
+        try:
+            live_ok = live_frame is not None and live_frame.winfo_exists()
+        except Exception:
+            live_ok = False
+        if prefix_ok and live_ok:
+            return prefix_frame, live_frame
+        self._clear_assistant_content(cf)
+        prefix_frame = ctk.CTkFrame(cf, fg_color="transparent")
+        prefix_frame.pack(fill="x", anchor="w")
+        live_frame = ctk.CTkFrame(cf, fg_color="transparent")
+        live_frame.pack(fill="x", anchor="w")
+        cf._stream_prefix_frame = prefix_frame
+        cf._stream_live_frame = live_frame
+        return prefix_frame, live_frame
+
+    def _render_stream_prefix(self, host, prefix_segments, wrap):
+        self._clear_tracked_children(host)
+        for seg in prefix_segments:
+            seg_type = seg.get("type")
+            content = seg.get("content") or ""
+            if seg_type == "fold":
+                fs = FoldSection(host, seg.get("title") or "处理中", content, wrap)
                 fs.pack(fill="x", pady=3, anchor="w")
                 self._fold_sections.append(fs)
-            else:
-                c = (seg["content"] or "").strip()
-                if not c: continue
-                widgets = render_rich(cf, c, wrap)
-                self._bubble_labels.extend(
-                    [w for w in widgets if isinstance(w, ctk.CTkLabel)])
+                continue
+            final_text = self._final_segment_text(content)
+            if final_text.strip():
+                widget = self._make_assistant_rich_widget(host, final_text)
+                self._assistant_widgets.append(widget)
+
+    def _try_update_stream_in_place(self, cf, cumulative_text, wrap=None):
+        if cf is None:
+            return False
+        _, prefix_segments, prefix_signature, last_type, stream_text = self._stream_layout_signature(cumulative_text)
+        widget = getattr(self, "_current_assistant_widget", None)
+        if widget is None:
+            return False
+        try:
+            if not widget.winfo_exists():
+                return False
+        except Exception:
+            return False
+        if wrap is None:
+            wrap = self._cur_wrap()
+        prefix_frame, _ = self._ensure_stream_hosts(cf)
+        if prefix_signature != getattr(cf, "_stream_prefix_signature", None):
+            self._render_stream_prefix(prefix_frame, prefix_segments, wrap)
+        widget._stream_source = stream_text
+        widget._stream_prefix_signature = prefix_signature
+        self._set_assistant_widget_text(widget, self._stream_segment_text(stream_text))
+        try:
+            widget.configure(height=self._assistant_textbox_height(getattr(widget, "_display_text", ""), wrap=wrap))
+        except Exception:
+            pass
+        cf._stream_prefix_signature = prefix_signature
+        cf._stream_last_type = last_type
+        return True
+
+    def _render_assistant_content(self, cf, text, wrap=None, streaming=False):
+        """按 Turn 折叠渲染；流式时最后一段保持实时更新。"""
+        if wrap is None:
+            wrap = self._cur_wrap()
+        segments, prefix_segments, prefix_signature, last_type, stream_text = self._stream_layout_signature(text)
+        if streaming:
+            prefix_frame, live_frame = self._ensure_stream_hosts(cf)
+            self._render_stream_prefix(prefix_frame, prefix_segments, wrap)
+            self._clear_tracked_children(live_frame)
+            widget = self._make_assistant_widget(live_frame, self._stream_segment_text(stream_text))
+            widget._stream_source = stream_text
+            widget._stream_prefix_signature = prefix_signature
+            self._assistant_widgets.append(widget)
+            self._current_assistant_widget = widget
+            cf._stream_prefix_signature = prefix_signature
+            cf._stream_last_type = last_type
+            return
+
+        self._clear_assistant_content(cf)
+        self._current_assistant_widget = None
+        cf._stream_prefix_signature = prefix_signature
+        cf._stream_last_type = last_type
+
+        for idx, seg in enumerate(segments):
+            seg_type = seg.get("type")
+            content = seg.get("content") or ""
+
+            if seg_type == "fold":
+                fs = FoldSection(cf, seg.get("title") or "处理中", content, wrap)
+                fs.pack(fill="x", pady=3, anchor="w")
+                self._fold_sections.append(fs)
+                continue
+
+            final_text = self._final_segment_text(content)
+            if final_text.strip():
+                widget = self._make_assistant_rich_widget(cf, final_text)
+                self._assistant_widgets.append(widget)
 
     def _stream_update(self, cumulative_text):
-        """收到 next 事件时调用：节流后做增量渲染。"""
+        """收到 next 事件时调用：按 Turn 折叠重绘，最后一段实时更新。"""
         self._pending_stream_text = cumulative_text
         self._current_stream_text = cumulative_text or ""
+        self._refresh_session_token_views()
         now = time.time()
         last = getattr(self, "_last_stream_render_time", 0)
         if now - last < 0.08:
@@ -5045,96 +6608,35 @@ class Launcher(ctk.CTk):
     def _flush_stream_render(self):
         self._stream_render_scheduled = False
         t = getattr(self, "_pending_stream_text", None)
-        if t is None: return
-        self._pending_stream_text = None
-        self._last_stream_render_time = time.time()
-        self._do_stream_render(t)
+        if t is not None:
+            self._last_stream_render_time = time.time()
+            self._do_stream_render(t)
 
     def _do_stream_render(self, cumulative_text):
-        """实际增量渲染：冻结已完成的 Turn，live 段复用单个 Label。"""
-        cf = getattr(self, "_current_assistant_content", None)
-        if not cf: return
-        segments = fold_turns(cumulative_text or "")
-        wrap = self._cur_wrap()
-        frozen = getattr(self, "_stream_frozen", 0)
-        live_label = getattr(self, "_live_label", None)
-
-        # 跨越 Turn 边界：把之前的 live 段正式冻结（不再刷新）
-        while frozen < len(segments) - 1:
-            # 销毁当前 live label（其内容会由 fold/static 精确再渲染）
-            if live_label is not None:
-                try: live_label.destroy()
-                except Exception: pass
-                if live_label in self._bubble_labels:
-                    self._bubble_labels.remove(live_label)
-                live_label = None
-            seg = segments[frozen]
-            if seg["type"] == "fold":
-                fs = FoldSection(cf, seg["title"], seg["content"], wrap)
-                fs.pack(fill="x", pady=3, anchor="w")
-                self._fold_sections.append(fs)
-            else:
-                c = (seg["content"] or "").strip()
-                if c:
-                    ws = render_rich(cf, c, wrap)
-                    self._bubble_labels.extend(
-                        [w for w in ws if isinstance(w, ctk.CTkLabel)])
-            frozen += 1
-        self._stream_frozen = frozen
-
-        # 更新 / 创建 live 段（最后一段）
-        live_seg = segments[-1] if segments else {"content": ""}
-        live_text = (live_seg.get("content") or "").rstrip() + " ▌"
-        if live_label is None:
-            live_label = ctk.CTkLabel(cf, text=live_text, font=FONT_BODY,
-                                       wraplength=wrap, justify="left",
-                                       anchor="w")
-            live_label.pack(fill="x", anchor="w", pady=(2, 2))
-            self._bubble_labels.append(live_label)
-            self._live_label = live_label
-        else:
-            try:
-                live_label.configure(text=live_text, wraplength=wrap)
-            except Exception:
-                pass
-        self.after(30, self._scroll_bottom)
-
-    def _stream_done(self, final_text):
-        """done 事件：清掉 live label，把剩余段渲染成正式结构（含富文本）。"""
         cf = getattr(self, "_current_assistant_content", None)
         if not cf:
             return
+        wrap = self._cur_wrap()
+        if not self._try_update_stream_in_place(cf, cumulative_text or "", wrap=wrap):
+            self._render_assistant_content(cf, cumulative_text or "", wrap=wrap, streaming=True)
+        self.after(30, self._scroll_bottom)
+
+    def _stream_done(self, final_text):
+        """done 事件：先结束流式控件，再切换成最终富文本渲染。"""
         self._current_stream_text = final_text or self._current_stream_text
-        # 取消任何待 flush
         self._pending_stream_text = None
         self._stream_render_scheduled = False
-        # 销毁 live label
-        live_label = getattr(self, "_live_label", None)
-        if live_label is not None:
-            try: live_label.destroy()
-            except Exception: pass
-            if live_label in self._bubble_labels:
-                self._bubble_labels.remove(live_label)
-            self._live_label = None
-
-        segments = fold_turns(final_text or "")
-        wrap = self._cur_wrap()
-        frozen = getattr(self, "_stream_frozen", 0)
-        for i in range(frozen, len(segments)):
-            seg = segments[i]
-            if seg["type"] == "fold":
-                fs = FoldSection(cf, seg["title"], seg["content"], wrap)
-                fs.pack(fill="x", pady=3, anchor="w")
-                self._fold_sections.append(fs)
-            else:
-                c = (seg["content"] or "").strip()
-                if c:
-                    ws = render_rich(cf, c, wrap)
-                    self._bubble_labels.extend(
-                        [w for w in ws if isinstance(w, ctk.CTkLabel)])
+        cf = getattr(self, "_current_assistant_content", None)
+        widget = getattr(self, "_current_assistant_widget", None)
+        if cf is not None:
+            self._render_assistant_content(cf, final_text or "…", streaming=False)
+        elif widget is not None:
+            self._set_assistant_widget_text(widget, self._final_segment_text(final_text or "…"))
         self._stream_frozen = 0
         self._current_assistant_content = None
+        self._current_assistant_widget = None
         self._current_stream_text = ""
+        self._refresh_session_token_views()
         self.after(30, self._scroll_bottom)
 
     def _finalize_last_bubble(self, text):
@@ -5181,9 +6683,23 @@ class Launcher(ctk.CTk):
             text = self.input_box.get("1.0", "end").strip()
         if not text:
             return
+        if self._is_review_mode():
+            if auto:
+                return
+            messagebox.showinfo(
+                "历史回顾",
+                "当前展示的是历史记录，仅供回顾。\n\n请先点击当前会话，或新建会话后再继续聊天。",
+            )
+            return
         if getattr(self, "_busy", False):
             if not auto:
                 messagebox.showinfo("忙碌中", "当前任务还在运行，请稍候或点击“中断”。")
+            return
+        proc = getattr(self, "bridge_proc", None)
+        if proc is None or proc.poll() is not None:
+            if not auto:
+                messagebox.showerror("发送失败", "内核进程未运行，已尝试重启。请稍后重试。")
+            self._restart_bridge()
             return
         self._ensure_session(text)
         if not auto:
@@ -5191,13 +6707,35 @@ class Launcher(ctk.CTk):
         self._add_bubble("user", text)
         self._add_bubble("assistant", "")
         self.current_session["bubbles"].append({"role": "user", "text": text})
+        self._ensure_session_usage_metadata(self.current_session)
+        usage = self.current_session.get("token_usage") or {}
+        event = {
+            "ts": time.time(),
+            "input_tokens": _estimate_tokens(text),
+            "output_tokens": 0,
+            "total_tokens": _estimate_tokens(text),
+            "channel_id": str(self.current_session.get("channel_id") or "launcher").strip().lower(),
+            "model": self._current_llm_name(),
+            "usage_source": "estimate",
+        }
+        usage.setdefault("events", []).append(event)
+        usage["last_model"] = event["model"]
+        self.current_session["token_usage"] = usage
+        self._active_token_event_ts = event["ts"]
         self._persist_current_session()
+        self._refresh_session_token_views()
         self._busy = True
         self._abort_requested = False
         self._last_activity = time.time()
         self.send_btn.configure(state="disabled", text="生成中")
         self.stop_btn.configure(state="normal", text="中断")
-        self._send_cmd({"cmd": "send", "text": text})
+        if not self._send_cmd({"cmd": "send", "text": text}):
+            self._busy = False
+            self._abort_requested = False
+            self._active_token_event_ts = None
+            self._finish_generation_ui()
+            self._update_last("[错误] 内核通信失败，请重试。")
+            self._refresh_session_token_views()
 
     def _update_last(self, text):
         if self._current_assistant_label is not None:
@@ -5205,6 +6743,11 @@ class Launcher(ctk.CTk):
                 self._current_assistant_label.configure(text=text or "…")
             except Exception:
                 pass
+            self.after(30, self._scroll_bottom)
+            return
+        widget = getattr(self, "_current_assistant_widget", None)
+        if widget is not None:
+            self._set_assistant_widget_text(widget, text or "…")
             self.after(30, self._scroll_bottom)
 
     def _abort(self):
@@ -5411,6 +6954,9 @@ class Launcher(ctk.CTk):
         except Exception:
             pass
         self.bridge_proc = None
+        self.current_session = None
+        self._busy = False
+        self._abort_requested = False
         path = self.agent_dir.get().strip()
         self.clear()
         self.container.pack_forget()
@@ -5450,6 +6996,10 @@ class Launcher(ctk.CTk):
 
 
 if __name__ == "__main__":
+    if len(sys.argv) >= 3 and sys.argv[1] == "--qt-chat":
+        from qt_chat_window import main as _qt_chat_main
+
+        raise SystemExit(_qt_chat_main(sys.argv[2]))
     app = Launcher()
     def _on_close():
         try:

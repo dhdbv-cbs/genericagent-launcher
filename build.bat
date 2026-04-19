@@ -10,7 +10,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-python -m PyInstaller --noconfirm --onefile --windowed --name "GenericAgentLauncher" --collect-all customtkinter --add-data "bridge.py;." launcher.py
+python -m PyInstaller --noconfirm GenericAgentLauncher.spec
 if errorlevel 1 (
     echo [ERROR] Build failed
     pause

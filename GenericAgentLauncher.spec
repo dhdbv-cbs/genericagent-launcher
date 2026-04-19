@@ -1,11 +1,28 @@
 # -*- mode: python ; coding: utf-8 -*-
-from PyInstaller.utils.hooks import collect_all
+from PyInstaller.utils.hooks import (
+    collect_data_files,
+    collect_dynamic_libs,
+    collect_submodules,
+)
 
 datas = [('bridge.py', '.')]
 binaries = []
-hiddenimports = []
-tmp_ret = collect_all('customtkinter')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+hiddenimports = ['qt_chat_window', 'shiboken6']
+
+datas += collect_data_files('customtkinter')
+hiddenimports += collect_submodules('customtkinter')
+
+hiddenimports += [
+    'PySide6.QtCore',
+    'PySide6.QtGui',
+    'PySide6.QtWidgets',
+    'PySide6.QtSvg',
+]
+binaries += collect_dynamic_libs('PySide6')
+binaries += collect_dynamic_libs('shiboken6')
+datas += collect_data_files('PySide6', subdir='plugins/platforms')
+datas += collect_data_files('PySide6', subdir='plugins/styles')
+datas += collect_data_files('PySide6', subdir='plugins/imageformats')
 
 
 a = Analysis(

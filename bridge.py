@@ -16,6 +16,7 @@ _RESTORE_BLOCK_RE = re.compile(
 _HISTORY_RE = re.compile(r"<history>\s*(.*?)\s*</history>", re.DOTALL)
 _SUMMARY_RE = re.compile(r"<summary>\s*(.*?)\s*</summary>", re.DOTALL)
 _TURN_RE = re.compile(r"Current turn:\s*(\d+)")
+_USAGE_LOCAL = threading.local()
 
 def send(obj):
     try:
@@ -31,6 +32,325 @@ def _ui_llms(agent):
         name = raw_name.split("/", 1)[1] if "/" in raw_name else raw_name
         items.append({"idx": i, "name": name, "current": current})
     return items
+
+
+def _int_token(value):
+    try:
+        return int(value or 0)
+    except Exception:
+        return 0
+
+
+def _normalize_provider_usage(raw):
+    if not isinstance(raw, dict):
+        return {}
+    cached = _int_token((raw.get("input_tokens_details") or {}).get("cached_tokens", 0))
+    if not cached:
+        cached = _int_token((raw.get("prompt_tokens_details") or {}).get("cached_tokens", 0))
+    input_tokens = _int_token(raw.get("input_tokens", raw.get("prompt_tokens", 0)))
+    output_tokens = _int_token(raw.get("output_tokens", raw.get("completion_tokens", 0)))
+    total_tokens = _int_token(raw.get("total_tokens", raw.get("total", input_tokens + output_tokens)))
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens or (input_tokens + output_tokens),
+        "cached_tokens": cached,
+        "cache_creation_input_tokens": _int_token(raw.get("cache_creation_input_tokens", 0)),
+        "cache_read_input_tokens": _int_token(raw.get("cache_read_input_tokens", 0)),
+        "usage_source": "provider",
+    }
+
+
+def _merge_call_usage(base, update):
+    base = dict(base or {})
+    update = dict(update or {})
+    if not update:
+        return base
+    for key in (
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+        "cached_tokens",
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+    ):
+        val = update.get(key)
+        if val is None:
+            continue
+        val = _int_token(val)
+        if val or key not in base:
+            base[key] = val
+    if "usage_source" in update:
+        base["usage_source"] = update["usage_source"]
+    inp = _int_token(base.get("input_tokens", 0))
+    out = _int_token(base.get("output_tokens", 0))
+    if not _int_token(base.get("total_tokens", 0)):
+        base["total_tokens"] = inp + out
+    return base
+
+
+def _accumulate_task_usage(base, call_usage):
+    if not call_usage:
+        return dict(base or {})
+    result = dict(base or {})
+    for key in (
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+        "cached_tokens",
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+    ):
+        result[key] = _int_token(result.get(key, 0)) + _int_token(call_usage.get(key, 0))
+    result["usage_source"] = "provider"
+    result["api_calls"] = _int_token(result.get("api_calls", 0)) + 1
+    return result
+
+
+def _store_current_usage(update):
+    backend = getattr(_USAGE_LOCAL, "backend", None)
+    if backend is None:
+        return
+    current = getattr(backend, "_ga_launcher_current_usage", None)
+    backend._ga_launcher_current_usage = _merge_call_usage(current, update)
+
+
+def _patch_llm_usage_capture():
+    import llmcore
+
+    if getattr(llmcore, "_ga_launcher_usage_patched", False):
+        return llmcore
+
+    def _parse_claude_sse_patched(resp_lines):
+        content_blocks = []
+        current_block = None
+        tool_json_buf = ""
+        stop_reason = None
+        got_message_stop = False
+        warn = None
+        for line in resp_lines:
+            if not line:
+                continue
+            line = line.decode("utf-8") if isinstance(line, bytes) else line
+            if not line.startswith("data:"):
+                continue
+            data_str = line[5:].lstrip()
+            if data_str == "[DONE]":
+                break
+            try:
+                evt = json.loads(data_str)
+            except Exception as e:
+                print(f"[SSE] JSON parse error: {e}, line: {data_str[:200]}")
+                continue
+            evt_type = evt.get("type", "")
+            if evt_type == "message_start":
+                usage = evt.get("message", {}).get("usage", {})
+                _store_current_usage(_normalize_provider_usage(usage))
+                ci = usage.get("cache_creation_input_tokens", 0)
+                cr = usage.get("cache_read_input_tokens", 0)
+                inp = usage.get("input_tokens", 0)
+                print(f"[Cache] input={inp} creation={ci} read={cr}")
+            elif evt_type == "content_block_start":
+                block = evt.get("content_block", {})
+                if block.get("type") == "text":
+                    current_block = {"type": "text", "text": ""}
+                elif block.get("type") == "thinking":
+                    current_block = {"type": "thinking", "thinking": ""}
+                elif block.get("type") == "tool_use":
+                    current_block = {"type": "tool_use", "id": block.get("id", ""), "name": block.get("name", ""), "input": {}}
+                    tool_json_buf = ""
+            elif evt_type == "content_block_delta":
+                delta = evt.get("delta", {})
+                if delta.get("type") == "text_delta":
+                    text = delta.get("text", "")
+                    if current_block and current_block.get("type") == "text":
+                        current_block["text"] += text
+                    if text:
+                        yield text
+                elif delta.get("type") == "thinking_delta":
+                    if current_block and current_block.get("type") == "thinking":
+                        current_block["thinking"] += delta.get("thinking", "")
+                elif delta.get("type") == "input_json_delta":
+                    tool_json_buf += delta.get("partial_json", "")
+            elif evt_type == "content_block_stop":
+                if current_block:
+                    if current_block["type"] == "tool_use":
+                        try:
+                            current_block["input"] = json.loads(tool_json_buf) if tool_json_buf else {}
+                        except Exception:
+                            current_block["input"] = {"_raw": tool_json_buf}
+                    content_blocks.append(current_block)
+                    current_block = None
+            elif evt_type == "message_delta":
+                delta = evt.get("delta", {})
+                stop_reason = delta.get("stop_reason", stop_reason)
+                out_usage = evt.get("usage", {})
+                _store_current_usage(_normalize_provider_usage(out_usage))
+                out_tokens = out_usage.get("output_tokens", 0)
+                if out_tokens:
+                    print(f"[Output] tokens={out_tokens} stop_reason={stop_reason}")
+            elif evt_type == "message_stop":
+                got_message_stop = True
+            elif evt_type == "error":
+                err = evt.get("error", {})
+                emsg = err.get("message", str(err)) if isinstance(err, dict) else str(err)
+                warn = f"\n\n[SSE Error: {emsg}]"
+                break
+        if not warn:
+            if not got_message_stop and not stop_reason:
+                warn = "\n\n[!!! 流异常中断，未收到完整响应 !!!]"
+            elif stop_reason == "max_tokens":
+                warn = "\n\n[!!! Response truncated: max_tokens !!!]"
+        if warn:
+            print(f"[WARN] {warn.strip()}")
+            content_blocks.append({"type": "text", "text": warn})
+            yield warn
+        return content_blocks
+
+    def _parse_openai_sse_patched(resp_lines, api_mode="chat_completions"):
+        content_text = ""
+        if api_mode == "responses":
+            seen_delta = False
+            fc_buf = {}
+            current_fc_idx = None
+            for line in resp_lines:
+                if not line:
+                    continue
+                line = line.decode("utf-8", errors="replace") if isinstance(line, bytes) else line
+                if not line.startswith("data:"):
+                    continue
+                data_str = line[5:].lstrip()
+                if data_str == "[DONE]":
+                    break
+                try:
+                    evt = json.loads(data_str)
+                except Exception:
+                    continue
+                etype = evt.get("type", "")
+                if etype == "response.output_text.delta":
+                    seen_delta = True
+                    delta = evt.get("delta", "")
+                    if delta:
+                        content_text += delta
+                        yield delta
+                elif etype == "response.output_item.added":
+                    item = evt.get("item", {})
+                    if item.get("type") == "function_call":
+                        idx = evt.get("output_index", 0)
+                        fc_buf[idx] = {"id": item.get("call_id", item.get("id", "")), "name": item.get("name", ""), "args": ""}
+                        current_fc_idx = idx
+                elif etype == "response.function_call_arguments.delta":
+                    idx = evt.get("output_index", current_fc_idx or 0)
+                    if idx in fc_buf:
+                        fc_buf[idx]["args"] += evt.get("delta", "")
+                elif etype == "response.function_call_arguments.done":
+                    idx = evt.get("output_index", current_fc_idx or 0)
+                    if idx in fc_buf:
+                        fc_buf[idx]["args"] = evt.get("arguments", fc_buf[idx]["args"])
+                elif etype == "error":
+                    err = evt.get("error", {})
+                    emsg = err.get("message", str(err)) if isinstance(err, dict) else str(err)
+                    if emsg:
+                        content_text += f"Error: {emsg}"
+                        yield f"Error: {emsg}"
+                    break
+                elif etype == "response.completed":
+                    usage = evt.get("response", {}).get("usage", {})
+                    _store_current_usage(_normalize_provider_usage(usage))
+                    cached = (usage.get("input_tokens_details") or {}).get("cached_tokens", 0)
+                    inp = usage.get("input_tokens", 0)
+                    if inp:
+                        print(f"[Cache] input={inp} cached={cached}")
+                    break
+            blocks = []
+            if content_text:
+                blocks.append({"type": "text", "text": content_text})
+            for idx in sorted(fc_buf):
+                fc = fc_buf[idx]
+                try:
+                    inp = json.loads(fc["args"]) if fc["args"] else {}
+                except Exception:
+                    inp = {"_raw": fc["args"]}
+                blocks.append({"type": "tool_use", "id": fc["id"], "name": fc["name"], "input": inp})
+            return blocks
+
+        tc_buf = {}
+        for line in resp_lines:
+            if not line:
+                continue
+            line = line.decode("utf-8", errors="replace") if isinstance(line, bytes) else line
+            if not line.startswith("data:"):
+                continue
+            data_str = line[5:].lstrip()
+            if data_str == "[DONE]":
+                break
+            try:
+                evt = json.loads(data_str)
+            except Exception:
+                continue
+            ch = (evt.get("choices") or [{}])[0]
+            delta = ch.get("delta") or {}
+            if delta.get("content"):
+                text = delta["content"]
+                content_text += text
+                yield text
+            for tc in (delta.get("tool_calls") or []):
+                idx = tc.get("index", 0)
+                if idx not in tc_buf:
+                    tc_buf[idx] = {"id": tc.get("id", ""), "name": "", "args": ""}
+                if tc.get("function", {}).get("name"):
+                    tc_buf[idx]["name"] = tc["function"]["name"]
+                if tc.get("function", {}).get("arguments"):
+                    tc_buf[idx]["args"] += tc["function"]["arguments"]
+            usage = evt.get("usage")
+            if usage:
+                _store_current_usage(_normalize_provider_usage(usage))
+                cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
+                print(f"[Cache] input={usage.get('prompt_tokens',0)} cached={cached}")
+        blocks = []
+        if content_text:
+            blocks.append({"type": "text", "text": content_text})
+        for idx in sorted(tc_buf):
+            tc = tc_buf[idx]
+            try:
+                inp = json.loads(tc["args"]) if tc["args"] else {}
+            except Exception:
+                inp = {"_raw": tc["args"]}
+            blocks.append({"type": "tool_use", "id": tc["id"], "name": tc["name"], "input": inp})
+        return blocks
+
+    def _wrap_raw_ask(cls):
+        original = cls.raw_ask
+
+        def wrapped(self, messages):
+            prev = getattr(_USAGE_LOCAL, "backend", None)
+            _USAGE_LOCAL.backend = self
+            self._ga_launcher_current_usage = None
+            gen = original(self, messages)
+            try:
+                while True:
+                    yield next(gen)
+            except StopIteration as e:
+                call_usage = getattr(self, "_ga_launcher_current_usage", None)
+                if call_usage:
+                    self._ga_launcher_task_usage = _accumulate_task_usage(
+                        getattr(self, "_ga_launcher_task_usage", None),
+                        call_usage,
+                    )
+                return e.value or []
+            finally:
+                _USAGE_LOCAL.backend = prev
+
+        cls.raw_ask = wrapped
+
+    llmcore._parse_claude_sse = _parse_claude_sse_patched
+    llmcore._parse_openai_sse = _parse_openai_sse_patched
+    for cls_name in ("ClaudeSession", "LLMSession", "NativeClaudeSession", "NativeOAISession"):
+        cls = getattr(llmcore, cls_name, None)
+        if cls is not None:
+            _wrap_raw_ask(cls)
+    llmcore._ga_launcher_usage_patched = True
+    return llmcore
 
 
 def _native_prompt_obj(prompt_body):
@@ -117,6 +437,22 @@ def _render_tool_use(block):
     except Exception:
         pretty = str(args)
     return f"🛠️ Tool: `{name}`  📥 args:\n````text\n{pretty}\n````\n"
+
+
+def _response_text_only(response_body):
+    try:
+        blocks = ast.literal_eval((response_body or "").strip())
+    except Exception:
+        return ""
+    if not isinstance(blocks, list):
+        return ""
+    texts = []
+    for block in blocks:
+        if isinstance(block, dict) and block.get("type") == "text":
+            text = block.get("text", "")
+            if isinstance(text, str) and text.strip():
+                texts.append(text.strip())
+    return "\n\n".join(texts).strip()
 
 
 def _render_native_turn(prompt_body, response_body, next_prompt_body, fallback_turn):
@@ -206,18 +542,21 @@ def _restore_legacy_chat(content, cc):
         elif line.startswith("[Agent] "):
             bubbles.append({"role": "assistant", "text": line[8:]})
 
-    current_user = _native_first_user_line(first_prompt_text, getattr(cc, "FILE_HINT", ""))
-    if current_user:
-        bubbles.append({"role": "user", "text": current_user})
-
-    turn_texts = []
+    assistant_parts = []
     for idx, (prompt_body, response_body) in enumerate(pairs):
-        next_prompt_body = pairs[idx + 1][0] if idx + 1 < len(pairs) else None
-        turn_text = _render_native_turn(prompt_body, response_body, next_prompt_body, idx + 1)
-        if turn_text:
-            turn_texts.append(turn_text)
-    if turn_texts:
-        bubbles.append({"role": "assistant", "text": "\n\n".join(turn_texts)})
+        prompt = _native_prompt_obj(prompt_body)
+        prompt_text = _native_prompt_text(prompt) if prompt else ""
+        current_user = _native_first_user_line(prompt_text, getattr(cc, "FILE_HINT", ""))
+        if current_user:
+            if assistant_parts:
+                bubbles.append({"role": "assistant", "text": "\n\n".join(assistant_parts)})
+                assistant_parts = []
+            bubbles.append({"role": "user", "text": current_user})
+        display_text = _response_text_only(response_body)
+        if display_text:
+            assistant_parts.append(display_text)
+    if assistant_parts:
+        bubbles.append({"role": "assistant", "text": "\n\n".join(assistant_parts)})
 
     agent_history = cc._restore_native_history(content) or _build_history_from_bubbles(bubbles)
     return bubbles, agent_history
@@ -250,6 +589,7 @@ def main():
 
     try:
         send({"event": "log", "msg": "导入 agentmain…"})
+        _patch_llm_usage_capture()
         import agentmain
         send({"event": "log", "msg": "实例化 Agent…"})
         try:
@@ -274,14 +614,24 @@ def main():
         send({"event": "error", "msg": str(e), "trace": traceback.format_exc()[-1500:]})
         return
 
-    def relay(dq):
+    def relay(dq, backend=None):
         try:
             while True:
                 item = dq.get(timeout=3600)
                 if "next" in item:
                     send({"event": "next", "text": item["next"]})
                 if "done" in item:
-                    send({"event": "done", "text": item["done"]})
+                    usage = None
+                    try:
+                        raw_usage = getattr(backend, "_ga_launcher_task_usage", None)
+                        if isinstance(raw_usage, dict) and raw_usage:
+                            usage = dict(raw_usage)
+                    except Exception:
+                        usage = None
+                    payload = {"event": "done", "text": item["done"]}
+                    if usage:
+                        payload["usage"] = usage
+                    send(payload)
                     break
         except Exception as e:
             send({"event": "done", "text": f"[错误] {e}"})
@@ -296,8 +646,15 @@ def main():
         c = cmd.get("cmd")
         try:
             if c == "send":
+                backend = getattr(getattr(agent, "llmclient", None), "backend", None)
+                if backend is not None:
+                    try:
+                        backend._ga_launcher_task_usage = None
+                        backend._ga_launcher_current_usage = None
+                    except Exception:
+                        pass
                 dq = agent.put_task(cmd.get("text", ""), source="user")
-                threading.Thread(target=relay, args=(dq,), daemon=True).start()
+                threading.Thread(target=relay, args=(dq, backend), daemon=True).start()
             elif c == "abort":
                 agent.abort()
                 send({"event": "aborted"})
@@ -386,6 +743,34 @@ def main():
                           "bubbles": [],
                           "agent_history": [],
                           "error": str(e)})
+            elif c == "restore_official":
+                fp = cmd.get("file", "")
+                try:
+                    from frontends import chatapp_common as cc
+                    with open(fp, "r", encoding="utf-8", errors="replace") as f:
+                        content = f.read()
+                    restored = cc._restore_text_pairs(content) or cc._restore_native_history(content)
+                    if not restored:
+                        raise RuntimeError("官方日志里没有可恢复内容")
+                    try:
+                        agent.abort()
+                    except Exception:
+                        pass
+                    agent.history = list(restored)
+                    if agent.llmclient and hasattr(agent.llmclient, "backend"):
+                        agent.llmclient.backend.history = []
+                    agent.handler = None
+                    send({
+                        "event": "official_restored",
+                        "file": fp,
+                        "count": sum(1 for line in restored if line.startswith("[USER]: ")),
+                    })
+                except Exception as e:
+                    send({
+                        "event": "official_restored",
+                        "file": fp,
+                        "error": str(e),
+                    })
             elif c == "quit":
                 send({"event": "bye"}); return
             elif c == "reinject_tools":

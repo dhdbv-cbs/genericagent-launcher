@@ -77,7 +77,7 @@ dist/GenericAgentLauncher.exe
 
 ```bash
 pip install -r requirements.txt
-python launcher.py
+python qt_launcher.py
 ```
 
 重新打包：
@@ -92,8 +92,14 @@ build.bat
 
 原因是这个仓库本身只负责“启动器”这一层，而不是把 GenericAgent 整个内核重新实现一遍。当前主要结构就是：
 
+- `qt_chat_window.py`
+  Qt 主界面，包含欢迎页、聊天页、设置页、渠道管理、会话列表与渲染
+- `launcher_core.py`
+  启动器共享后端，包含配置、会话、token 统计、模板、官方日志导入辅助等非 UI 逻辑
+- `qt_launcher.py`
+  Qt 启动入口
 - `launcher.py`
-  启动器主界面，包含下载、聊天、设置、API 配置、通讯渠道管理等桌面交互
+  兼容入口，转发到 Qt 实现
 - `bridge.py`
   启动器和 GenericAgent 内核之间的桥接层，负责进程通信和事件转发
 - `GenericAgentLauncher.spec`
@@ -104,7 +110,7 @@ build.bat
 也就是说：
 
 - 这个仓库“文件少”，不代表内容少
-- 主要功能大量集中在 `launcher.py`
+- 现在主前端已经迁移到 Qt，不再以 Tk 为主架构
 - 真正的 Agent 能力、模型调用、工具执行和原生前端仍然来自上游 GenericAgent
 
 如果以后功能继续增加，仓库当然也可以再拆模块，但当前这种体量下，文件数量少本身并不是问题，关键是行为是否稳定、配置是否清晰、打包是否可靠
@@ -116,7 +122,7 @@ build.bat
 如果你只运行已经打包好的 `exe`：
 
 - 不需要安装启动器本身的 Python 依赖
-- 不需要手动配置 `customtkinter`
+- 不需要手动配置 Qt 运行环境
 
 ### GenericAgent 本体
 
@@ -150,7 +156,7 @@ cd genericagent-launcher
 开发模式：
 
 ```bash
-python launcher.py
+python qt_launcher.py
 ```
 
 打包产物默认在：
@@ -238,7 +244,10 @@ dist/GenericAgentLauncher.exe
 ## 项目结构
 
 ```text
-launcher.py                 启动器主界面
+qt_chat_window.py           Qt 主界面
+launcher_core.py            启动器共享后端
+qt_launcher.py              Qt 启动入口
+launcher.py                 兼容入口
 bridge.py                   启动器与 GenericAgent 内核之间的桥接层
 build.bat                   Windows 打包脚本
 GenericAgentLauncher.spec   PyInstaller 打包配置

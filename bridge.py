@@ -7,6 +7,7 @@ import os
 import re
 import sys
 import threading
+import time
 import traceback
 
 _RESTORE_BLOCK_RE = re.compile(
@@ -353,6 +354,21 @@ def _patch_llm_usage_capture():
     return llmcore
 
 
+def _patch_code_run_stdin():
+    """bridge 主线程阻塞读 stdin pipe，ga.code_run 的 Popen 默认继承 stdin 会让孙子
+    python 进程在 Windows 上启动卡 60 秒才被强杀。显式用 DEVNULL 作 stdin 规避。"""
+    import ga
+    orig = ga.subprocess.Popen
+    if getattr(orig, '_ga_launcher_stdin_patched', False):
+        return
+    def popen(*args, **kwargs):
+        if 'stdin' not in kwargs:
+            kwargs['stdin'] = ga.subprocess.DEVNULL
+        return orig(*args, **kwargs)
+    popen._ga_launcher_stdin_patched = True
+    ga.subprocess.Popen = popen
+
+
 def _native_prompt_obj(prompt_body):
     try:
         prompt = json.loads(prompt_body)
@@ -484,84 +500,6 @@ def _render_native_turn(prompt_body, response_body, next_prompt_body, fallback_t
     return "".join(pieces).strip() if has_content else ""
 
 
-def _build_history_from_bubbles(bubbles):
-    history = []
-    for bubble in bubbles:
-        role = bubble.get("role")
-        text = (bubble.get("text") or "").strip()
-        if not text:
-            continue
-        if role == "user":
-            history.append(f"[USER]: {text}")
-            continue
-        match = _SUMMARY_RE.findall(text)
-        if match:
-            summary = match[-1].strip()
-        else:
-            summary = text
-            summary = re.sub(r"(?P<fence>`{3,})[\s\S]*?(?P=fence)", "", summary)
-            summary = re.sub(r"<thinking>[\s\S]*?</thinking>", "", summary, flags=re.IGNORECASE)
-            summary = re.sub(r"\n{2,}", "\n", summary).strip().splitlines()[0] if summary.strip() else "..."
-        history.append(f"[Agent] {summary[:500]}")
-    return history
-
-
-def _restore_legacy_chat(content, cc):
-    users = re.findall(r"=== USER ===\n(.+?)(?==== |$)", content or "", re.DOTALL)
-    resps = re.findall(r"=== Response ===.*?\n(.+?)(?==== Prompt|$)", content or "", re.DOTALL)
-    if users and resps:
-        bubbles = []
-        for user_text, resp_text in zip(users, resps):
-            user_text = (user_text or "").strip()
-            resp_text = (resp_text or "").strip()
-            if user_text:
-                bubbles.append({"role": "user", "text": user_text})
-            if resp_text:
-                bubbles.append({"role": "assistant", "text": resp_text})
-        agent_history = cc._restore_text_pairs(content) or _build_history_from_bubbles(bubbles)
-        return bubbles, agent_history
-
-    pairs = []
-    pending_prompt = None
-    for label, body in _RESTORE_BLOCK_RE.findall(content or ""):
-        if label == "Prompt":
-            pending_prompt = body
-        elif pending_prompt is not None:
-            pairs.append((pending_prompt, body))
-            pending_prompt = None
-    if not pairs:
-        return [], []
-
-    first_prompt = _native_prompt_obj(pairs[0][0])
-    first_prompt_text = _native_prompt_text(first_prompt) if first_prompt else ""
-    bubbles = []
-
-    for line in _native_history_lines(first_prompt_text):
-        if line.startswith("[USER]: "):
-            bubbles.append({"role": "user", "text": line[8:]})
-        elif line.startswith("[Agent] "):
-            bubbles.append({"role": "assistant", "text": line[8:]})
-
-    assistant_parts = []
-    for idx, (prompt_body, response_body) in enumerate(pairs):
-        prompt = _native_prompt_obj(prompt_body)
-        prompt_text = _native_prompt_text(prompt) if prompt else ""
-        current_user = _native_first_user_line(prompt_text, getattr(cc, "FILE_HINT", ""))
-        if current_user:
-            if assistant_parts:
-                bubbles.append({"role": "assistant", "text": "\n\n".join(assistant_parts)})
-                assistant_parts = []
-            bubbles.append({"role": "user", "text": current_user})
-        display_text = _response_text_only(response_body)
-        if display_text:
-            assistant_parts.append(display_text)
-    if assistant_parts:
-        bubbles.append({"role": "assistant", "text": "\n\n".join(assistant_parts)})
-
-    agent_history = cc._restore_native_history(content) or _build_history_from_bubbles(bubbles)
-    return bubbles, agent_history
-
-
 def _mykey_hint_path(agent_dir):
     py_path = os.path.join(agent_dir, "mykey.py")
     if os.path.isfile(py_path):
@@ -591,6 +529,7 @@ def main():
         send({"event": "log", "msg": "导入 agentmain…"})
         _patch_llm_usage_capture()
         import agentmain
+        _patch_code_run_stdin()
         send({"event": "log", "msg": "实例化 Agent…"})
         try:
             agent = agentmain.GeneraticAgent()
@@ -614,7 +553,7 @@ def main():
         send({"event": "error", "msg": str(e), "trace": traceback.format_exc()[-1500:]})
         return
 
-    def relay(dq, backend=None):
+    def relay(dq, backend=None, session_id=None):
         try:
             while True:
                 item = dq.get(timeout=3600)
@@ -632,6 +571,29 @@ def main():
                     if usage:
                         payload["usage"] = usage
                     send(payload)
+                    try:
+                        deadline = time.time() + 1.5
+                        while getattr(agent, "is_running", False) and time.time() < deadline:
+                            time.sleep(0.05)
+                    except Exception:
+                        pass
+                    backend_hist = []
+                    try:
+                        if agent.llmclient and hasattr(agent.llmclient, "backend"):
+                            backend_hist = list(agent.llmclient.backend.history or [])
+                    except Exception:
+                        backend_hist = []
+                    send(
+                        {
+                            "event": "turn_snapshot",
+                            "session_id": session_id,
+                            "backend_history": backend_hist,
+                            "agent_history": list(agent.history or []),
+                            "llm_idx": int(getattr(agent, "llm_no", 0) or 0),
+                            "process_pid": os.getpid(),
+                            "snapshot_ts": time.time(),
+                        }
+                    )
                     break
         except Exception as e:
             send({"event": "done", "text": f"[错误] {e}"})
@@ -654,7 +616,7 @@ def main():
                     except Exception:
                         pass
                 dq = agent.put_task(cmd.get("text", ""), source="user")
-                threading.Thread(target=relay, args=(dq, backend), daemon=True).start()
+                threading.Thread(target=relay, args=(dq, backend, cmd.get("session_id")), daemon=True).start()
             elif c == "abort":
                 agent.abort()
                 send({"event": "aborted"})
@@ -686,91 +648,19 @@ def main():
                 try: agent.abort()
                 except Exception: pass
                 try:
+                    requested_llm_idx = cmd.get("llm_idx")
+                    if requested_llm_idx is not None:
+                        try:
+                            agent.next_llm(int(requested_llm_idx))
+                        except Exception:
+                            pass
                     agent.history = list(cmd.get("agent_history") or [])
                     if agent.llmclient and hasattr(agent.llmclient, "backend"):
                         agent.llmclient.backend.history = list(cmd.get("backend_history") or [])
                     agent.handler = None
-                    send({"event": "state_loaded"})
+                    send({"event": "state_loaded", "llms": _ui_llms(agent), "llm_idx": int(getattr(agent, "llm_no", 0) or 0)})
                 except Exception as e:
                     send({"event": "error", "msg": f"set_state: {e}"})
-            elif c == "list_legacy":
-                # 扫描 GenericAgent 原生历史 (temp/model_responses/*.txt)
-                items = []
-                try:
-                    import glob
-                    from frontends import chatapp_common as cc
-                    for pattern in cc.RESTORE_GLOBS:
-                        for fp in glob.glob(pattern):
-                            try:
-                                with open(fp, "r", encoding="utf-8", errors="replace") as f:
-                                    content = f.read()
-                                bubbles, agent_history = _restore_legacy_chat(content, cc)
-                                if not bubbles and not agent_history:
-                                    continue
-                                title = ""
-                                for bubble in bubbles:
-                                    if bubble.get("role") == "user":
-                                        title = (bubble.get("text") or "").strip()
-                                        if title:
-                                            break
-                                items.append({
-                                    "file": fp,
-                                    "title": (title or os.path.basename(fp))[:60],
-                                    "mtime": os.path.getmtime(fp),
-                                    "pairs": sum(1 for b in bubbles if b.get("role") == "user") or sum(1 for l in agent_history if l.startswith("[USER]: ")),
-                                })
-                            except Exception:
-                                continue
-                except Exception as e:
-                    send({"event": "legacy_list", "items": [], "error": str(e)}); continue
-                items.sort(key=lambda x: x["mtime"], reverse=True)
-                send({"event": "legacy_list", "items": items})
-            elif c == "restore_legacy":
-                # 根据 file 解析内容，返回可展示的气泡 + agent_history，由启动器自己灌回状态
-                fp = cmd.get("file", "")
-                try:
-                    from frontends import chatapp_common as cc
-                    with open(fp, "r", encoding="utf-8", errors="replace") as f:
-                        content = f.read()
-                    bubbles, agent_history = _restore_legacy_chat(content, cc)
-                    send({"event": "legacy_restored",
-                          "file": fp,
-                          "bubbles": bubbles,
-                          "agent_history": agent_history})
-                except Exception as e:
-                    send({"event": "legacy_restored",
-                          "file": fp,
-                          "bubbles": [],
-                          "agent_history": [],
-                          "error": str(e)})
-            elif c == "restore_official":
-                fp = cmd.get("file", "")
-                try:
-                    from frontends import chatapp_common as cc
-                    with open(fp, "r", encoding="utf-8", errors="replace") as f:
-                        content = f.read()
-                    restored = cc._restore_text_pairs(content) or cc._restore_native_history(content)
-                    if not restored:
-                        raise RuntimeError("官方日志里没有可恢复内容")
-                    try:
-                        agent.abort()
-                    except Exception:
-                        pass
-                    agent.history = list(restored)
-                    if agent.llmclient and hasattr(agent.llmclient, "backend"):
-                        agent.llmclient.backend.history = []
-                    agent.handler = None
-                    send({
-                        "event": "official_restored",
-                        "file": fp,
-                        "count": sum(1 for line in restored if line.startswith("[USER]: ")),
-                    })
-                except Exception as e:
-                    send({
-                        "event": "official_restored",
-                        "file": fp,
-                        "error": str(e),
-                    })
             elif c == "quit":
                 send({"event": "bye"}); return
             elif c == "reinject_tools":

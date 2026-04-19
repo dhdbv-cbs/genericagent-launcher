@@ -3,9 +3,15 @@ echo Building GenericAgent Launcher...
 echo.
 
 python -m pip install -r requirements.txt
+if errorlevel 1 (
+    echo [ERROR] Failed to install requirements
+    pause
+    exit /b 1
+)
+
 python -m pip install pyinstaller
 if errorlevel 1 (
-    echo [ERROR] Failed to install dependencies
+    echo [ERROR] Failed to install PyInstaller
     pause
     exit /b 1
 )

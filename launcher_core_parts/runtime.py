@@ -22,6 +22,14 @@ def _python_creationflags():
     return subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
 
+def _python_utf8_subprocess_env(base_env=None):
+    env = dict(base_env or os.environ)
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
+    env.pop("PYTHONLEGACYWINDOWSSTDIO", None)
+    return env
+
+
 def load_config():
     if os.path.exists(CONFIG_PATH):
         try:

@@ -171,6 +171,132 @@ tg_bot_token = '123'
             removed = lz.purge_archived_sessions(td)
             self.assertEqual(removed, 1)
 
+    def test_bridge_main_reconfigures_stdin_utf8(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        bridge_path = os.path.join(root, "bridge.py")
+        with open(bridge_path, "r", encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("os.environ['PYTHONIOENCODING'] = 'utf-8'", src)
+        self.assertIn("os.environ['PYTHONUTF8'] = '1'", src)
+        self.assertIn("os.environ.pop('PYTHONLEGACYWINDOWSSTDIO', None)", src)
+        self.assertIn("sys.stdin.reconfigure(encoding='utf-8', errors='replace')", src)
+
+    def test_bridge_runtime_sets_utf8_env_for_bridge_process(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        path = os.path.join(root, "qt_chat_parts", "bridge_runtime.py")
+        with open(path, "r", encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn('bridge_env["PYTHONIOENCODING"] = "utf-8"', src)
+        self.assertIn('bridge_env["PYTHONUTF8"] = "1"', src)
+        self.assertIn('bridge_env.pop("PYTHONLEGACYWINDOWSSTDIO", None)', src)
+        self.assertIn("env=bridge_env", src)
+
+    def test_bridge_runtime_notifies_when_reply_done(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        path = os.path.join(root, "qt_chat_parts", "bridge_runtime.py")
+        with open(path, "r", encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("def _notify_reply_done", src)
+        self.assertIn("winsound.MessageBeep", src)
+        self.assertIn("tray.showMessage", src)
+        self.assertIn("3000", src)
+        self.assertIn("if not was_aborted", src)
+
+    def test_python_env_probe_forces_utf8_subprocess_env(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        path = os.path.join(root, "launcher_core_parts", "python_env.py")
+        with open(path, "r", encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("_python_utf8_subprocess_env", src)
+        self.assertIn('encoding="utf-8"', src)
+        self.assertIn('errors="replace"', src)
+        self.assertIn("env=_python_utf8_subprocess_env()", src)
+
+    def test_channel_runtime_launch_uses_utf8_python_env(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        path = os.path.join(root, "qt_chat_parts", "channel_runtime.py")
+        with open(path, "r", encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("py_env = lz._python_utf8_subprocess_env()", src)
+        self.assertIn("env=py_env", src)
+
+    def test_private_python_installer_has_atomic_download_and_retry(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        path = os.path.join(root, "qt_chat_parts", "downloads.py")
+        with open(path, "r", encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn('temp_dest = dest + ".part"', src)
+        self.assertIn("os.replace(temp_dest, dest)", src)
+        self.assertIn("for attempt in range(2):", src)
+        self.assertIn("准备重新下载安装包并重试一次", src)
+
+    def test_private_python_installer_supports_mirror_fallback(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        path = os.path.join(root, "qt_chat_parts", "downloads.py")
+        with open(path, "r", encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("mirrors.huaweicloud.com", src)
+        self.assertIn("mirror.nju.edu.cn", src)
+        self.assertIn("mirrors.bfsu.edu.cn", src)
+        self.assertIn("mirrors.tuna.tsinghua.edu.cn", src)
+        self.assertIn("mirrors.ustc.edu.cn", src)
+        self.assertIn("spec.get(\"urls\") or [spec[\"url\"]]", src)
+
+    def test_private_python_installer_detects_verification_pages(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        path = os.path.join(root, "qt_chat_parts", "downloads.py")
+        with open(path, "r", encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("返回 HTML 页面而不是安装包", src)
+        self.assertIn("下载内容疑似验证页面而非 exe", src)
+
+    def test_private_python_installer_reports_download_speed(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        path = os.path.join(root, "qt_chat_parts", "downloads.py")
+        with open(path, "r", encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("MB/s", src)
+        self.assertIn("尝试下载源", src)
+        self.assertIn("正在切换下一个源", src)
+
+    def test_private_python_installer_uses_user_selected_sources(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        path = os.path.join(root, "qt_chat_parts", "downloads.py")
+        with open(path, "r", encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("private_python_download_source_ids", src)
+        self.assertIn("_private_python_selected_sources", src)
+        self.assertIn("_rank_download_sources", src)
+        self.assertIn("selected_urls or spec.get(\"urls\")", src)
+
+    def test_private_python_installer_has_post_install_python_discovery(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        path = os.path.join(root, "qt_chat_parts", "downloads.py")
+        with open(path, "r", encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("_private_python_candidate_paths", src)
+        self.assertIn("_resolve_private_python_exe", src)
+        self.assertIn("wait_seconds=45", src)
+        self.assertIn("已扫描路径", src)
+
+    def test_private_python_installer_has_source_precheck_logs(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        path = os.path.join(root, "qt_chat_parts", "downloads.py")
+        with open(path, "r", encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("正在预检下载源可用性", src)
+        self.assertIn("下载源预检通过", src)
+        self.assertIn("下载源预检失败", src)
+
+    def test_setup_page_has_download_source_checkboxes(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        path = os.path.join(root, "qt_chat_parts", "setup_pages.py")
+        with open(path, "r", encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("Python 安装包下载源（可多选", src)
+        self.assertIn("download_source_checkboxes", src)
+        self.assertIn("_on_private_python_source_toggled", src)
+
     def test_markup_helpers(self):
         raw = """
 <summary>hello</summary>

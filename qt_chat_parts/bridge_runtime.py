@@ -7,7 +7,7 @@ import subprocess
 import threading
 import time
 
-from PySide6.QtWidgets import QMessageBox
+from PySide6.QtWidgets import QApplication, QMessageBox, QStyle, QSystemTrayIcon
 
 from launcher_app import core as lz
 
@@ -15,6 +15,54 @@ from .common import _session_copy
 
 
 class BridgeRuntimeMixin:
+    def _ensure_reply_notify_tray(self):
+        tray = getattr(self, "_reply_notify_tray", None)
+        if tray is not None:
+            return tray
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return None
+        icon = self.windowIcon()
+        if icon is None or icon.isNull():
+            app = QApplication.instance()
+            if app is not None:
+                icon = app.windowIcon()
+        if icon is None or icon.isNull():
+            icon = self.style().standardIcon(QStyle.SP_MessageBoxInformation)
+        tray = QSystemTrayIcon(icon, self)
+        tray.setToolTip("GenericAgent 启动器")
+        tray.show()
+        self._reply_notify_tray = tray
+        return tray
+
+    def _play_reply_done_sound(self):
+        if os.name == "nt":
+            try:
+                import winsound
+
+                winsound.MessageBeep(winsound.MB_ICONASTERISK)
+                return
+            except Exception:
+                pass
+        try:
+            app = QApplication.instance()
+            if app is not None:
+                app.beep()
+        except Exception:
+            pass
+
+    def _notify_reply_done(self, final_text: str):
+        self._play_reply_done_sound()
+        tray = self._ensure_reply_notify_tray()
+        if tray is None:
+            return
+        msg = "AI 回复已完成"
+        preview = str(final_text or "").strip().replace("\r", " ").replace("\n", " ")
+        if preview:
+            if len(preview) > 72:
+                preview = preview[:72].rstrip() + "…"
+            msg = f"{msg}：{preview}"
+        tray.showMessage("GenericAgent 启动器", msg, QSystemTrayIcon.Information, 3000)
+
     def _request_backend_state(self, session_id=None):
         sid = session_id or ((self.current_session or {}).get("id"))
         if not sid or not self._bridge_ready:
@@ -142,12 +190,17 @@ class BridgeRuntimeMixin:
         self._set_status("正在启动桥接进程…")
         self._stderr_buf = []
         creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        bridge_env = os.environ.copy()
+        bridge_env["PYTHONIOENCODING"] = "utf-8"
+        bridge_env["PYTHONUTF8"] = "1"
+        bridge_env.pop("PYTHONLEGACYWINDOWSSTDIO", None)
         self.bridge_proc = subprocess.Popen(
             [py, "-u", bridge, self.agent_dir],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             cwd=self.agent_dir,
+            env=bridge_env,
             text=True,
             encoding="utf-8",
             errors="replace",
@@ -289,6 +342,7 @@ class BridgeRuntimeMixin:
         return text + "\n\n[系统] 已按用户请求中断本轮生成。"
 
     def _stream_done(self, final_text: str, provider_usage: dict | None = None):
+        was_aborted = bool(self._abort_requested)
         if self._abort_requested:
             final_text = self._format_interrupted_text(final_text)
         finished_row = self._stream_row
@@ -303,6 +357,8 @@ class BridgeRuntimeMixin:
         self.stop_btn.setEnabled(False)
         self._set_status("已完成。")
         self._refresh_composer_enabled()
+        if not was_aborted:
+            self._notify_reply_done(final_text)
 
         if self.current_session is not None:
             self.current_session.setdefault("bubbles", []).append({"role": "assistant", "text": final_text})

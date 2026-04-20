@@ -650,12 +650,14 @@ class ChannelRuntimeMixin:
         try:
             log_handle = open(log_path, "a", encoding="utf-8", buffering=1)
             log_handle.write(f"\n==== {time.strftime('%Y-%m-%d %H:%M:%S')} start {channel_id} ====\n")
+            py_env = lz._python_utf8_subprocess_env()
             proc = subprocess.Popen(
                 [py, "-u", script_path],
                 cwd=self.agent_dir,
                 stdin=subprocess.DEVNULL,
                 stdout=log_handle,
                 stderr=subprocess.STDOUT,
+                env=py_env,
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
             )
         except Exception as e:

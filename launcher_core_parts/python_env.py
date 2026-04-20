@@ -5,7 +5,7 @@ import os
 import subprocess
 
 from .constants import CONFIG_PATH
-from .runtime import _python_creationflags, _resolve_config_path
+from .runtime import _python_creationflags, _python_utf8_subprocess_env, _resolve_config_path
 
 
 def _system_python_commands():
@@ -34,6 +34,9 @@ def _probe_python_command(cmd):
             capture_output=True,
             text=True,
             timeout=8,
+            encoding="utf-8",
+            errors="replace",
+            env=_python_utf8_subprocess_env(),
             creationflags=_python_creationflags(),
         )
         if r.returncode != 0:
@@ -89,6 +92,7 @@ def _probe_python_agent_compat(py, agent_dir):
             cwd=agent_dir,
             encoding="utf-8",
             errors="replace",
+            env=_python_utf8_subprocess_env(),
             creationflags=_python_creationflags(),
         )
     except Exception as e:

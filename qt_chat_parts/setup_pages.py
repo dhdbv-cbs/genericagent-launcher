@@ -379,6 +379,25 @@ class SetupPagesMixin:
         self.download_private_hint.setWordWrap(True)
         self.download_private_hint.setObjectName("mutedText")
         footer_box.addWidget(self.download_private_hint)
+
+        self.download_sources_hint = QLabel("Python 安装包下载源（可多选；只会尝试你勾选的源）")
+        self.download_sources_hint.setWordWrap(True)
+        self.download_sources_hint.setObjectName("mutedText")
+        footer_box.addWidget(self.download_sources_hint)
+
+        self.download_source_checkboxes = {}
+        for item in self._private_python_source_ui_options():
+            source_id = str(item.get("id") or "").strip()
+            source_label = str(item.get("label") or source_id).strip()
+            if not source_id:
+                continue
+            cb = QCheckBox(source_label)
+            cb.setObjectName("mutedText")
+            cb.toggled.connect(lambda _checked, sid=source_id: self._on_private_python_source_toggled(sid))
+            self.download_source_checkboxes[source_id] = cb
+            footer_box.addWidget(cb)
+        self._sync_private_python_source_checkboxes_from_cfg()
+
         self.download_private_only_checkbox = QCheckBox("仅配置虚拟环境，不下载原项目（要求目标目录已存在有效 GenericAgent）")
         self.download_private_only_checkbox.setObjectName("mutedText")
         footer_box.addWidget(self.download_private_only_checkbox)

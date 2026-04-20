@@ -517,7 +517,13 @@ def main():
     try: os.chdir(agent_dir)
     except Exception: pass
 
+    os.environ['PYTHONIOENCODING'] = 'utf-8'
+    os.environ['PYTHONUTF8'] = '1'
+    os.environ.pop('PYTHONLEGACYWINDOWSSTDIO', None)
+
     try:
+        if hasattr(sys.stdin, 'reconfigure'):
+            sys.stdin.reconfigure(encoding='utf-8', errors='replace')
         if hasattr(sys.stdout, 'reconfigure'):
             sys.stdout.reconfigure(encoding='utf-8', errors='replace')
         if hasattr(sys.stderr, 'reconfigure'):

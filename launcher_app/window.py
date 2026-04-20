@@ -45,8 +45,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-import launcher_core as lz
-from qt_theme import C, F, FLUENT_QSS, apply_fluent_shadow, apply_mica
+from launcher_app import core as lz
+from launcher_app.theme import C, F, FLUENT_QSS, apply_fluent_shadow, apply_mica
 
 SCROLLBAR_STYLE = """
 QScrollBar:vertical { width: 10px; background: transparent; border: none; margin: 2px; }
@@ -367,7 +367,8 @@ class QtChatWindow(ApiEditorMixin, ChannelRuntimeMixin, PersonalUsageMixin, Wind
 
 
 def main(agent_dir: str | None = None) -> int:
-    import qt_theme
+    from launcher_app import theme as qt_theme
+
     target = agent_dir if agent_dir is not None else (sys.argv[1] if len(sys.argv) > 1 else None)
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName("GenericAgent Launcher")

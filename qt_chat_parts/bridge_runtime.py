@@ -9,7 +9,7 @@ import time
 
 from PySide6.QtWidgets import QMessageBox
 
-import launcher_core as lz
+from launcher_app import core as lz
 
 from .common import _session_copy
 

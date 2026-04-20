@@ -17,8 +17,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-import launcher_core as lz
-from qt_theme import C, F
+from launcher_app import core as lz
+from launcher_app.theme import C, F
 
 from .common import _session_copy
 

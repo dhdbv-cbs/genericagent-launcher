@@ -7,15 +7,15 @@ import tempfile
 import time
 import unittest
 
-import launcher_core as lz
+from launcher_app import core as lz
 
 
 class LauncherCoreBehaviorTests(unittest.TestCase):
     def test_all_lz_symbols_used_by_ui_exist(self):
         root = os.path.dirname(os.path.dirname(__file__))
         files = [
-            os.path.join(root, "qt_chat_window.py"),
-            os.path.join(root, "qt_theme.py"),
+            os.path.join(root, "launcher_app", "window.py"),
+            os.path.join(root, "launcher_app", "theme.py"),
         ]
         pattern = re.compile(r"\blz\.([A-Za-z_][A-Za-z0-9_]*)")
         names = set()

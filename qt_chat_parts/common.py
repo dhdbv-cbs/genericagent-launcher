@@ -19,8 +19,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-import launcher_core as lz
-from qt_theme import C
+from launcher_app import core as lz
+from launcher_app.theme import C
 
 PRIVATE_PYTHON_VERSION = "3.12.10"
 

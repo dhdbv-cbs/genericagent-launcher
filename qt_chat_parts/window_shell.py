@@ -23,8 +23,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-import launcher_core as lz
-from qt_theme import C, F, apply_mica
+from launcher_app import core as lz
+from launcher_app.theme import C, F, apply_mica
 
 from . import common as chat_common
 from .common import _session_source_label
@@ -159,7 +159,7 @@ class WindowShellMixin:
         btn.setToolTip("切换为浅色主题" if mode == "dark" else "切换为深色主题")
 
     def _apply_theme(self, mode: str):
-        import qt_theme
+        from launcher_app import theme as qt_theme
 
         normalized = qt_theme.set_theme(mode)
         app = QApplication.instance()

@@ -15,7 +15,7 @@
 
 ```bash
 pip install -r requirements.txt
-python qt_launcher.py
+python launcher.py
 ```
 
 重新打包：

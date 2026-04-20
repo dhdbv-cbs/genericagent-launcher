@@ -4,7 +4,7 @@ import os
 import tempfile
 import unittest
 
-import launcher_core as lz
+from launcher_app import core as lz
 from launcher_core_parts import model_api, runtime
 
 

@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-import launcher_core as lz
+from launcher_app import core as lz
 
 from .common import OptionCard, _probe_download_requirements
 

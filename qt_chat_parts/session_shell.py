@@ -5,7 +5,7 @@ import time
 from PySide6.QtCore import QEvent
 from PySide6.QtWidgets import QMessageBox
 
-import launcher_core as lz
+from launcher_app import core as lz
 
 
 class SessionShellMixin:

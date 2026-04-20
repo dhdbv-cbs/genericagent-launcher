@@ -13,7 +13,7 @@ def _bridge_script_path():
         base = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
     else:
         # runtime.py lives under launcher_core_parts/, while bridge.py stays at
-        # the project root next to launcher.py / qt_chat_window.py.
+        # the project root next to launcher.py.
         base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(base, "bridge.py")
 

@@ -77,7 +77,7 @@ dist/GenericAgentLauncher.exe
 
 ```bash
 pip install -r requirements.txt
-python qt_launcher.py
+python launcher.py
 ```
 
 重新打包：
@@ -88,18 +88,18 @@ build.bat
 
 ## 为什么源码文件不多
 
-这个仓库的源码文件看起来比较少，这是正常的。
+这个仓库现在已经拆成了明确的模块目录，不再维持“根目录大单文件”那种结构。
 
-原因是这个仓库本身只负责“启动器”这一层，而不是把 GenericAgent 整个内核重新实现一遍。当前主要结构就是：
+它本身只负责“启动器”这一层，而不是把 GenericAgent 整个内核重新实现一遍。当前主要结构是：
 
-- `qt_chat_window.py`
-  Qt 主界面，包含欢迎页、聊天页、设置页、渠道管理、会话列表与渲染
-- `launcher_core.py`
-  启动器共享后端，包含配置、会话、token 统计、模板、官方日志导入辅助等非 UI 逻辑
-- `qt_launcher.py`
-  Qt 启动入口
 - `launcher.py`
-  兼容入口，转发到 Qt 实现
+  启动器统一入口，开发运行和打包都从这里启动
+- `launcher_app/`
+  启动器主包，包含 Qt 主窗口、主题系统和共享后端 facade
+- `qt_chat_parts/`
+  聊天界面拆分模块，负责会话列表、导航、下载页、聊天渲染、设置页等
+- `launcher_core_parts/`
+  启动器后端拆分模块，负责配置、会话、token 统计、模型接口、运行时辅助等
 - `bridge.py`
   启动器和 GenericAgent 内核之间的桥接层，负责进程通信和事件转发
 - `GenericAgentLauncher.spec`
@@ -156,7 +156,7 @@ cd genericagent-launcher
 开发模式：
 
 ```bash
-python qt_launcher.py
+python launcher.py
 ```
 
 打包产物默认在：
@@ -244,10 +244,10 @@ dist/GenericAgentLauncher.exe
 ## 项目结构
 
 ```text
-qt_chat_window.py           Qt 主界面
-launcher_core.py            启动器共享后端
-qt_launcher.py              Qt 启动入口
-launcher.py                 兼容入口
+launcher.py                 启动器统一入口
+launcher_app/               Qt 主界面 + 主题 + 共享后端 facade
+qt_chat_parts/              聊天前端拆分模块
+launcher_core_parts/        启动器后端拆分模块
 bridge.py                   启动器与 GenericAgent 内核之间的桥接层
 build.bat                   Windows 打包脚本
 GenericAgentLauncher.spec   PyInstaller 打包配置

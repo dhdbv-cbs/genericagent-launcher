@@ -1,15 +1,11 @@
-"""Compatibility entry for the Qt-based GenericAgent launcher.
-
-The real frontend now lives in `qt_chat_window.py`, while shared non-UI
-logic is provided by `launcher_core.py`.
-"""
+"""Entry point for the Qt-based GenericAgent launcher."""
 
 from __future__ import annotations
 
 import sys
 
-import launcher_core as _core
-from qt_chat_window import main
+from launcher_app import core as _core
+from launcher_app.window import main
 
 for _name in dir(_core):
     if _name.startswith("__"):

@@ -6,7 +6,7 @@ from PyInstaller.utils.hooks import (
 
 datas = [('bridge.py', '.')]
 binaries = []
-hiddenimports = ['qt_chat_window', 'shiboken6']
+hiddenimports = ['launcher_app.window', 'shiboken6']
 
 hiddenimports += [
     'PySide6.QtCore',
@@ -22,7 +22,7 @@ datas += collect_data_files('PySide6', subdir='plugins/imageformats')
 
 
 a = Analysis(
-    ['qt_launcher.py'],
+    ['launcher.py'],
     pathex=[],
     binaries=binaries,
     datas=datas,

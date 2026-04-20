@@ -3,7 +3,7 @@ from __future__ import annotations
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import QLabel
 
-import launcher_core as lz
+from launcher_app import core as lz
 
 from .common import MessageRow, _session_source_label
 

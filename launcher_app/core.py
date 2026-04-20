@@ -1,7 +1,6 @@
 """Shared non-UI core for the GenericAgent launcher.
 
-This file now acts as a compatibility facade and re-exports symbols from
-split modules under launcher_core_parts.
+This module re-exports symbols from split modules under launcher_core_parts.
 """
 
 from __future__ import annotations

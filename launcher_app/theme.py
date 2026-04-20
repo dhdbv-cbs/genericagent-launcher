@@ -13,7 +13,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QGraphicsDropShadowEffect, QWidget
 
-import launcher_core as lz
+from launcher_app import core as lz
 
 
 def _lz(value, index: int, fallback: str) -> str:

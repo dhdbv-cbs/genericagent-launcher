@@ -9,7 +9,7 @@ from datetime import datetime
 from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import QFileDialog, QMessageBox
 
-import launcher_core as lz
+from launcher_app import core as lz
 
 from .common import PRIVATE_PYTHON_VERSION
 

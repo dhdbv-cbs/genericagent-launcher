@@ -4,7 +4,7 @@ import os
 
 from PySide6.QtWidgets import QFileDialog, QMessageBox
 
-import launcher_core as lz
+from launcher_app import core as lz
 
 
 class NavigationMixin:

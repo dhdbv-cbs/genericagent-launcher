@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-import launcher_core as lz
+from launcher_app import core as lz
 
 _SCROLLBAR_STYLE = """
 QScrollBar:vertical { width: 10px; background: transparent; border: none; margin: 2px; }

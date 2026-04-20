@@ -7,8 +7,8 @@ from datetime import datetime
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QMessageBox, QSpinBox, QVBoxLayout
 
-import launcher_core as lz
-from qt_theme import C, F
+from launcher_app import core as lz
+from launcher_app.theme import C, F
 
 
 class PersonalUsageMixin:

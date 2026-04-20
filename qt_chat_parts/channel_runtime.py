@@ -23,8 +23,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-import launcher_core as lz
-from qt_theme import C
+from launcher_app import core as lz
+from launcher_app.theme import C
 
 
 class ChannelRuntimeMixin:

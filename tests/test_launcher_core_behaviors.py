@@ -7,10 +7,145 @@ import tempfile
 import time
 import unittest
 
+import bridge
 from launcher_app import core as lz
+from launcher_core_parts import python_env
 
 
 class LauncherCoreBehaviorTests(unittest.TestCase):
+    def test_python_env_bootstrap_detector_catches_requests_and_simplejson_failures(self):
+        self.assertTrue(
+            python_env._should_bootstrap_python_runtime("ModuleNotFoundError: No module named 'requests'")
+        )
+        self.assertTrue(
+            python_env._should_bootstrap_python_runtime(
+                "ImportError: cannot import name JSONDecodeError from simplejson"
+            )
+        )
+        self.assertFalse(python_env._should_bootstrap_python_runtime("SyntaxError: invalid syntax"))
+
+    def test_python_env_split_requirement_tokens(self):
+        self.assertEqual(
+            python_env._split_requirement_tokens("pycryptodome qrcode requests>=2.31"),
+            ["pycryptodome", "qrcode", "requests>=2.31"],
+        )
+
+    def test_python_env_package_import_name_mapping(self):
+        self.assertEqual(python_env._package_import_name("python-telegram-bot"), "telegram")
+        self.assertEqual(python_env._package_import_name("qq-botpy>=1.0"), "botpy")
+        self.assertEqual(python_env._package_import_name("requests>=2.31"), "requests")
+
+    def test_python_env_version_floor_is_not_presence_only(self):
+        self.assertTrue(python_env._version_meets_minimum("3.19.3", "3.19.3"))
+        self.assertTrue(python_env._version_meets_minimum("3.20.0", "3.19.3"))
+        self.assertFalse(python_env._version_meets_minimum("3.5.0", "3.19.3"))
+
+    def test_python_env_probe_dependency_rejects_old_version(self):
+        original = python_env._probe_python_module
+
+        def fake_probe(_py, module_name):
+            return True, f"版本 3.5.0 | {module_name}.py", {"version": "3.5.0", "path": f"{module_name}.py"}
+
+        python_env._probe_python_module = fake_probe
+        try:
+            ok, detail, _payload = python_env._probe_python_dependency(
+                "python.exe",
+                "simplejson>=3.19.3",
+                import_name="simplejson",
+            )
+        finally:
+            python_env._probe_python_module = original
+        self.assertFalse(ok)
+        self.assertIn("版本过低", detail)
+        self.assertIn(">= 3.19.3", detail)
+
+    def test_python_env_sync_needed_when_state_mismatch_even_without_requirements(self):
+        self.assertTrue(
+            python_env._should_sync_runtime_dependencies(
+                state_matches=False,
+                extra_packages=[],
+                requirements_path="",
+                force_sync=False,
+            )
+        )
+        self.assertFalse(
+            python_env._should_sync_runtime_dependencies(
+                state_matches=True,
+                extra_packages=[],
+                requirements_path="",
+                force_sync=False,
+            )
+        )
+
+    def test_python_env_core_runtime_packages_ready_checks_bootstrap_modules(self):
+        original = python_env._probe_python_module
+        calls = []
+
+        def fake_probe(_py, module_name):
+            calls.append(module_name)
+            if module_name == "simplejson":
+                return False, "missing", {}
+            return True, "版本 2.33.1 | requests.py", {"version": "2.33.1", "path": "requests.py"}
+
+        python_env._probe_python_module = fake_probe
+        try:
+            self.assertFalse(python_env._core_runtime_packages_ready("python.exe"))
+        finally:
+            python_env._probe_python_module = original
+        self.assertIn("requests", calls)
+        self.assertIn("simplejson", calls)
+
+    def test_python_env_core_runtime_packages_ready_rejects_old_simplejson(self):
+        original = python_env._probe_python_module
+
+        def fake_probe(_py, module_name):
+            if module_name == "simplejson":
+                return True, "版本 3.5.0 | simplejson.py", {"version": "3.5.0", "path": "simplejson.py"}
+            return True, "版本 2.33.1 | requests.py", {"version": "2.33.1", "path": "requests.py"}
+
+        python_env._probe_python_module = fake_probe
+        try:
+            self.assertFalse(python_env._core_runtime_packages_ready("python.exe"))
+        finally:
+            python_env._probe_python_module = original
+
+    def test_python_env_dependency_signature_tracks_requirements_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            fp = os.path.join(td, "requirements.txt")
+            with open(fp, "w", encoding="utf-8") as f:
+                f.write("requests>=2.31\n")
+            sig1 = python_env._dependency_signature(td, extra_packages=["qrcode"])
+            with open(fp, "w", encoding="utf-8") as f:
+                f.write("requests>=2.31\nsimplejson>=3.19.3\n")
+            sig2 = python_env._dependency_signature(td, extra_packages=["qrcode"])
+        self.assertNotEqual(sig1["requirements_hash"], sig2["requirements_hash"])
+
+    def test_bridge_sanitize_agent_llmclients_filters_bad_dict_placeholders(self):
+        class DummyBackend:
+            def __init__(self):
+                self.history = []
+
+        class DummyClient:
+            def __init__(self, name):
+                self.backend = DummyBackend()
+                self.name = name
+                self.last_tools = "stale"
+
+        class DummyAgent:
+            def __init__(self):
+                self.llmclients = [{"mixin_cfg": {"llm_nos": [0, 1]}}, DummyClient("ok")]
+                self.llm_no = 0
+                self.llmclient = self.llmclients[0]
+
+        agent = DummyAgent()
+        ok, msg = bridge._sanitize_agent_llmclients(agent)
+        self.assertTrue(ok)
+        self.assertIn("已忽略 1 个无效 LLM 配置条目", msg)
+        self.assertEqual(len(agent.llmclients), 1)
+        self.assertIs(agent.llmclient, agent.llmclients[0])
+        self.assertEqual(agent.llm_no, 0)
+        self.assertEqual(agent.llmclient.last_tools, "")
+
     def test_all_lz_symbols_used_by_ui_exist(self):
         root = os.path.dirname(os.path.dirname(__file__))
         files = [
@@ -186,9 +321,8 @@ tg_bot_token = '123'
         path = os.path.join(root, "qt_chat_parts", "bridge_runtime.py")
         with open(path, "r", encoding="utf-8") as f:
             src = f.read()
-        self.assertIn('bridge_env["PYTHONIOENCODING"] = "utf-8"', src)
-        self.assertIn('bridge_env["PYTHONUTF8"] = "1"', src)
-        self.assertIn('bridge_env.pop("PYTHONLEGACYWINDOWSSTDIO", None)', src)
+        self.assertIn("bridge_env = lz._external_subprocess_env()", src)
+        self.assertIn("self.bridge_proc = lz._popen_external_subprocess(", src)
         self.assertIn("env=bridge_env", src)
 
     def test_bridge_runtime_notifies_when_reply_done(self):
@@ -207,18 +341,39 @@ tg_bot_token = '123'
         path = os.path.join(root, "launcher_core_parts", "python_env.py")
         with open(path, "r", encoding="utf-8") as f:
             src = f.read()
-        self.assertIn("_python_utf8_subprocess_env", src)
+        self.assertIn("_external_subprocess_env", src)
+        self.assertIn("_run_external_subprocess", src)
         self.assertIn('encoding="utf-8"', src)
         self.assertIn('errors="replace"', src)
-        self.assertIn("env=_python_utf8_subprocess_env()", src)
+        self.assertIn("env=_external_subprocess_env()", src)
 
     def test_channel_runtime_launch_uses_utf8_python_env(self):
         root = os.path.dirname(os.path.dirname(__file__))
         path = os.path.join(root, "qt_chat_parts", "channel_runtime.py")
         with open(path, "r", encoding="utf-8") as f:
             src = f.read()
-        self.assertIn("py_env = lz._python_utf8_subprocess_env()", src)
+        self.assertIn("py_env = lz._external_subprocess_env()", src)
+        self.assertIn("lz._popen_external_subprocess(", src)
         self.assertIn("env=py_env", src)
+
+    def test_runtime_has_pyinstaller_external_subprocess_sanitizer(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        path = os.path.join(root, "launcher_core_parts", "runtime.py")
+        with open(path, "r", encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("def _external_subprocess_env", src)
+        self.assertIn("def _external_subprocess_runtime", src)
+        self.assertIn("SetDllDirectoryW(None)", src)
+        self.assertIn('env.pop("_MEIPASS2", None)', src)
+        self.assertIn('kwargs["env"] = _external_subprocess_env(kwargs.get("env"))', src)
+
+    def test_bridge_runtime_uses_external_subprocess_sanitizer(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        path = os.path.join(root, "qt_chat_parts", "bridge_runtime.py")
+        with open(path, "r", encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("bridge_env = lz._external_subprocess_env()", src)
+        self.assertIn("self.bridge_proc = lz._popen_external_subprocess(", src)
 
     def test_private_python_installer_has_atomic_download_and_retry(self):
         root = os.path.dirname(os.path.dirname(__file__))
@@ -278,6 +433,105 @@ tg_bot_token = '123'
         self.assertIn("_resolve_private_python_exe", src)
         self.assertIn("wait_seconds=45", src)
         self.assertIn("已扫描路径", src)
+
+    def test_private_python_installer_bootstraps_simplejson_with_requests(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        path = os.path.join(root, "qt_chat_parts", "downloads.py")
+        with open(path, "r", encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn('"requests"', src)
+        self.assertIn('"simplejson"', src)
+        self.assertIn("--upgrade", src)
+        self.assertIn("安装 requests / simplejson", src)
+
+    def test_setup_page_and_navigation_expose_visual_dependency_check(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        setup_path = os.path.join(root, "qt_chat_parts", "setup_pages.py")
+        nav_path = os.path.join(root, "qt_chat_parts", "navigation.py")
+        runtime_path = os.path.join(root, "qt_chat_parts", "dependency_runtime.py")
+        with open(setup_path, "r", encoding="utf-8") as f:
+            setup_src = f.read()
+        with open(nav_path, "r", encoding="utf-8") as f:
+            nav_src = f.read()
+        with open(runtime_path, "r", encoding="utf-8") as f:
+            runtime_src = f.read()
+        self.assertIn("检查并补齐依赖", setup_src)
+        self.assertIn("查看详细报告", setup_src)
+        self.assertIn("载入前依赖检查", setup_src)
+        self.assertIn("_check_runtime_dependencies(purpose=\"载入内核\")", nav_src)
+        self.assertIn("GenericAgent requirements.txt", runtime_src)
+        self.assertIn("_ensure_runtime_dependencies", runtime_src)
+
+    def test_channel_runtime_uses_channel_specific_dependency_check(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        path = os.path.join(root, "qt_chat_parts", "channel_runtime.py")
+        with open(path, "r", encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("def _channel_extra_packages", src)
+        self.assertIn("lz._split_requirement_tokens(spec.get(\"pip\", \"\"))", src)
+        self.assertIn("extra_packages=extra_packages", src)
+        self.assertIn("visual=bool(show_errors)", src)
+
+    def test_dependency_runtime_supports_visual_and_silent_modes(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        path = os.path.join(root, "qt_chat_parts", "dependency_runtime.py")
+        with open(path, "r", encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("visual=True", src)
+        self.assertIn("if not visual:", src)
+        self.assertIn("_dependency_check_desc_text", src)
+        self.assertIn("_apply_dependency_check_result", src)
+        self.assertIn("依赖检查报告", src)
+
+    def test_python_env_report_builder_contains_summary_and_sections(self):
+        report = python_env._build_dependency_report(
+            agent_dir="C:\\nonexistent-agent-dir",
+            py="",
+            candidate_meta={},
+            failures=[],
+            extra_packages=["telegram"],
+            error="demo error",
+        )
+        self.assertIn("summary", report)
+        self.assertIn("sections", report)
+        self.assertIn("检查项", report["text"])
+        self.assertTrue(any(sec.get("title") == "最终错误" for sec in report["sections"]))
+        self.assertTrue(any(sec.get("title") == "项目文件" for sec in report["sections"]))
+        self.assertTrue(any(sec.get("title") == "上游依赖来源" for sec in report["sections"]))
+        self.assertTrue(any(sec.get("title") == "已配置渠道" for sec in report["sections"]))
+        self.assertTrue(any(sec.get("title") == "渠道专属可选" for sec in report["sections"]))
+
+    def test_channel_report_uses_info_for_unconfigured_missing_dependencies(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        path = os.path.join(root, "launcher_core_parts", "python_env.py")
+        with open(path, "r", encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn('status = "ok" if ok else ("error" if configured else "info")', src)
+
+    def test_upstream_dependency_table_file_exists_and_is_wired_into_report(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        dep_path = os.path.join(root, "launcher_core_parts", "upstream_dependencies.py")
+        pyenv_path = os.path.join(root, "launcher_core_parts", "python_env.py")
+        with open(dep_path, "r", encoding="utf-8") as f:
+            dep_src = f.read()
+        with open(pyenv_path, "r", encoding="utf-8") as f:
+            pyenv_src = f.read()
+        self.assertIn("LAUNCHER_BOOTSTRAP_DEPENDENCIES", dep_src)
+        self.assertIn("UPSTREAM_DEPENDENCY_SOURCES", dep_src)
+        self.assertIn("UPSTREAM_FRONTEND_DEPENDENCY_GROUPS", dep_src)
+        self.assertIn("pywebview", dep_src)
+        self.assertIn("上游未提供 requirements.txt；当前改用启动器维护的上游依赖表", pyenv_src)
+        self.assertIn("上游依赖来源", pyenv_src)
+
+    def test_upstream_dependency_groups_use_user_facing_categories(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        dep_path = os.path.join(root, "launcher_core_parts", "upstream_dependencies.py")
+        with open(dep_path, "r", encoding="utf-8") as f:
+            dep_src = f.read()
+        self.assertIn("主聊天必需", dep_src)
+        self.assertIn("上游默认 GUI 可选", dep_src)
+        self.assertIn("Qt 前端可选", dep_src)
+        self.assertIn("Streamlit 前端可选", dep_src)
 
     def test_private_python_installer_has_source_precheck_logs(self):
         root = os.path.dirname(os.path.dirname(__file__))

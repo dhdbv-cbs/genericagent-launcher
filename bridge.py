@@ -19,6 +19,77 @@ _SUMMARY_RE = re.compile(r"<summary>\s*(.*?)\s*</summary>", re.DOTALL)
 _TURN_RE = re.compile(r"Current turn:\s*(\d+)")
 _USAGE_LOCAL = threading.local()
 
+
+def _llm_backend(llmclient):
+    if llmclient is None:
+        return None
+    backend = getattr(llmclient, "backend", None)
+    if backend is not None:
+        return backend
+    if isinstance(llmclient, dict):
+        backend = llmclient.get("backend")
+        return backend if backend is not None else None
+    return None
+
+
+def _copy_backend_history(llmclient):
+    backend = _llm_backend(llmclient)
+    if backend is None:
+        return []
+    try:
+        return list(getattr(backend, "history", None) or [])
+    except Exception:
+        return []
+
+
+def _assign_backend_history(llmclient, history):
+    backend = _llm_backend(llmclient)
+    if backend is None:
+        return False
+    try:
+        backend.history = list(history or [])
+        return True
+    except Exception:
+        return False
+
+
+def _reset_backend_usage(llmclient):
+    backend = _llm_backend(llmclient)
+    if backend is None:
+        return None
+    try:
+        backend._ga_launcher_task_usage = None
+        backend._ga_launcher_current_usage = None
+    except Exception:
+        pass
+    return backend
+
+
+def _reset_llm_last_tools(llmclient):
+    if llmclient is None:
+        return
+    try:
+        setattr(llmclient, "last_tools", "")
+    except Exception:
+        pass
+
+
+def _sanitize_agent_llmclients(agent):
+    usable = [item for item in list(getattr(agent, "llmclients", []) or []) if _llm_backend(item) is not None]
+    bad_count = max(len(list(getattr(agent, "llmclients", []) or [])) - len(usable), 0)
+    if not usable:
+        if bad_count:
+            return False, (
+                "检测到 LLM 配置条目，但没有成功初始化出可用 backend。"
+                "这通常表示 mykey 里存在失效的 mixin/渠道配置，或底层依赖未准备好。"
+            )
+        return False, "未配置 LLM：请在 GenericAgent/mykey.py 中填入 API key。"
+    agent.llmclients = usable
+    agent.llm_no = 0
+    agent.llmclient = usable[0]
+    _reset_llm_last_tools(agent.llmclient)
+    return True, (f"已忽略 {bad_count} 个无效 LLM 配置条目。" if bad_count else "")
+
 def send(obj):
     try:
         sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
@@ -548,11 +619,13 @@ def main():
                         "或回到启动器的「设置 → API」添加 API 卡片。")
             })
             return
-        if not agent.llmclients:
-            send({"event": "error", "msg": "未配置 LLM：请在 GenericAgent/mykey.py 中填入 API key。"})
+        ok, setup_msg = _sanitize_agent_llmclients(agent)
+        if not ok:
+            send({"event": "error", "msg": setup_msg})
             return
-        agent.next_llm(0)
         agent.inc_out = False
+        if setup_msg:
+            send({"event": "log", "msg": setup_msg})
         threading.Thread(target=agent.run, daemon=True).start()
         send({"event": "ready", "llms": _ui_llms(agent)})
     except Exception as e:
@@ -583,12 +656,7 @@ def main():
                             time.sleep(0.05)
                     except Exception:
                         pass
-                    backend_hist = []
-                    try:
-                        if agent.llmclient and hasattr(agent.llmclient, "backend"):
-                            backend_hist = list(agent.llmclient.backend.history or [])
-                    except Exception:
-                        backend_hist = []
+                    backend_hist = _copy_backend_history(getattr(agent, "llmclient", None))
                     send(
                         {
                             "event": "turn_snapshot",
@@ -614,13 +682,7 @@ def main():
         c = cmd.get("cmd")
         try:
             if c == "send":
-                backend = getattr(getattr(agent, "llmclient", None), "backend", None)
-                if backend is not None:
-                    try:
-                        backend._ga_launcher_task_usage = None
-                        backend._ga_launcher_current_usage = None
-                    except Exception:
-                        pass
+                backend = _reset_backend_usage(getattr(agent, "llmclient", None))
                 dq = agent.put_task(cmd.get("text", ""), source="user")
                 threading.Thread(target=relay, args=(dq, backend, cmd.get("session_id")), daemon=True).start()
             elif c == "abort":
@@ -628,22 +690,21 @@ def main():
                 send({"event": "aborted"})
             elif c == "switch_llm":
                 agent.next_llm(int(cmd.get("idx", 0)))
+                if _llm_backend(getattr(agent, "llmclient", None)) is None:
+                    ok, setup_msg = _sanitize_agent_llmclients(agent)
+                    if not ok:
+                        send({"event": "error", "msg": setup_msg})
+                        continue
                 send({"event": "llm_switched", "llms": _ui_llms(agent)})
             elif c == "new_session":
                 try: agent.abort()
                 except Exception: pass
                 agent.history = []
-                if agent.llmclient and hasattr(agent.llmclient, "backend"):
-                    agent.llmclient.backend.history = []
+                _assign_backend_history(getattr(agent, "llmclient", None), [])
                 agent.handler = None
                 send({"event": "new_session_ok"})
             elif c == "get_state":
-                backend_hist = []
-                try:
-                    if agent.llmclient and hasattr(agent.llmclient, "backend"):
-                        backend_hist = list(agent.llmclient.backend.history or [])
-                except Exception:
-                    pass
+                backend_hist = _copy_backend_history(getattr(agent, "llmclient", None))
                 send({"event": "state",
                       "backend_history": backend_hist,
                       "agent_history": list(agent.history or []),
@@ -660,9 +721,12 @@ def main():
                             agent.next_llm(int(requested_llm_idx))
                         except Exception:
                             pass
+                    if _llm_backend(getattr(agent, "llmclient", None)) is None:
+                        ok, setup_msg = _sanitize_agent_llmclients(agent)
+                        if not ok:
+                            raise RuntimeError(setup_msg)
                     agent.history = list(cmd.get("agent_history") or [])
-                    if agent.llmclient and hasattr(agent.llmclient, "backend"):
-                        agent.llmclient.backend.history = list(cmd.get("backend_history") or [])
+                    _assign_backend_history(getattr(agent, "llmclient", None), cmd.get("backend_history") or [])
                     agent.handler = None
                     send({"event": "state_loaded", "llms": _ui_llms(agent), "llm_idx": int(getattr(agent, "llm_no", 0) or 0)})
                 except Exception as e:
@@ -671,13 +735,15 @@ def main():
                 send({"event": "bye"}); return
             elif c == "reinject_tools":
                 try:
-                    try: agent.llmclient.last_tools = ''
-                    except Exception: pass
+                    _reset_llm_last_tools(getattr(agent, "llmclient", None))
                     hist_path = os.path.join(agent_dir, 'assets',
                                               'tool_usable_history.json')
                     with open(hist_path, 'r', encoding='utf-8') as f:
                         tool_hist = json.load(f)
-                    agent.llmclient.backend.history.extend(tool_hist)
+                    backend = _llm_backend(getattr(agent, "llmclient", None))
+                    if backend is None:
+                        raise RuntimeError("当前 LLM backend 不可用，无法注入工具示范。")
+                    backend.history.extend(tool_hist)
                     send({"event": "tools_reinjected",
                           "count": len(tool_hist)})
                 except Exception as e:

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import subprocess
 import sys
+from contextlib import contextmanager
 
 from .constants import APP_DIR, CONFIG_PATH
 
@@ -28,6 +30,75 @@ def _python_utf8_subprocess_env(base_env=None):
     env["PYTHONUTF8"] = "1"
     env.pop("PYTHONLEGACYWINDOWSSTDIO", None)
     return env
+
+
+def _pyinstaller_runtime_root():
+    if not getattr(sys, "frozen", False):
+        return ""
+    return os.path.normcase(os.path.normpath(str(getattr(sys, "_MEIPASS", os.path.dirname(sys.executable)) or "")))
+
+
+def _path_is_under(child, parent):
+    left = os.path.normcase(os.path.normpath(str(child or "").strip()))
+    right = os.path.normcase(os.path.normpath(str(parent or "").strip()))
+    if not left or not right:
+        return False
+    try:
+        return os.path.commonpath([left, right]) == right
+    except Exception:
+        return left == right
+
+
+def _external_subprocess_env(base_env=None):
+    env = _python_utf8_subprocess_env(base_env)
+    runtime_root = _pyinstaller_runtime_root()
+    if runtime_root and os.name == "nt":
+        raw_path = str(env.get("PATH") or "")
+        kept = []
+        for item in raw_path.split(os.pathsep):
+            text = str(item or "").strip()
+            if not text:
+                continue
+            if _path_is_under(text, runtime_root):
+                continue
+            kept.append(text)
+        env["PATH"] = os.pathsep.join(kept)
+        env.pop("_MEIPASS2", None)
+    return env
+
+
+@contextmanager
+def _external_subprocess_runtime():
+    if os.name != "nt" or not getattr(sys, "frozen", False):
+        yield
+        return
+    runtime_root = _pyinstaller_runtime_root()
+    kernel32 = None
+    try:
+        kernel32 = ctypes.windll.kernel32
+        kernel32.SetDllDirectoryW(None)
+    except Exception:
+        kernel32 = None
+    try:
+        yield
+    finally:
+        if kernel32 is not None and runtime_root:
+            try:
+                kernel32.SetDllDirectoryW(runtime_root)
+            except Exception:
+                pass
+
+
+def _run_external_subprocess(args, **kwargs):
+    kwargs["env"] = _external_subprocess_env(kwargs.get("env"))
+    with _external_subprocess_runtime():
+        return subprocess.run(args, **kwargs)
+
+
+def _popen_external_subprocess(args, **kwargs):
+    kwargs["env"] = _external_subprocess_env(kwargs.get("env"))
+    with _external_subprocess_runtime():
+        return subprocess.Popen(args, **kwargs)
 
 
 def load_config():

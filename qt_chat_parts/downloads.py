@@ -298,7 +298,7 @@ class DownloadMixin:
 
     def _probe_python_version_prefix(self, py_path):
         try:
-            result = subprocess.run(
+            result = lz._run_external_subprocess(
                 [py_path, "-c", "import sys;print(sys.version.split()[0])"],
                 capture_output=True,
                 text=True,
@@ -646,7 +646,7 @@ class DownloadMixin:
         )
 
     def _run_checked_command(self, args, *, cwd=None, timeout=1200, log_path=None, label=""):
-        result = subprocess.run(
+        result = lz._run_external_subprocess(
             args,
             cwd=cwd,
             capture_output=True,
@@ -788,11 +788,11 @@ class DownloadMixin:
         if not ok:
             return None, detail
 
-        self._event_queue.put({"event": "clone_status", "msg": "正在为私有虚拟环境安装 requests…"})
+        self._event_queue.put({"event": "clone_status", "msg": "正在为私有虚拟环境升级 requests / simplejson 到最新版…"})
         ok, detail = self._run_checked_command(
-            [paths["venv_python"], "-m", "pip", "install", "requests"],
+            [paths["venv_python"], "-m", "pip", "install", "--upgrade", "requests", "simplejson"],
             timeout=1800,
-            label="安装 requests",
+            label="安装 requests / simplejson",
         )
         if not ok:
             return None, detail
@@ -811,7 +811,7 @@ class DownloadMixin:
                 self._event_queue.put({"event": "clone_status", "msg": "已跳过源码下载，继续为现有目录配置私有 3.12 环境。"})
             elif not lz.is_valid_agent_dir(target):
                 try:
-                    subprocess.run(
+                    lz._run_external_subprocess(
                         ["git", "--version"],
                         check=True,
                         stdout=subprocess.PIPE,
@@ -822,7 +822,7 @@ class DownloadMixin:
                     self._event_queue.put({"event": "clone_error", "msg": "未检测到 Git。请先安装 Git for Windows：\nhttps://git-scm.com/download/win"})
                     return
                 self._event_queue.put({"event": "clone_status", "msg": f"开始下载到：{target}"})
-                proc = subprocess.Popen(
+                proc = lz._popen_external_subprocess(
                     ["git", "clone", "--progress", lz.REPO_URL, target],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,

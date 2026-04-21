@@ -190,11 +190,8 @@ class BridgeRuntimeMixin:
         self._set_status("正在启动桥接进程…")
         self._stderr_buf = []
         creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-        bridge_env = os.environ.copy()
-        bridge_env["PYTHONIOENCODING"] = "utf-8"
-        bridge_env["PYTHONUTF8"] = "1"
-        bridge_env.pop("PYTHONLEGACYWINDOWSSTDIO", None)
-        self.bridge_proc = subprocess.Popen(
+        bridge_env = lz._external_subprocess_env()
+        self.bridge_proc = lz._popen_external_subprocess(
             [py, "-u", bridge, self.agent_dir],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,

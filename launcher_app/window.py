@@ -78,6 +78,7 @@ from qt_chat_parts.common import (
 )
 from qt_chat_parts.chat_view import ChatViewMixin
 from qt_chat_parts.channel_runtime import ChannelRuntimeMixin
+from qt_chat_parts.dependency_runtime import DependencyRuntimeMixin
 from qt_chat_parts.downloads import DownloadMixin
 from qt_chat_parts.navigation import NavigationMixin
 from qt_chat_parts.personal_usage import PersonalUsageMixin
@@ -99,7 +100,7 @@ def _qt_message_handler(mode, context, message):
 
 qInstallMessageHandler(_qt_message_handler)
 
-class QtChatWindow(ApiEditorMixin, ChannelRuntimeMixin, PersonalUsageMixin, WindowShellMixin, BridgeRuntimeMixin, SessionShellMixin, NavigationMixin, ChatViewMixin, SetupPagesMixin, SettingsPanelMixin, DownloadMixin, SidebarSessionsMixin, QMainWindow):
+class QtChatWindow(ApiEditorMixin, ChannelRuntimeMixin, DependencyRuntimeMixin, PersonalUsageMixin, WindowShellMixin, BridgeRuntimeMixin, SessionShellMixin, NavigationMixin, ChatViewMixin, SetupPagesMixin, SettingsPanelMixin, DownloadMixin, SidebarSessionsMixin, QMainWindow):
     def __init__(self, agent_dir: str | None = None):
         super().__init__()
         self.cfg = lz.load_config() if isinstance(lz.load_config(), dict) else {}
@@ -112,6 +113,8 @@ class QtChatWindow(ApiEditorMixin, ChannelRuntimeMixin, PersonalUsageMixin, Wind
         self._sidebar_channel_id = "launcher"
         self._download_running = False
         self._download_mode = ""
+        self._last_dependency_check = None
+        self._last_dependency_report = None
 
         self.bridge_proc = None
         self._stderr_buf = []

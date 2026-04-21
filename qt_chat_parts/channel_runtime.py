@@ -28,6 +28,11 @@ from launcher_app.theme import C
 
 
 class ChannelRuntimeMixin:
+    def _channel_extra_packages(self, spec):
+        if not isinstance(spec, dict):
+            return []
+        return lz._split_requirement_tokens(spec.get("pip", ""))
+
     def _channel_cfg_bucket(self):
         bucket = self.cfg.get("communication_channels")
         if not isinstance(bucket, dict):
@@ -630,10 +635,19 @@ class ChannelRuntimeMixin:
             if show_errors:
                 QMessageBox.warning(self, "无法启动", conflict)
             return False
-        py, py_err = lz._find_compatible_system_python(self.agent_dir)
-        if not py:
+        extra_packages = self._channel_extra_packages(spec)
+        if not self._check_runtime_dependencies(
+            purpose=f"启动{spec.get('label', channel_id)}渠道",
+            extra_packages=extra_packages,
+            visual=bool(show_errors),
+        ):
+            if show_errors and not extra_packages:
+                QMessageBox.critical(self, "缺少 Python", "未找到可用的系统 Python，或依赖检查失败。")
+            return False
+        py = lz._resolve_config_path(str(self.cfg.get("python_exe") or "").strip()) or lz._find_system_python()
+        if not py or not os.path.isfile(py):
             if show_errors:
-                QMessageBox.critical(self, "缺少 Python", py_err or "未找到可用的系统 Python。")
+                QMessageBox.critical(self, "缺少 Python", "依赖检查完成后仍未找到可用的 Python 可执行文件。")
             return False
         values = {field["key"]: self._qt_channel_extras.get(field["key"]) for field in spec.get("fields", [])}
         missing = self._channel_missing_required(channel_id, values)
@@ -650,8 +664,8 @@ class ChannelRuntimeMixin:
         try:
             log_handle = open(log_path, "a", encoding="utf-8", buffering=1)
             log_handle.write(f"\n==== {time.strftime('%Y-%m-%d %H:%M:%S')} start {channel_id} ====\n")
-            py_env = lz._python_utf8_subprocess_env()
-            proc = subprocess.Popen(
+            py_env = lz._external_subprocess_env()
+            proc = lz._popen_external_subprocess(
                 [py, "-u", script_path],
                 cwd=self.agent_dir,
                 stdin=subprocess.DEVNULL,

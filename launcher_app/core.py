@@ -17,6 +17,7 @@ from launcher_core_parts import model_api as _model_api
 from launcher_core_parts import python_env as _python_env
 from launcher_core_parts import runtime as _runtime
 from launcher_core_parts import sessions as _sessions
+from launcher_core_parts import upstream_dependencies as _upstream_dependencies
 
 _MODULES = (
     _constants,
@@ -25,6 +26,7 @@ _MODULES = (
     _model_api,
     _sessions,
     _channels,
+    _upstream_dependencies,
     _markup,
 )
 

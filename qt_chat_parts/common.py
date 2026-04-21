@@ -74,7 +74,7 @@ def _probe_download_requirements():
         "requests_warn": True,
     }
     try:
-        result = subprocess.run(
+        result = lz._run_external_subprocess(
             ["git", "--version"],
             capture_output=True,
             text=True,
@@ -92,7 +92,7 @@ def _probe_download_requirements():
     if py:
         out["python_ok"] = True
         try:
-            version = subprocess.run(
+            version = lz._run_external_subprocess(
                 [py, "-c", "import sys;print(sys.version.split()[0])"],
                 capture_output=True,
                 text=True,
@@ -110,7 +110,7 @@ def _probe_download_requirements():
         out["python_text"] = label
     try:
         if py:
-            rr = subprocess.run(
+            rr = lz._run_external_subprocess(
                 [py, "-c", "import requests;print(requests.__version__)"],
                 capture_output=True,
                 text=True,
@@ -124,11 +124,15 @@ def _probe_download_requirements():
                 ver = (rr.stdout or "").strip()
                 out["requests_text"] = f"requests 已安装：{ver}" if ver else "requests 已安装"
             else:
-                out["requests_text"] = "未检测到 requests（首次运行时会自动安装，或手动 pip install requests）"
+                detail = ((rr.stderr or "") + "\n" + (rr.stdout or "")).lower()
+                if "jsondecodeerror" in detail and "simplejson" in detail:
+                    out["requests_text"] = "检测到 simplejson 版本过低；首次运行时会自动升级到最新版 simplejson / requests"
+                else:
+                    out["requests_text"] = "未检测到 requests（首次运行时会自动安装最新版 requests / simplejson）"
         else:
             out["requests_text"] = "无法检查 requests（未找到可用 Python）"
     except Exception:
-        out["requests_text"] = "无法检查 requests（按本机 Python 扫描；首次启动前建议先 pip install requests）"
+        out["requests_text"] = "无法检查 requests（按本机 Python 扫描；首次启动时会尝试自动补最新版 requests / simplejson）"
     return out
 
 

@@ -16,6 +16,8 @@ class NavigationMixin:
         if changed:
             self._stop_bridge()
             self._stop_all_managed_channels(refresh=False)
+            self._last_dependency_check = None
+            self._last_dependency_report = None
             self.current_session = None
             self._selected_session_id = None
             self._pending_state_session = None
@@ -58,6 +60,8 @@ class NavigationMixin:
                 else ("当前还没有有效的 GenericAgent 目录。请先浏览并选择正确的项目根目录。" + py_text)
             )
         self._refresh_download_state()
+        if hasattr(self, "_refresh_dependency_status"):
+            self._refresh_dependency_status()
         if hasattr(self, "settings_status_label"):
             self._settings_reload()
 
@@ -153,6 +157,8 @@ class NavigationMixin:
                 "已初始化配置文件",
                 "已自动创建 mykey.py。\n\n接下来如果提示未配置 LLM，请在后续 Qt 设置页补充 API 配置。",
             )
+        if not self._check_runtime_dependencies(purpose="载入内核"):
+            return
         self._show_chat_page()
         self._refresh_sessions()
         if self.current_session:

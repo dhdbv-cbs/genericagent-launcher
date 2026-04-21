@@ -73,6 +73,18 @@ def _find_system_python():
     return items[0]["path"] if items else None
 
 
+def _venv_python_path(agent_dir):
+    """Return the path to the private venv Python for *agent_dir*, or None if it doesn't exist."""
+    if not agent_dir:
+        return None
+    venv_root = os.path.join(agent_dir, ".launcher_runtime", "venv312")
+    if os.name == "nt":
+        py = os.path.join(venv_root, "Scripts", "python.exe")
+    else:
+        py = os.path.join(venv_root, "bin", "python")
+    return py if os.path.isfile(py) else None
+
+
 def _probe_python_agent_compat(py, agent_dir):
     code = (
         "import os, sys\n"
@@ -117,15 +129,28 @@ def _format_python_candidate_label(info):
 
 
 def _find_compatible_system_python(agent_dir):
+    # Prefer the private venv created by the launcher's setup flow: it already
+    # has all required packages (requests, etc.) installed.
+    venv_py = _venv_python_path(agent_dir)
+    if venv_py:
+        ok, detail = _probe_python_agent_compat(venv_py, agent_dir)
+        if ok:
+            return venv_py, None
+
     candidates = _system_python_candidates()
-    if not candidates:
+    if not candidates and not venv_py:
         return None, "未找到系统 Python。请先安装 Python 并加入 PATH，或在 launcher_config.json 中设置 python_exe。"
     failures = []
+    if venv_py:
+        venv_info = _probe_python_command([venv_py]) or {"path": venv_py, "version": ""}
+        failures.append((venv_info, detail if venv_py else ""))
     for info in candidates:
         ok, detail = _probe_python_agent_compat(info["path"], agent_dir)
         if ok:
             return info["path"], None
         failures.append((info, detail))
+    if not failures:
+        return None, "未找到系统 Python。请先安装 Python 并加入 PATH，或在 launcher_config.json 中设置 python_exe。"
     lines = ["已找到系统 Python，但都无法载入 GenericAgent 内核。"]
     for info, detail in failures[:3]:
         lines.append(f"- {_format_python_candidate_label(info)}: {detail}")

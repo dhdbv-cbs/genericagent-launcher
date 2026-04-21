@@ -3,3 +3,4 @@ requests>=2.31
 qrcode[pil]>=7.4
 Pillow>=10.0
 markdown>=3.5
+simplejson>=3.5

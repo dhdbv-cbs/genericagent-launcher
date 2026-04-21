@@ -10,6 +10,49 @@ import threading
 import time
 import traceback
 
+
+def _strip_incompatible_pyinstaller_runtime_from_sys_path():
+    """Drop the PyInstaller runtime dir from sys.path for external Python runs.
+
+    When the frozen launcher starts a system Python interpreter to execute this
+    bridge script, the script can live under PyInstaller's extraction dir
+    (`_MEI...`). CPython prepends that script directory to `sys.path`, which can
+    cause the system interpreter to import incompatible `.pyd` files from the
+    frozen runtime. This bridge only needs imports from stdlib and `agent_dir`,
+    so it is safe to remove the runtime dir before later imports happen.
+    """
+
+    try:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        markers = (
+            os.path.isfile(os.path.join(script_dir, "python3.dll"))
+            and os.path.isfile(os.path.join(script_dir, "base_library.zip"))
+        )
+        if not markers:
+            for dll_name in ("python312.dll", "python311.dll", "python310.dll", "python39.dll", "python38.dll"):
+                if os.path.isfile(os.path.join(script_dir, dll_name)):
+                    markers = True
+                    break
+        if not markers:
+            return
+
+        def _norm(path):
+            try:
+                return os.path.normcase(os.path.abspath(str(path)))
+            except Exception:
+                return ""
+
+        bad = _norm(script_dir)
+        if not bad:
+            return
+        sys.path[:] = [p for p in list(sys.path) if _norm(p) != bad]
+    except Exception:
+        # Startup must not fail because of this sanitization.
+        return
+
+
+_strip_incompatible_pyinstaller_runtime_from_sys_path()
+
 _RESTORE_BLOCK_RE = re.compile(
     r"^=== (Prompt|Response) ===.*?\n(.*?)(?=^=== (?:Prompt|Response) ===|\Z)",
     re.DOTALL | re.MULTILINE,

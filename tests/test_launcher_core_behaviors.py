@@ -146,6 +146,35 @@ class LauncherCoreBehaviorTests(unittest.TestCase):
         self.assertEqual(agent.llm_no, 0)
         self.assertEqual(agent.llmclient.last_tools, "")
 
+    def test_bridge_strips_pyinstaller_runtime_dir_from_sys_path(self):
+        original_file = bridge.__file__
+        original_sys_path = list(bridge.sys.path)
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                bridge.__file__ = os.path.join(td, "bridge.py")
+                with open(os.path.join(td, "python312.dll"), "w", encoding="utf-8") as f:
+                    f.write("stub")
+                bridge.sys.path[:] = [td, os.path.join(td, "nested"), "C:\\safe"]
+                bridge._strip_incompatible_pyinstaller_runtime_from_sys_path()
+                self.assertNotIn(os.path.normcase(os.path.abspath(td)), [os.path.normcase(os.path.abspath(p)) for p in bridge.sys.path])
+                self.assertIn("C:\\safe", bridge.sys.path)
+        finally:
+            bridge.__file__ = original_file
+            bridge.sys.path[:] = original_sys_path
+
+    def test_bridge_keeps_normal_script_dir_on_sys_path(self):
+        original_file = bridge.__file__
+        original_sys_path = list(bridge.sys.path)
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                bridge.__file__ = os.path.join(td, "bridge.py")
+                bridge.sys.path[:] = [td, "C:\\safe"]
+                bridge._strip_incompatible_pyinstaller_runtime_from_sys_path()
+                self.assertEqual(bridge.sys.path[0], td)
+        finally:
+            bridge.__file__ = original_file
+            bridge.sys.path[:] = original_sys_path
+
     def test_all_lz_symbols_used_by_ui_exist(self):
         root = os.path.dirname(os.path.dirname(__file__))
         files = [
@@ -364,8 +393,26 @@ tg_bot_token = '123'
         self.assertIn("def _external_subprocess_env", src)
         self.assertIn("def _external_subprocess_runtime", src)
         self.assertIn("SetDllDirectoryW(None)", src)
+        self.assertIn('env.pop(key, None)', src)
+        self.assertIn('"PYTHONPATH"', src)
         self.assertIn('env.pop("_MEIPASS2", None)', src)
         self.assertIn('kwargs["env"] = _external_subprocess_env(kwargs.get("env"))', src)
+
+    def test_external_subprocess_env_clears_python_path_vars(self):
+        env = lz._external_subprocess_env(
+            {
+                "PATH": "C:\\bin",
+                "PYTHONHOME": "C:\\bad-home",
+                "PYTHONPATH": "C:\\bad-path",
+                "PYTHONUSERBASE": "C:\\bad-user",
+                "PYTHONNOUSERSITE": "1",
+            }
+        )
+        self.assertEqual(env["PATH"], "C:\\bin")
+        self.assertNotIn("PYTHONHOME", env)
+        self.assertNotIn("PYTHONPATH", env)
+        self.assertNotIn("PYTHONUSERBASE", env)
+        self.assertNotIn("PYTHONNOUSERSITE", env)
 
     def test_bridge_runtime_uses_external_subprocess_sanitizer(self):
         root = os.path.dirname(os.path.dirname(__file__))
@@ -374,6 +421,14 @@ tg_bot_token = '123'
             src = f.read()
         self.assertIn("bridge_env = lz._external_subprocess_env()", src)
         self.assertIn("self.bridge_proc = lz._popen_external_subprocess(", src)
+
+    def test_bridge_runtime_shows_trace_in_detailed_error_dialog(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        path = os.path.join(root, "qt_chat_parts", "bridge_runtime.py")
+        with open(path, "r", encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn('trace = ev.get("trace", "")', src)
+        self.assertIn("box.setDetailedText(str(trace))", src)
 
     def test_private_python_installer_has_atomic_download_and_retry(self):
         root = os.path.dirname(os.path.dirname(__file__))

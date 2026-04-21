@@ -509,9 +509,18 @@ class BridgeRuntimeMixin:
             return
         if et == "error":
             msg = ev.get("msg", "")
+            trace = ev.get("trace", "")
             self._busy = False
             self.send_btn.setEnabled(True)
             self.stop_btn.setEnabled(False)
             self._set_status(f"错误: {msg}")
             self._refresh_composer_enabled()
-            QMessageBox.warning(self, "桥接错误", msg or "未知错误")
+            if trace:
+                box = QMessageBox(self)
+                box.setIcon(QMessageBox.Warning)
+                box.setWindowTitle("桥接错误")
+                box.setText(msg or "未知错误")
+                box.setDetailedText(str(trace))
+                box.exec()
+            else:
+                QMessageBox.warning(self, "桥接错误", msg or "未知错误")

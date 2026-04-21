@@ -143,7 +143,7 @@ def _find_compatible_system_python(agent_dir):
     failures = []
     if venv_py:
         venv_info = _probe_python_command([venv_py]) or {"path": venv_py, "version": ""}
-        failures.append((venv_info, detail if venv_py else ""))
+        failures.append((venv_info, detail))
     for info in candidates:
         ok, detail = _probe_python_agent_compat(info["path"], agent_dir)
         if ok:

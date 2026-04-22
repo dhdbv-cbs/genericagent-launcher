@@ -53,6 +53,49 @@ def _strip_incompatible_pyinstaller_runtime_from_sys_path():
 
 _strip_incompatible_pyinstaller_runtime_from_sys_path()
 
+
+def _strip_incompatible_pyinstaller_runtime_from_sys_path():
+    """Drop the PyInstaller runtime dir from sys.path for external Python runs.
+
+    When the frozen launcher starts a system Python interpreter to execute this
+    bridge script, the script can live under PyInstaller's extraction dir
+    (`_MEI...`). CPython prepends that script directory to `sys.path`, which can
+    cause the system interpreter to import incompatible `.pyd` files from the
+    frozen runtime. This bridge only needs imports from stdlib and `agent_dir`,
+    so it is safe to remove the runtime dir before later imports happen.
+    """
+
+    try:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        markers = (
+            os.path.isfile(os.path.join(script_dir, "python3.dll"))
+            and os.path.isfile(os.path.join(script_dir, "base_library.zip"))
+        )
+        if not markers:
+            for dll_name in ("python312.dll", "python311.dll", "python310.dll", "python39.dll", "python38.dll"):
+                if os.path.isfile(os.path.join(script_dir, dll_name)):
+                    markers = True
+                    break
+        if not markers:
+            return
+
+        def _norm(path):
+            try:
+                return os.path.normcase(os.path.abspath(str(path)))
+            except Exception:
+                return ""
+
+        bad = _norm(script_dir)
+        if not bad:
+            return
+        sys.path[:] = [p for p in list(sys.path) if _norm(p) != bad]
+    except Exception:
+        # Startup must not fail because of this sanitization.
+        return
+
+
+_strip_incompatible_pyinstaller_runtime_from_sys_path()
+
 _RESTORE_BLOCK_RE = re.compile(
     r"^=== (Prompt|Response) ===.*?\n(.*?)(?=^=== (?:Prompt|Response) ===|\Z)",
     re.DOTALL | re.MULTILINE,
@@ -144,8 +187,7 @@ def send(obj):
 def _ui_llms(agent):
     items = []
     for i, raw_name, current in agent.list_llms():
-        name = raw_name.split("/", 1)[1] if "/" in raw_name else raw_name
-        items.append({"idx": i, "name": name, "current": current})
+        items.append({"idx": i, "name": str(raw_name or "").strip(), "current": current})
     return items
 
 
@@ -236,6 +278,27 @@ def _patch_llm_usage_capture():
     if getattr(llmcore, "_ga_launcher_usage_patched", False):
         return llmcore
 
+    def _record_usage_patched(usage, api_mode):
+        _store_current_usage(_normalize_provider_usage(usage))
+        original = getattr(_record_usage_patched, "_ga_launcher_original", None)
+        if callable(original):
+            return original(usage, api_mode)
+        if not usage:
+            return
+        if api_mode == "responses":
+            cached = (usage.get("input_tokens_details") or {}).get("cached_tokens", 0)
+            inp = usage.get("input_tokens", 0)
+            print(f"[Cache] input={inp} cached={cached}")
+        elif api_mode == "chat_completions":
+            cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
+            inp = usage.get("prompt_tokens", 0)
+            print(f"[Cache] input={inp} cached={cached}")
+        elif api_mode == "messages":
+            ci = usage.get("cache_creation_input_tokens", 0)
+            cr = usage.get("cache_read_input_tokens", 0)
+            inp = usage.get("input_tokens", 0)
+            print(f"[Cache] input={inp} creation={ci} read={cr}")
+
     def _parse_claude_sse_patched(resp_lines):
         content_blocks = []
         current_block = None
@@ -270,7 +333,7 @@ def _patch_llm_usage_capture():
                 if block.get("type") == "text":
                     current_block = {"type": "text", "text": ""}
                 elif block.get("type") == "thinking":
-                    current_block = {"type": "thinking", "thinking": ""}
+                    current_block = {"type": "thinking", "thinking": "", "signature": ""}
                 elif block.get("type") == "tool_use":
                     current_block = {"type": "tool_use", "id": block.get("id", ""), "name": block.get("name", ""), "input": {}}
                     tool_json_buf = ""
@@ -285,6 +348,9 @@ def _patch_llm_usage_capture():
                 elif delta.get("type") == "thinking_delta":
                     if current_block and current_block.get("type") == "thinking":
                         current_block["thinking"] += delta.get("thinking", "")
+                elif delta.get("type") == "signature_delta":
+                    if current_block and current_block.get("type") == "thinking":
+                        current_block["signature"] = current_block.get("signature", "") + delta.get("signature", "")
                 elif delta.get("type") == "input_json_delta":
                     tool_json_buf += delta.get("partial_json", "")
             elif evt_type == "content_block_stop":
@@ -458,6 +524,8 @@ def _patch_llm_usage_capture():
 
         cls.raw_ask = wrapped
 
+    _record_usage_patched._ga_launcher_original = getattr(llmcore, "_record_usage", None)
+    llmcore._record_usage = _record_usage_patched
     llmcore._parse_claude_sse = _parse_claude_sse_patched
     llmcore._parse_openai_sse = _parse_openai_sse_patched
     for cls_name in ("ClaudeSession", "LLMSession", "NativeClaudeSession", "NativeOAISession"):
@@ -726,7 +794,14 @@ def main():
         try:
             if c == "send":
                 backend = _reset_backend_usage(getattr(agent, "llmclient", None))
-                dq = agent.put_task(cmd.get("text", ""), source="user")
+                raw_images = cmd.get("images") or []
+                images = []
+                if isinstance(raw_images, list):
+                    for item in raw_images:
+                        path = str(item or "").strip()
+                        if path and os.path.isfile(path):
+                            images.append(path)
+                dq = agent.put_task(cmd.get("text", ""), source="user", images=images)
                 threading.Thread(target=relay, args=(dq, backend, cmd.get("session_id")), daemon=True).start()
             elif c == "abort":
                 agent.abort()

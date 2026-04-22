@@ -1,12 +1,11 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import (
     collect_data_files,
-    collect_dynamic_libs,
 )
 
 datas = [('bridge.py', '.')]
-binaries = []
 hiddenimports = ['launcher_app.window', 'shiboken6']
+binaries = []
 
 hiddenimports += [
     'PySide6.QtCore',
@@ -14,8 +13,6 @@ hiddenimports += [
     'PySide6.QtWidgets',
     'PySide6.QtSvg',
 ]
-binaries += collect_dynamic_libs('PySide6')
-binaries += collect_dynamic_libs('shiboken6')
 datas += collect_data_files('PySide6', subdir='plugins/platforms')
 datas += collect_data_files('PySide6', subdir='plugins/styles')
 datas += collect_data_files('PySide6', subdir='plugins/imageformats')
@@ -27,7 +24,7 @@ a = Analysis(
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
-    hookspath=[],
+    hookspath=['hooks'],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[],

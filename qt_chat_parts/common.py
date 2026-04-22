@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 
 from PySide6.QtCore import QByteArray, QSize, Qt
-from PySide6.QtGui import QCursor, QIcon, QKeyEvent, QPainter, QPixmap
+from PySide6.QtGui import QCursor, QIcon, QImage, QKeyEvent, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
@@ -33,27 +34,37 @@ _SVG_TRASH = '<svg viewBox="0 0 24 24" fill="none" stroke="{c}" stroke-width="2"
 _SVG_SEND = '<svg viewBox="0 0 24 24" fill="none" stroke="{c}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2 11 13"/><path d="m22 2-7 20-4-9-9-4Z"/></svg>'
 _SVG_STOP = '<svg viewBox="0 0 24 24" fill="{c}" stroke="none"><rect width="10" height="10" x="7" y="7" rx="1.5" ry="1.5"/></svg>'
 _SVG_INFO = '<svg viewBox="0 0 24 24" fill="none" stroke="{c}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>'
+_SVG_CHEVRON_DOWN = '<svg viewBox="0 0 24 24" fill="none" stroke="{c}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>'
 
 _ICON_CACHE: dict[str, QIcon] = {}
 _MD_CSS = ""
+_HTML_STYLE_ATTR_RE = re.compile(r"\s(?:style|bgcolor|color|face|size)\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s>]+)", re.IGNORECASE)
+_HTML_FONT_OPEN_RE = re.compile(r"<\s*font\b[^>]*>", re.IGNORECASE)
+_HTML_FONT_CLOSE_RE = re.compile(r"<\s*/\s*font\s*>", re.IGNORECASE)
 
 
 def _build_md_css() -> str:
     return f"""
-body {{ color: {C['text']}; font-family: "Arial", "Microsoft YaHei UI", "Segoe UI", sans-serif; font-size: 13px; line-height: 1.6; font-weight: 400; }}
+body {{ color: {C['text']} !important; background: transparent !important; font-family: "Arial", "Microsoft YaHei UI", "Segoe UI", sans-serif; font-size: 13px; line-height: 1.6; font-weight: 400; }}
+div, p, li, span, strong, em, b, i {{ color: {C['text']} !important; background: transparent !important; }}
 h1 {{ color: {C['text']}; font-size: 20px; font-weight: 700; border-bottom: 1px solid {C['border']}; padding-bottom: 4px; margin-top: 16px; }}
 h2 {{ color: {C['text']}; font-size: 17px; font-weight: 700; border-bottom: 1px solid {C['border']}; padding-bottom: 3px; margin-top: 14px; }}
 h3 {{ color: {C['text']}; font-size: 15px; font-weight: 600; margin-top: 12px; }}
 h4, h5, h6 {{ color: {C['text_soft']}; font-size: 13px; font-weight: 600; margin-top: 10px; }}
-code {{ background: {C['field_alt']}; color: {C['code_text']}; padding: 1px 4px; border-radius: 3px; font-family: Consolas, "Courier New", monospace; font-size: 12px; }}
-pre {{ background: {C['field_alt']}; color: {C['code_text']}; padding: 12px; border-radius: 8px; overflow-x: auto; border: 1px solid {C['stroke_default']}; }}
-pre code {{ background: transparent; padding: 0; border-radius: 0; }}
-blockquote {{ border-left: 3px solid {C['accent']}; margin: 8px 0; padding: 6px 10px; color: {C['text_soft']}; background: {C['layer1']}; }}
+code {{ background: {C['field_alt']} !important; color: {C['code_text']} !important; padding: 1px 4px; border-radius: 3px; font-family: Consolas, "Courier New", monospace; font-size: 12px; }}
+pre {{ background: {C['field_alt']} !important; color: {C['code_text']} !important; padding: 12px; border-radius: 8px; overflow-x: auto; border: 1px solid {C['stroke_default']} !important; margin: 8px 0; white-space: pre; font-family: Consolas, "Cascadia Mono", "Courier New", monospace; font-size: 12px; line-height: 1.45; }}
+pre code {{ background: transparent; padding: 0; border-radius: 0; white-space: pre; }}
+blockquote {{ border-left: 3px solid {C['accent']}; margin: 8px 0; padding: 6px 10px; color: {C['text_soft']} !important; background: {C['layer1']} !important; }}
 a {{ color: {C['accent']}; text-decoration: none; }}
 ul, ol {{ margin: 6px 0 8px 18px; }}
 li {{ margin: 4px 0; }}
 hr {{ border: none; border-top: 1px solid {C['stroke_default']}; margin: 12px 0; }}
-p {{ margin: 6px 0; }}
+p {{ margin: 6px 0; word-break: break-word; }}
+table {{ border-collapse: collapse; margin: 10px 0; width: auto; font-size: 12px; background: transparent !important; }}
+th, td {{ border: 1px solid {C['stroke_default']} !important; padding: 7px 10px; text-align: left; vertical-align: top; white-space: nowrap; color: {C['text']} !important; }}
+th {{ background: {C['layer2']} !important; color: {C['text']} !important; font-weight: 600; }}
+tr:nth-child(even) td {{ background: {C['layer1']} !important; }}
+tr:nth-child(odd) td {{ background: transparent !important; }}
 """
 
 
@@ -137,13 +148,26 @@ def _probe_download_requirements():
 
 
 def _md_to_html(text: str) -> str:
+    def _sanitize_render_html(raw_html: str) -> str:
+        html = str(raw_html or "")
+        if not html:
+            return html
+        html = _HTML_FONT_OPEN_RE.sub("<span>", html)
+        html = _HTML_FONT_CLOSE_RE.sub("</span>", html)
+        prev = None
+        while prev != html:
+            prev = html
+            html = _HTML_STYLE_ATTR_RE.sub("", html)
+        return html
+
     try:
         import markdown
 
-        return markdown.markdown(
+        html = markdown.markdown(
             text or "",
             extensions=["fenced_code", "tables", "nl2br", "sane_lists"],
         )
+        return _sanitize_render_html(html)
     except Exception:
         pass
     text = text or ""
@@ -182,7 +206,7 @@ def _md_to_html(text: str) -> str:
         html.append("</code></pre>")
     if in_ul:
         html.append("</ul>")
-    return "\n".join(html)
+    return _sanitize_render_html("\n".join(html))
 
 
 def _svg_icon(key: str, svg_template: str, color: str = "#94a3b8", size: int = 16) -> QIcon:
@@ -205,9 +229,11 @@ def _fit_browser_height(browser: QTextBrowser) -> None:
     doc = browser.document()
     viewport_w = browser.viewport().width()
     width = viewport_w if viewport_w > 40 else 560
+    has_wide_content = bool(browser.property("_hasWideContent"))
+    width_key = width
     old_width = int(browser.property("_fitWidth") or 0)
     old_height = int(browser.property("_fitHeight") or 0)
-    if old_width == width and old_height > 0 and not browser.property("_fitForce"):
+    if old_width == width_key and old_height > 0 and not browser.property("_fitForce"):
         return
     doc.setTextWidth(width)
     new_h = max(38, int(doc.size().height() + 10))
@@ -215,7 +241,13 @@ def _fit_browser_height(browser: QTextBrowser) -> None:
         current_h = browser.height()
         if new_h < current_h:
             new_h = current_h
-    browser.setProperty("_fitWidth", width)
+    try:
+        hbar = browser.horizontalScrollBar()
+        if hbar is not None and hbar.isVisible():
+            new_h += int(hbar.sizeHint().height() or 0) + 4
+    except Exception:
+        pass
+    browser.setProperty("_fitWidth", width_key)
     browser.setProperty("_fitForce", False)
     if abs(new_h - old_height) <= 1 and browser.height() == new_h:
         browser.setProperty("_fitHeight", new_h)
@@ -250,9 +282,75 @@ def _session_source_label(session) -> str:
 
 
 class InputTextEdit(QTextEdit):
-    def __init__(self, submit_cb, parent=None):
+    def __init__(self, submit_cb, image_cb=None, parent=None):
         super().__init__(parent)
         self._submit_cb = submit_cb
+        self._image_cb = image_cb
+        self.setAcceptDrops(True)
+
+    def _image_extensions(self):
+        return {
+            ".png",
+            ".jpg",
+            ".jpeg",
+            ".gif",
+            ".bmp",
+            ".webp",
+            ".tif",
+            ".tiff",
+            ".ico",
+        }
+
+    def _mime_to_image_attachments(self, mime):
+        attachments = []
+        if mime is None:
+            return attachments
+        if mime.hasUrls():
+            for url in mime.urls():
+                if not url.isLocalFile():
+                    continue
+                path = url.toLocalFile()
+                if not path or not os.path.isfile(path):
+                    continue
+                if os.path.splitext(path)[1].lower() in self._image_extensions():
+                    attachments.append(
+                        {
+                            "kind": "path",
+                            "path": path,
+                            "name": os.path.basename(path),
+                        }
+                    )
+        if attachments:
+            return attachments
+        if mime.hasImage():
+            img = mime.imageData()
+            qimage = None
+            if isinstance(img, QImage):
+                qimage = img
+            elif isinstance(img, QPixmap):
+                qimage = img.toImage()
+            elif hasattr(img, "toImage"):
+                try:
+                    qimage = img.toImage()
+                except Exception:
+                    qimage = None
+            if qimage is not None and not qimage.isNull():
+                attachments.append(
+                    {
+                        "kind": "image",
+                        "name": "clipboard.png",
+                        "image": qimage,
+                    }
+                )
+        return attachments
+
+    def _dispatch_image_attachments(self, mime):
+        attachments = self._mime_to_image_attachments(mime)
+        if not attachments:
+            return False
+        if callable(self._image_cb):
+            self._image_cb(attachments)
+        return True
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
         if (
@@ -262,6 +360,34 @@ class InputTextEdit(QTextEdit):
             self._submit_cb()
             return
         super().keyPressEvent(event)
+
+    def canInsertFromMimeData(self, source) -> bool:
+        if self._mime_to_image_attachments(source):
+            return True
+        return super().canInsertFromMimeData(source)
+
+    def insertFromMimeData(self, source) -> None:
+        if self._dispatch_image_attachments(source):
+            return
+        super().insertFromMimeData(source)
+
+    def dragEnterEvent(self, event) -> None:
+        if self._mime_to_image_attachments(event.mimeData()):
+            event.acceptProposedAction()
+            return
+        super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event) -> None:
+        if self._mime_to_image_attachments(event.mimeData()):
+            event.acceptProposedAction()
+            return
+        super().dragMoveEvent(event)
+
+    def dropEvent(self, event) -> None:
+        if self._dispatch_image_attachments(event.mimeData()):
+            event.acceptProposedAction()
+            return
+        super().dropEvent(event)
 
 
 class TurnFold(QFrame):
@@ -286,8 +412,12 @@ class TurnFold(QFrame):
         self._body = QTextBrowser()
         self._body.setReadOnly(True)
         self._body.setOpenExternalLinks(True)
+        self._body.setTextInteractionFlags(
+            Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard | Qt.LinksAccessibleByMouse | Qt.LinksAccessibleByKeyboard
+        )
         self._body.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._body.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._body.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         self._body.document().setDefaultStyleSheet(_MD_CSS)
         self._body.setStyleSheet(
             f"QTextBrowser {{ background: transparent; border: none; color: {C['text_soft']}; font-size: 13px; }}"
@@ -305,7 +435,14 @@ class TurnFold(QFrame):
 
     def set_text(self, text: str):
         self._text = text or ""
-        self._body.setHtml(_md_to_html(self._text))
+        self._body.setProperty("_markdownText", self._text)
+        html = _md_to_html(self._text)
+        html_lower = html.lower()
+        has_wide = ("<table" in html_lower) or ("<pre" in html_lower)
+        self._body.setProperty("_hasWideContent", has_wide)
+        self._body.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded if has_wide else Qt.ScrollBarAlwaysOff)
+        self._body.setSizePolicy(QSizePolicy.Ignored if has_wide else QSizePolicy.Expanding, QSizePolicy.Minimum)
+        self._body.setHtml(html)
         self._body.setProperty("_fitForce", True)
         if self._expanded:
             _fit_browser_height(self._body)
@@ -437,7 +574,14 @@ class MessageRow(QWidget):
 
     def _copy_text(self):
         try:
-            QApplication.clipboard().setText(self._text or "")
+            selected = ""
+            for browser in self.findChildren(QTextBrowser):
+                cursor = browser.textCursor()
+                if cursor is not None and cursor.hasSelection():
+                    selected = str(cursor.selectedText() or "").replace("\u2029", "\n").strip()
+                    if selected:
+                        break
+            QApplication.clipboard().setText(selected or (self._text or ""))
         except Exception:
             pass
 
@@ -513,6 +657,9 @@ class MessageRow(QWidget):
         browser.setObjectName("botMsgBrowser")
         browser.setReadOnly(True)
         browser.setOpenExternalLinks(True)
+        browser.setTextInteractionFlags(
+            Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard | Qt.LinksAccessibleByMouse | Qt.LinksAccessibleByKeyboard
+        )
         browser.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         browser.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         browser.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
@@ -520,7 +667,13 @@ class MessageRow(QWidget):
         browser.setProperty("_markdownText", markdown_text)
         browser.setProperty("streamingHold", bool(streaming))
         browser.setProperty("_fitForce", True)
-        browser.setHtml(_md_to_html(markdown_text))
+        html = _md_to_html(markdown_text)
+        html_lower = html.lower()
+        has_wide = ("<table" in html_lower) or ("<pre" in html_lower)
+        browser.setProperty("_hasWideContent", has_wide)
+        browser.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded if has_wide else Qt.ScrollBarAlwaysOff)
+        browser.setSizePolicy(QSizePolicy.Ignored if has_wide else QSizePolicy.Expanding, QSizePolicy.Minimum)
+        browser.setHtml(html)
         _fit_browser_height(browser)
         return browser
 
@@ -529,7 +682,13 @@ class MessageRow(QWidget):
             return
         browser.setProperty("_markdownText", markdown_text)
         browser.setProperty("_fitForce", True)
-        browser.setHtml(_md_to_html(markdown_text))
+        html = _md_to_html(markdown_text)
+        html_lower = html.lower()
+        has_wide = ("<table" in html_lower) or ("<pre" in html_lower)
+        browser.setProperty("_hasWideContent", has_wide)
+        browser.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded if has_wide else Qt.ScrollBarAlwaysOff)
+        browser.setSizePolicy(QSizePolicy.Ignored if has_wide else QSizePolicy.Expanding, QSizePolicy.Minimum)
+        browser.setHtml(html)
         _fit_browser_height(browser)
 
     def set_finished(self, done: bool):

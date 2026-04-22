@@ -153,6 +153,11 @@ class SessionShellMixin:
                 self._hide_info_tooltip()
             elif et == QEvent.ToolTip:
                 return True
+        viewport = getattr(getattr(self, "scroll", None), "viewport", lambda: None)()
+        if watched is viewport and event.type() in (QEvent.Resize, QEvent.Show):
+            placer = getattr(self, "_place_jump_latest_button", None)
+            if callable(placer):
+                placer()
         return super().eventFilter(watched, event)
 
     def _is_channel_process_session(self, session=None):
@@ -178,6 +183,12 @@ class SessionShellMixin:
             stop_btn.setEnabled((not disabled) and self._busy and (not self._abort_requested))
         if llm_combo is not None:
             llm_combo.setEnabled((not disabled) and bool(self.llms))
+        floating_sync = getattr(self, "_sync_floating_llm_combo", None)
+        if callable(floating_sync):
+            floating_sync()
+        refresher = getattr(self, "_refresh_floating_chat_window", None)
+        if callable(refresher):
+            refresher()
 
     def _active_sessions_for_channel(self, channel_id: str):
         cid = lz._normalize_usage_channel_id(channel_id, "launcher")

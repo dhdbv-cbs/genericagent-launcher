@@ -58,6 +58,13 @@ def _external_subprocess_env(base_env=None):
         "PYTHONNOUSERSITE",
     ):
         env.pop(key, None)
+    for key in (
+        "PYTHONHOME",
+        "PYTHONPATH",
+        "PYTHONUSERBASE",
+        "PYTHONNOUSERSITE",
+    ):
+        env.pop(key, None)
     runtime_root = _pyinstaller_runtime_root()
     if runtime_root and os.name == "nt":
         raw_path = str(env.get("PATH") or "")

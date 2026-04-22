@@ -4,6 +4,7 @@ import threading
 
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QHBoxLayout,
@@ -13,13 +14,124 @@ from PySide6.QtWidgets import (
     QPushButton,
     QTextEdit,
     QVBoxLayout,
+    QWidget,
 )
 
 from launcher_app import core as lz
 from launcher_app.theme import C, F
 
+_API_ADVANCED_FIELD_META = {
+    "fake_cc_system_prompt": {
+        "label": "fake_cc_system_prompt",
+        "kind": "bool",
+        "checkbox_label": "启用 Claude Code 兼容参数",
+    },
+    "thinking_type": {
+        "label": "thinking_type",
+        "kind": "choice",
+        "choices": ["adaptive", "enabled", "disabled"],
+    },
+    "thinking_budget_tokens": {
+        "label": "thinking_budget_tokens",
+        "kind": "int",
+        "placeholder": "整数；留空则跟随模板默认",
+    },
+    "reasoning_effort": {
+        "label": "reasoning_effort",
+        "kind": "choice",
+        "choices": ["minimal", "low", "medium", "high", "xhigh"],
+    },
+    "temperature": {
+        "label": "temperature",
+        "kind": "float",
+        "placeholder": "浮点数；留空则跟随模板默认",
+    },
+    "max_tokens": {
+        "label": "max_tokens",
+        "kind": "int",
+        "placeholder": "整数；留空则跟随模板默认",
+    },
+    "stream": {
+        "label": "stream",
+        "kind": "bool",
+        "checkbox_label": "启用流式响应",
+    },
+    "max_retries": {
+        "label": "max_retries",
+        "kind": "int",
+        "placeholder": "整数；留空则跟随模板默认",
+    },
+    "connect_timeout": {
+        "label": "connect_timeout",
+        "kind": "int",
+        "placeholder": "整数秒；留空则跟随模板默认",
+    },
+    "read_timeout": {
+        "label": "read_timeout",
+        "kind": "int",
+        "placeholder": "整数秒；留空则跟随模板默认",
+    },
+    "context_win": {
+        "label": "context_win",
+        "kind": "int",
+        "placeholder": "上下文窗口；留空则跟随模板默认",
+    },
+    "user_agent": {
+        "label": "user_agent",
+        "kind": "text",
+        "placeholder": "例如 claude-cli/2.1.113 (external, cli)",
+    },
+}
+
+_API_KIND_ADVANCED_FIELDS = {
+    "native_claude": [
+        "fake_cc_system_prompt",
+        "thinking_type",
+        "thinking_budget_tokens",
+        "reasoning_effort",
+        "temperature",
+        "max_tokens",
+        "stream",
+        "max_retries",
+        "connect_timeout",
+        "read_timeout",
+        "context_win",
+        "user_agent",
+    ],
+    "native_oai": [
+        "reasoning_effort",
+        "temperature",
+        "max_tokens",
+        "stream",
+        "max_retries",
+        "connect_timeout",
+        "read_timeout",
+        "context_win",
+    ],
+}
+
 
 class ApiEditorMixin:
+    def _api_on_ui_thread(self, fn):
+        QTimer.singleShot(0, self, fn)
+
+    def _api_combo_style(self):
+        return (
+            f"QComboBox {{ background: {C['field_bg']}; color: {C['text']}; "
+            f"border: 1px solid {C['stroke_default']}; border-radius: {F['radius_md']}px; "
+            f"padding: 6px 28px 6px 10px; min-height: 20px; }}"
+            f"QComboBox:hover {{ border-color: {C['stroke_hover']}; }}"
+            f"QComboBox:focus {{ border-color: {C['stroke_focus']}; }}"
+            f"QComboBox::drop-down {{ border: none; width: 22px; }}"
+            f"QComboBox::down-arrow {{ image: none; width: 0px; height: 0px; "
+            f"border-left: 5px solid transparent; border-right: 5px solid transparent; "
+            f"border-top: 6px solid {C['muted']}; margin-right: 8px; }}"
+            f"QComboBox QAbstractItemView {{ background: {C['layer1']}; color: {C['text']}; "
+            f"border: 1px solid {C['stroke_hover']}; border-radius: {F['radius_md']}px; padding: 4px; "
+            f"selection-background-color: {C['accent_soft_bg']}; selection-color: {C['text']}; outline: 0; }}"
+            f"QComboBox QLineEdit {{ background: transparent; color: {C['text']}; border: none; padding: 0; }}"
+        )
+
     def _api_format_options(self):
         return [lz.SIMPLE_FORMAT_LABEL[k] for k in ("claude_native", "oai_chat", "oai_responses")]
 
@@ -85,8 +197,14 @@ class ApiEditorMixin:
         valid_tpl_keys = {k for k, _ in self._api_template_choices(format_key)}
         if tpl_key not in valid_tpl_keys:
             tpl_key = "custom-claude" if kind == "native_claude" else "custom-oai"
+        advanced_values = {}
+        for key in self._api_known_advanced_keys_for_kind(kind):
+            if key in data:
+                advanced_values[key] = data.get(key)
         raw_extra = dict(data)
-        for key in ("name", "apikey", "apibase", "model"):
+        for key in ("name", "apikey", "apibase", "model", "user_agent"):
+            raw_extra.pop(key, None)
+        for key in _API_ADVANCED_FIELD_META:
             raw_extra.pop(key, None)
         for key in lz.TEMPLATE_INDEX.get(tpl_key, {}).get("defaults", {}):
             raw_extra.pop(key, None)
@@ -98,6 +216,8 @@ class ApiEditorMixin:
             "apibase": data.get("apibase", ""),
             "apikey": data.get("apikey", ""),
             "model": data.get("model", lz.TEMPLATE_INDEX.get(tpl_key, {}).get("defaults", {}).get("model", "")),
+            "advanced_values": advanced_values,
+            "advanced_expanded": False,
             "raw_extra": raw_extra,
             "model_choices": [],
             "model_status": "",
@@ -107,6 +227,83 @@ class ApiEditorMixin:
     def _api_default_model_for_state(self, state):
         tpl_key = state.get("tpl_key")
         return str(lz.TEMPLATE_INDEX.get(tpl_key, {}).get("defaults", {}).get("model", "") or "").strip()
+
+    def _api_state_kind(self, state):
+        fmt = self._api_format_meta((state or {}).get("format"))
+        tpl = lz.TEMPLATE_INDEX.get((state or {}).get("tpl_key"), {})
+        return fmt.get("kind") or tpl.get("kind") or "native_oai"
+
+    def _api_sync_state_var_kind(self, state, kind=None):
+        target_kind = kind or self._api_state_kind(state)
+        existing = {s.get("var") for s in self._qt_api_state if s is not state}
+        existing.update({c.get("var") for c in self._qt_api_hidden_configs})
+        state["var"] = lz.sync_config_var_kind(target_kind, state.get("var"), existing)
+        return state["var"]
+
+    def _api_known_advanced_keys_for_kind(self, kind):
+        return list(_API_KIND_ADVANCED_FIELDS.get(kind, []))
+
+    def _api_advanced_field_keys(self, state):
+        kind = self._api_state_kind(state)
+        ordered = []
+        for key in self._api_known_advanced_keys_for_kind(kind):
+            if key not in ordered:
+                ordered.append(key)
+        for key in (lz.TEMPLATE_INDEX.get((state or {}).get("tpl_key"), {}).get("defaults") or {}):
+            if key in _API_ADVANCED_FIELD_META and key not in ordered:
+                ordered.append(key)
+        for key in ((state or {}).get("advanced_values") or {}):
+            if key in _API_ADVANCED_FIELD_META and key not in ordered:
+                ordered.append(key)
+        return ordered
+
+    def _api_advanced_value(self, state, key):
+        values = dict((state or {}).get("advanced_values") or {})
+        if key in values:
+            return values.get(key)
+        defaults = dict(lz.TEMPLATE_INDEX.get((state or {}).get("tpl_key"), {}).get("defaults") or {})
+        if key in defaults:
+            return defaults.get(key)
+        meta = _API_ADVANCED_FIELD_META.get(key) or {}
+        return False if meta.get("kind") == "bool" else ""
+
+    def _api_set_advanced_value(self, state, key, value):
+        values = dict((state or {}).get("advanced_values") or {})
+        meta = _API_ADVANCED_FIELD_META.get(key) or {}
+        kind = meta.get("kind")
+        if kind == "bool":
+            values[key] = bool(value)
+        else:
+            text = "" if value is None else str(value).strip()
+            if text:
+                values[key] = text
+            else:
+                values.pop(key, None)
+        state["advanced_values"] = values
+
+    def _api_normalize_advanced_value(self, key, value):
+        meta = _API_ADVANCED_FIELD_META.get(key) or {}
+        kind = meta.get("kind")
+        if kind == "bool":
+            return bool(value)
+        text = str(value or "").strip()
+        if not text:
+            return None
+        if kind == "int":
+            try:
+                return int(text)
+            except Exception as e:
+                raise ValueError(f"{meta.get('label', key)} 需要填写整数。") from e
+        if kind == "float":
+            try:
+                return float(text)
+            except Exception as e:
+                raise ValueError(f"{meta.get('label', key)} 需要填写数字。") from e
+        return text
+
+    def _api_supports_user_agent(self, state):
+        fmt = self._api_format_meta((state or {}).get("format"))
+        return fmt.get("kind") == "native_claude"
 
     def _api_apply_template_model(self, state, previous_default=""):
         new_default = self._api_default_model_for_state(state)
@@ -138,6 +335,7 @@ class ApiEditorMixin:
             fmt = self._api_format_meta(state.get("format"))
             tpl = lz.TEMPLATE_INDEX.get(state.get("tpl_key"), {})
             kind = fmt.get("kind") or tpl.get("kind") or "native_oai"
+            self._api_sync_state_var_kind(state, kind)
             data = dict(tpl.get("defaults") or {})
             data.update(dict(state.get("raw_extra") or {}))
             api_mode = fmt.get("api_mode")
@@ -160,6 +358,23 @@ class ApiEditorMixin:
                 data["model"] = model
             else:
                 data.pop("model", None)
+            for key in self._api_advanced_field_keys(state):
+                values = dict(state.get("advanced_values") or {})
+                if key not in values:
+                    continue
+                normalized = self._api_normalize_advanced_value(key, values.get(key))
+                if normalized is None:
+                    data.pop(key, None)
+                else:
+                    data[key] = normalized
+            if kind == "native_claude":
+                user_agent = str(state.get("user_agent") or "").strip()
+                if user_agent:
+                    data["user_agent"] = user_agent
+                else:
+                    data.pop("user_agent", None)
+            else:
+                data.pop("user_agent", None)
             base_name = self._api_base_name(state, idx) or f"api-{idx + 1}"
             name = base_name
             serial = 2
@@ -241,6 +456,7 @@ class ApiEditorMixin:
             format_box = QComboBox()
             format_box.addItems(self._api_format_options())
             format_box.setCurrentText(lz.SIMPLE_FORMAT_LABEL.get(state.get("format"), "Chat Completions"))
+            format_box.setStyleSheet(self._api_combo_style())
             row1.addWidget(format_box, 1)
             row1.addWidget(QLabel("模板"), 0)
             tpl_box = QComboBox()
@@ -248,6 +464,7 @@ class ApiEditorMixin:
             tpl_map = {k: lbl for k, lbl in tpl_choices}
             tpl_box.addItems([lbl for _, lbl in tpl_choices])
             tpl_box.setCurrentText(tpl_map.get(state.get("tpl_key"), tpl_choices[0][1] if tpl_choices else ""))
+            tpl_box.setStyleSheet(self._api_combo_style())
             row1.addWidget(tpl_box, 1)
             body.addLayout(row1)
 
@@ -265,6 +482,7 @@ class ApiEditorMixin:
             row3.addWidget(QLabel("模型"), 0)
             model_box = QComboBox()
             model_box.setEditable(True)
+            model_box.setStyleSheet(self._api_combo_style())
             model_choices = list(state.get("model_choices") or [])
             current_model = (state.get("model") or self._api_default_model_for_state(state) or "").strip()
             if current_model and current_model not in model_choices:
@@ -301,6 +519,19 @@ class ApiEditorMixin:
             row4.addWidget(show_btn, 0)
             body.addLayout(row4)
 
+            row5 = QHBoxLayout()
+            row5.setSpacing(10)
+            row5.addWidget(QLabel("UA"), 0)
+            ua_edit = QLineEdit()
+            ua_edit.setPlaceholderText("可选：自定义 user_agent，例如 claude-cli/2.1.113 (external, cli)")
+            ua_edit.setText(str(state.get("user_agent") or ""))
+            row5.addWidget(ua_edit, 1)
+            body.addLayout(row5)
+            ua_row_widgets = (ua_edit, row5.itemAt(0).widget())
+            for widget in ua_row_widgets:
+                if widget is not None:
+                    widget.setVisible(self._api_supports_user_agent(state))
+
             status = QLabel(state.get("model_status") or "")
             status.setWordWrap(True)
             status.setObjectName("mutedText")
@@ -322,15 +553,86 @@ class ApiEditorMixin:
                     notes.append(f"api_mode={fmt['api_mode']}")
                 if defaults.get("read_timeout"):
                     notes.append(f"read_timeout={defaults['read_timeout']}")
+                if (s.get("user_agent") or "").strip():
+                    notes.append("已自定义 user_agent")
+                if str(self._api_advanced_value(s, "user_agent") or "").strip():
+                    notes.append("已自定义 user_agent")
                 label.setText(
                     f"{fmt.get('hint', '')} 模板默认模型：{model}；"
                     f"{'，'.join(notes) if notes else '自动写入模板里的默认参数'}。"
                 )
 
+            advanced_toggle = QPushButton()
+            advanced_toggle.setCheckable(True)
+            advanced_toggle.setChecked(bool(state.get("advanced_expanded", False)))
+            advanced_toggle.setStyleSheet(self._action_button_style(kind="subtle"))
+            body.addWidget(advanced_toggle)
+
+            advanced_wrap = QWidget()
+            advanced_layout = QVBoxLayout(advanced_wrap)
+            advanced_layout.setContentsMargins(0, 4, 0, 0)
+            advanced_layout.setSpacing(8)
+            body.addWidget(advanced_wrap)
+
+            def sync_advanced_fold(checked=None, s=state, btn=advanced_toggle, panel=advanced_wrap):
+                flag = bool(btn.isChecked() if checked is None else checked)
+                s["advanced_expanded"] = flag
+                btn.setText(("▾ " if flag else "▸ ") + "高级参数")
+                panel.setVisible(flag)
+
+            def render_advanced_fields(s=state, layout=advanced_layout):
+                while layout.count():
+                    item = layout.takeAt(0)
+                    widget = item.widget()
+                    child = item.layout()
+                    if child is not None:
+                        self._clear_layout(child)
+                    if widget is not None:
+                        widget.deleteLater()
+                field_keys = self._api_advanced_field_keys(s)
+                if not field_keys:
+                    empty = QLabel("当前模板没有额外高级参数。")
+                    empty.setObjectName("mutedText")
+                    layout.addWidget(empty)
+                    return
+                for key in field_keys:
+                    meta = _API_ADVANCED_FIELD_META.get(key) or {}
+                    row_host = QWidget()
+                    row = QHBoxLayout(row_host)
+                    row.setContentsMargins(0, 0, 0, 0)
+                    row.setSpacing(10)
+                    label = QLabel(meta.get("label", key))
+                    label.setMinimumWidth(138)
+                    row.addWidget(label, 0)
+                    kind = meta.get("kind")
+                    current_value = self._api_advanced_value(s, key)
+                    if kind == "bool":
+                        widget = QCheckBox(meta.get("checkbox_label", "启用"))
+                        widget.setChecked(bool(current_value))
+                        widget.toggled.connect(lambda checked, st=s, k=key: self._api_set_advanced_value(st, k, checked))
+                    elif kind == "choice":
+                        widget = QComboBox()
+                        widget.setStyleSheet(self._api_combo_style())
+                        widget.addItem("跟随模板/默认", "")
+                        for choice in meta.get("choices", []):
+                            widget.addItem(str(choice), str(choice))
+                        current_text = str(current_value or "").strip()
+                        idx = widget.findData(current_text)
+                        widget.setCurrentIndex(idx if idx >= 0 else 0)
+                        widget.currentIndexChanged.connect(lambda _=0, w=widget, st=s, k=key: self._api_set_advanced_value(st, k, w.currentData()))
+                    else:
+                        widget = QLineEdit()
+                        widget.setPlaceholderText(meta.get("placeholder", "留空则跟随模板/默认"))
+                        widget.setText("" if current_value in (None, "") else str(current_value))
+                        widget.textChanged.connect(lambda text, st=s, k=key: self._api_set_advanced_value(st, k, text))
+                    row.addWidget(widget, 1)
+                    layout.addWidget(row_host)
+
             def on_format_change(choice, s=state, tpl_widget=tpl_box, model_widget=model_box, status_label=status):
                 format_key = self._api_format_from_label(choice)
                 previous_default = self._api_default_model_for_state(s)
                 s["format"] = format_key
+                self._api_sync_state_var_kind(s)
                 s["model_status"] = ""
                 s["raw_extra"] = self._api_prune_managed_extra(s.get("raw_extra"), drop_template=True, drop_format=True)
                 new_choices = self._api_template_choices(format_key)
@@ -346,6 +648,11 @@ class ApiEditorMixin:
                 tpl_widget.setCurrentText(new_map.get(current_key, ""))
                 tpl_widget.blockSignals(False)
                 model_widget.setCurrentText(s.get("model") or "")
+                render_advanced_fields()
+                sync_advanced_fold()
+                for widget in ua_row_widgets:
+                    if widget is not None:
+                        widget.setVisible(self._api_supports_user_agent(s))
                 status_label.setText("")
                 sync_summary()
 
@@ -358,6 +665,8 @@ class ApiEditorMixin:
                 self._api_apply_template_model(s, previous_default)
                 model_widget.setCurrentText(s.get("model") or "")
                 status_label.setText("")
+                render_advanced_fields()
+                sync_advanced_fold()
                 sync_summary()
 
             format_box.currentTextChanged.connect(on_format_change)
@@ -365,6 +674,10 @@ class ApiEditorMixin:
             url_edit.textChanged.connect(lambda text, s=state: s.__setitem__("apibase", text))
             key_edit.textChanged.connect(lambda text, s=state: s.__setitem__("apikey", text))
             model_box.currentTextChanged.connect(lambda text, s=state: s.__setitem__("model", text.strip()))
+            advanced_toggle.toggled.connect(sync_advanced_fold)
+            render_advanced_fields()
+            sync_advanced_fold()
+            ua_edit.textChanged.connect(lambda text, s=state: s.__setitem__("user_agent", text.strip()))
             sync_summary()
             self.settings_api_list_layout.addWidget(card)
         self.settings_api_list_layout.addStretch(1)
@@ -387,6 +700,9 @@ class ApiEditorMixin:
                 "apibase": defaults.get("apibase", ""),
                 "apikey": "",
                 "model": defaults.get("model", ""),
+                "advanced_values": {},
+                "advanced_expanded": False,
+                "user_agent": "",
                 "raw_extra": {},
                 "model_choices": [],
                 "model_status": "",
@@ -425,15 +741,16 @@ class ApiEditorMixin:
                     state["model_status"] = f"已拉取 {len(models)} 个模型，可直接选择或继续手输。"
                     self._render_api_cards()
 
-                QTimer.singleShot(0, done_ok)
+                self._api_on_ui_thread(done_ok)
             except Exception as e:
+                err_text = str(e)
 
                 def done_err():
                     state["model_fetching"] = False
-                    state["model_status"] = f"拉取失败：{e}"
+                    state["model_status"] = f"拉取失败：{err_text}"
                     self._render_api_cards()
 
-                QTimer.singleShot(0, done_err)
+                self._api_on_ui_thread(done_err)
 
         threading.Thread(target=worker, daemon=True).start()
 

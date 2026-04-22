@@ -75,7 +75,7 @@ class SetupPagesMixin:
         self.enter_chat_btn = QPushButton("直接启动")
         self.enter_chat_btn.setStyleSheet(self._action_button_style(primary=True))
         self.enter_chat_btn.setFixedSize(110, 34)
-        self.enter_chat_btn.clicked.connect(self._enter_chat)
+        self.enter_chat_btn.clicked.connect(self._quick_enter_chat)
         recent_row.addWidget(self.enter_chat_btn, 0, Qt.AlignVCenter)
         layout.addWidget(self.recent_card)
 
@@ -224,8 +224,8 @@ class SetupPagesMixin:
         dep_title.setObjectName("cardTitle")
         dep_box.addWidget(dep_title)
         dep_desc = QLabel(
-            "进入聊天前会自动检查系统 Python、基础依赖和 GenericAgent 可载入性。"
-            "缺失时会自动补齐，并展示实时过程。"
+            "从这个页面点击“载入内核”时，会检查系统 Python、基础依赖和 GenericAgent 可载入性。"
+            "缺失时会自动补齐，并展示实时过程。欢迎页的“直接启动”不会先做这一步。"
         )
         dep_desc.setWordWrap(True)
         dep_desc.setObjectName("cardDesc")

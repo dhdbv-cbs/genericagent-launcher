@@ -16,6 +16,8 @@ class LauncherCoreFacadeTests(unittest.TestCase):
             "_resolve_config_path",
             "_make_config_relative_path",
             "_normalize_token_usage_inplace",
+            "list_scheduled_tasks",
+            "tail_scheduler_log",
             "fold_turns",
             "serialize_mykey_py",
             "SIMPLE_FORMAT_RULES",
@@ -111,6 +113,53 @@ class LauncherCoreFacadeTests(unittest.TestCase):
             self.assertIsNotNone(loaded)
             self.assertEqual(loaded["id"], "case1")
             self.assertIn("token_usage", loaded)
+
+    def test_list_scheduled_tasks_reads_upstream_style_json(self):
+        with tempfile.TemporaryDirectory() as td:
+            os.makedirs(os.path.join(td, "reflect"), exist_ok=True)
+            os.makedirs(os.path.join(td, "sche_tasks", "done"), exist_ok=True)
+            with open(os.path.join(td, "reflect", "scheduler.py"), "w", encoding="utf-8") as f:
+                f.write("# scheduler")
+            with open(os.path.join(td, "sche_tasks", "morning.json"), "w", encoding="utf-8") as f:
+                f.write(
+                    '{"schedule":"08:00","repeat":"daily","enabled":true,"prompt":"生成晨报","max_delay_hours":6}'
+                )
+            with open(os.path.join(td, "sche_tasks", "done", "2026-04-22_0800_morning.md"), "w", encoding="utf-8") as f:
+                f.write("done")
+
+            data = lz.list_scheduled_tasks(td, now=None)
+
+        self.assertTrue(data["supported"])
+        self.assertEqual(len(data["tasks"]), 1)
+        self.assertEqual(data["tasks"][0]["id"], "morning")
+        self.assertEqual(data["tasks"][0]["repeat"], "daily")
+        self.assertEqual(data["tasks"][0]["schedule"], "08:00")
+        self.assertEqual(data["tasks"][0]["report_count"], 1)
+        self.assertEqual(data["enabled_count"], 1)
+
+    def test_scheduled_task_save_load_delete_roundtrip(self):
+        with tempfile.TemporaryDirectory() as td:
+            payload = {
+                "schedule": "09:30",
+                "repeat": "weekday",
+                "enabled": True,
+                "prompt": "生成日报",
+                "max_delay_hours": 4,
+                "extra_fields": {"priority": "high"},
+            }
+            result = lz.save_scheduled_task(td, "day report", payload)
+            loaded = lz.load_scheduled_task(td, result["task_id"])
+
+            self.assertEqual(result["task_id"], "day_report")
+            self.assertEqual(loaded["schedule"], "09:30")
+            self.assertEqual(loaded["repeat"], "weekday")
+            self.assertTrue(loaded["enabled"])
+            self.assertEqual(loaded["extra_fields"]["priority"], "high")
+            self.assertTrue(lz.delete_scheduled_task(td, result["task_id"]))
+            self.assertFalse(os.path.exists(os.path.join(td, "sche_tasks", "day_report.json")))
+
+    def test_normalize_scheduled_task_id_strips_invalid_filename_chars(self):
+        self.assertEqual(lz.normalize_scheduled_task_id(' 早报 : 任务 ? '), "早报_任务")
 
 
 if __name__ == "__main__":

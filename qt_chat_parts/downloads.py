@@ -678,6 +678,17 @@ class DownloadMixin:
                 "启动器已自动尝试重新下载安装包；若仍失败，请检查目标盘健康状态，"
                 "并删除 GenericAgent/.launcher_runtime/downloads 后重试。"
             )
+        if int(result.returncode) in (1603, 0x643):
+            log_tip = f"\n安装日志：{log_path}" if log_path else ""
+            detail += (
+                "\n提示：检测到 Windows Installer 退出码 1603 / 0x00000643。"
+                "这通常不是网络问题，而是安装阶段被系统回滚。"
+                "常见原因包括：目标目录里已有损坏/残留的 Python 文件、安装日志路径或目标盘权限异常、"
+                "杀毒软件拦截、以及系统里已有同路径运行中的 python.exe。"
+                "\n建议先关闭占用中的 Python 进程，临时关闭安全软件实时防护，"
+                "删除目标目录下 `.launcher_runtime/python312` 和 `.launcher_runtime/downloads/python-install.log` 后重试。"
+                f"{log_tip}"
+            )
         return False, detail
 
     def _ensure_private_python_env(self, target):

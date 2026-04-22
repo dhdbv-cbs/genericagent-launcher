@@ -9,7 +9,9 @@ import unittest
 
 import bridge
 from launcher_app import core as lz
+from launcher_core_parts import model_api
 from launcher_core_parts import python_env
+from qt_chat_parts.api_editor import ApiEditorMixin
 
 
 class LauncherCoreBehaviorTests(unittest.TestCase):
@@ -146,6 +148,42 @@ class LauncherCoreBehaviorTests(unittest.TestCase):
         self.assertEqual(agent.llm_no, 0)
         self.assertEqual(agent.llmclient.last_tools, "")
 
+    def test_bridge_ui_llms_keeps_provider_prefix(self):
+        class DummyAgent:
+            def list_llms(self):
+                return [(0, "anthropic/claude-opus-4-6", True)]
+
+        items = bridge._ui_llms(DummyAgent())
+        self.assertEqual(items[0]["name"], "anthropic/claude-opus-4-6")
+
+    def test_bridge_claude_sse_patch_preserves_thinking_signature_field(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        path = os.path.join(root, "bridge.py")
+        with open(path, "r", encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn('current_block = {"type": "thinking", "thinking": "", "signature": ""}', src)
+        self.assertIn('elif delta.get("type") == "signature_delta":', src)
+        self.assertIn('current_block["signature"] = current_block.get("signature", "") + delta.get("signature", "")', src)
+
+    def test_bridge_usage_patch_wraps_llmcore_record_usage_for_non_stream_paths(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        path = os.path.join(root, "bridge.py")
+        with open(path, "r", encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("def _record_usage_patched(usage, api_mode):", src)
+        self.assertIn("_store_current_usage(_normalize_provider_usage(usage))", src)
+        self.assertIn('llmcore._record_usage = _record_usage_patched', src)
+        self.assertIn('_record_usage_patched._ga_launcher_original = getattr(llmcore, "_record_usage", None)', src)
+
+    def test_bridge_claude_sse_patch_preserves_thinking_signature_field(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        path = os.path.join(root, "bridge.py")
+        with open(path, "r", encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn('current_block = {"type": "thinking", "thinking": "", "signature": ""}', src)
+        self.assertIn('elif delta.get("type") == "signature_delta":', src)
+        self.assertIn('current_block["signature"] = current_block.get("signature", "") + delta.get("signature", "")', src)
+
     def test_bridge_strips_pyinstaller_runtime_dir_from_sys_path(self):
         original_file = bridge.__file__
         original_sys_path = list(bridge.sys.path)
@@ -216,6 +254,11 @@ native_oai_config = {
     'apibase': 'https://api.openai.com/v1',
     'model': 'gpt-5.4',
 }
+langfuse_config = {
+    'public_key': 'pk-demo',
+    'secret_key': 'sk-demo',
+    'host': 'https://cloud.langfuse.com',
+}
 my_cookie = 'abc'
 tg_bot_token = '123'
 """
@@ -229,12 +272,23 @@ tg_bot_token = '123'
         self.assertEqual(len(out["configs"]), 1)
         self.assertEqual(out["configs"][0]["kind"], "native_oai")
         self.assertEqual(out["extras"].get("tg_bot_token"), "123")
+        self.assertEqual(out["extras"].get("langfuse_config", {}).get("public_key"), "pk-demo")
         self.assertEqual(out["passthrough"][0]["name"], "my_cookie")
 
     def test_auto_config_var_increments(self):
         existing = {"native_oai_config", "native_oai_config2"}
         name = lz.auto_config_var("native_oai", existing)
         self.assertEqual(name, "native_oai_config3")
+
+    def test_sync_config_var_kind_rewrites_family_and_preserves_suffix_when_possible(self):
+        self.assertEqual(
+            lz.sync_config_var_kind("native_claude", "native_oai_config2", {"native_claude_config"}),
+            "native_claude_config2",
+        )
+        self.assertEqual(
+            lz.sync_config_var_kind("native_claude", "native_oai_config", {"native_claude_config"}),
+            "native_claude_config2",
+        )
 
     def test_serialize_mykey_py_contains_blocks(self):
         text = lz.serialize_mykey_py(
@@ -245,12 +299,52 @@ tg_bot_token = '123'
                     "data": {"apikey": "k", "apibase": "https://x", "model": "m"},
                 }
             ],
-            extras={"tg_bot_token": "abc"},
+            extras={"tg_bot_token": "abc", "langfuse_config": {"public_key": "pk", "secret_key": "sk"}},
             passthrough=[{"name": "my_cookie", "value": "cookie-v"}],
         )
         self.assertIn("native_claude_config", text)
         self.assertIn("tg_bot_token", text)
+        self.assertIn("langfuse_config", text)
         self.assertIn("my_cookie", text)
+
+    def test_api_editor_save_keeps_claude_card_as_native_claude_after_reload(self):
+        class DummyApiEditor(ApiEditorMixin):
+            def __init__(self):
+                self._qt_api_hidden_configs = []
+                self._qt_api_state = []
+
+        editor = DummyApiEditor()
+        editor._qt_api_state = [
+            {
+                "var": "native_oai_config",
+                "format": "claude_native",
+                "tpl_key": "anthropic",
+                "apibase": "https://api.anthropic.com",
+                "apikey": "sk-ant-demo",
+                "model": "claude-opus-4-7[1m]",
+                "advanced_values": {},
+                "advanced_expanded": False,
+                "raw_extra": {},
+                "model_choices": [],
+                "model_status": "",
+                "model_fetching": False,
+            }
+        ]
+        configs = editor._api_build_save_configs()
+        self.assertEqual(configs[0]["kind"], "native_claude")
+        self.assertEqual(configs[0]["var"], "native_claude_config")
+        self.assertEqual(editor._qt_api_state[0]["var"], "native_claude_config")
+
+        text = lz.serialize_mykey_py(configs=configs, extras={}, passthrough=[])
+        with tempfile.TemporaryDirectory() as td:
+            fp = os.path.join(td, "mykey.py")
+            with open(fp, "w", encoding="utf-8") as f:
+                f.write(text)
+            parsed = lz.parse_mykey_py(fp)
+
+        self.assertIsNone(parsed["error"])
+        self.assertEqual(parsed["configs"][0]["kind"], "native_claude")
+        self.assertEqual(parsed["configs"][0]["var"], "native_claude_config")
 
     def test_model_api_url_helpers(self):
         self.assertEqual(
@@ -258,6 +352,10 @@ tg_bot_token = '123'
             "https://a.com",
         )
         self.assertEqual(lz._join_url("https://a.com/v1/", "/models"), "https://a.com/v1/models")
+        self.assertEqual(
+            lz._oai_models_candidates("https://a.com/v1/chat/completions"),
+            ["https://a.com/v1/models", "https://a.com/models"],
+        )
 
         cands = lz._anthropic_models_candidates("https://api.example.com/claude/office")
         self.assertGreaterEqual(len(cands), 2)
@@ -274,6 +372,60 @@ tg_bot_token = '123'
         }
         out = lz._extract_model_ids(payload)
         self.assertEqual(out, ["m1", "m2", "m3", "m4"])
+
+    def test_extract_model_ids_supports_nested_payloads(self):
+        payload = {
+            "result": {
+                "items": [
+                    {"model_id": "nested-1"},
+                    {"id": "nested-2"},
+                ]
+            }
+        }
+        out = lz._extract_model_ids(payload)
+        self.assertEqual(out, ["nested-1", "nested-2"])
+
+    def test_fetch_remote_models_retries_with_alt_headers(self):
+        original = model_api._http_json
+        seen = []
+
+        def fake_http_json(url, headers=None, timeout=12):
+            seen.append((url, dict(headers or {})))
+            if "Authorization" in (headers or {}):
+                raise ValueError("Bearer rejected")
+            if (headers or {}).get("x-api-key") == "secret":
+                return {"data": [{"id": "model-a"}]}
+            raise ValueError("unexpected headers")
+
+        model_api._http_json = fake_http_json
+        try:
+            out = model_api._fetch_remote_models("oai_chat", "https://api.example.com/v1", "secret")
+        finally:
+            model_api._http_json = original
+        self.assertEqual(out, ["model-a"])
+        self.assertTrue(any(headers.get("Authorization") == "Bearer secret" for _url, headers in seen))
+        self.assertTrue(any(headers.get("x-api-key") == "secret" for _url, headers in seen))
+
+    def test_fetch_remote_models_retries_with_alt_oai_urls(self):
+        original = model_api._http_json
+        seen = []
+
+        def fake_http_json(url, headers=None, timeout=12):
+            seen.append(url)
+            if url.endswith("/v1/models"):
+                raise ValueError("v1 not supported")
+            if url.endswith("/models"):
+                return {"models": [{"id": "model-b"}]}
+            raise ValueError("unexpected url")
+
+        model_api._http_json = fake_http_json
+        try:
+            out = model_api._fetch_remote_models("oai_chat", "https://api.example.com/v1", "secret")
+        finally:
+            model_api._http_json = original
+        self.assertEqual(out, ["model-b"])
+        self.assertIn("https://api.example.com/v1/models", seen)
+        self.assertIn("https://api.example.com/models", seen)
 
     def test_usage_mode_helpers(self):
         self.assertEqual(lz._usage_mode_from_sources([]), "estimate_chars_div_2_5")
@@ -360,9 +512,13 @@ tg_bot_token = '123'
         with open(path, "r", encoding="utf-8") as f:
             src = f.read()
         self.assertIn("def _notify_reply_done", src)
+        self.assertIn("def _reply_sound_enabled", src)
+        self.assertIn("def _reply_message_enabled", src)
+        self.assertIn("if not self._reply_sound_enabled():", src)
+        self.assertIn("if not self._reply_message_enabled():", src)
         self.assertIn("winsound.MessageBeep", src)
         self.assertIn("tray.showMessage", src)
-        self.assertIn("3000", src)
+        self.assertIn("1500", src)
         self.assertIn("if not was_aborted", src)
 
     def test_python_env_probe_forces_utf8_subprocess_env(self):
@@ -429,6 +585,306 @@ tg_bot_token = '123'
             src = f.read()
         self.assertIn('trace = ev.get("trace", "")', src)
         self.assertIn("box.setDetailedText(str(trace))", src)
+
+    def test_api_editor_has_theme_aware_combo_style(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        path = os.path.join(root, "qt_chat_parts", "api_editor.py")
+        with open(path, "r", encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("def _api_combo_style", src)
+        self.assertIn("format_box.setStyleSheet(self._api_combo_style())", src)
+        self.assertIn("tpl_box.setStyleSheet(self._api_combo_style())", src)
+        self.assertIn("QComboBox::down-arrow", src)
+        self.assertIn("border-top: 6px solid", src)
+
+    def test_api_editor_posts_model_fetch_results_back_to_ui_thread(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        path = os.path.join(root, "qt_chat_parts", "api_editor.py")
+        with open(path, "r", encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("def _api_on_ui_thread", src)
+        self.assertIn("QTimer.singleShot(0, self, fn)", src)
+        self.assertIn("self._api_on_ui_thread(done_ok)", src)
+        self.assertIn("err_text = str(e)", src)
+        self.assertIn('state["model_status"] = f"拉取失败：{err_text}"', src)
+        self.assertIn("self._api_on_ui_thread(done_err)", src)
+
+    def test_api_editor_supports_native_claude_user_agent_field(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        path = os.path.join(root, "qt_chat_parts", "api_editor.py")
+        with open(path, "r", encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn('for key in ("name", "apikey", "apibase", "model", "user_agent")', src)
+        self.assertIn('"advanced_values": advanced_values', src)
+        self.assertIn("def _api_advanced_field_keys", src)
+        self.assertIn("def _api_normalize_advanced_value", src)
+        self.assertIn('data[key] = normalized', src)
+        self.assertIn('advanced_toggle.setCheckable(True)', src)
+        self.assertIn('sync_advanced_fold', src)
+        self.assertIn('("▾ " if flag else "▸ ") + "高级参数"', src)
+        self.assertIn('user_agent', src)
+
+    def test_api_editor_has_template_specific_advanced_field_metadata(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        path = os.path.join(root, "qt_chat_parts", "api_editor.py")
+        with open(path, "r", encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("_API_ADVANCED_FIELD_META", src)
+        self.assertIn("_API_KIND_ADVANCED_FIELDS", src)
+        self.assertIn('"fake_cc_system_prompt"', src)
+        self.assertIn('"reasoning_effort"', src)
+        self.assertIn('"user_agent"', src)
+        self.assertIn('widget.addItem("跟随模板/默认", "")', src)
+
+    def test_window_supports_tray_floating_chat_mode(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        window_path = os.path.join(root, "launcher_app", "window.py")
+        shell_path = os.path.join(root, "qt_chat_parts", "window_shell.py")
+        bridge_path = os.path.join(root, "qt_chat_parts", "bridge_runtime.py")
+        with open(window_path, "r", encoding="utf-8") as f:
+            window_src = f.read()
+        with open(shell_path, "r", encoding="utf-8") as f:
+            shell_src = f.read()
+        with open(bridge_path, "r", encoding="utf-8") as f:
+            bridge_src = f.read()
+        self.assertIn("class FloatingOrbWindow(QWidget):", window_src)
+        self.assertIn("def toggle_panel(self):", window_src)
+        self.assertIn('self.ball_btn.setToolTip("点击展开或收起悬浮对话")', window_src)
+        self.assertIn("def _sync_floating_llm_combo(self):", window_src)
+        self.assertIn("def _sync_floating_session_list(self):", window_src)
+        self.assertIn("def _new_session_from_floating(self):", window_src)
+        self.assertIn("def _regenerate_latest_from_floating(self):", window_src)
+        self.assertIn("def _save_floating_orb_position(self, pos: QPoint):", window_src)
+        self.assertIn("def _sync_draft_to_floating(self):", window_src)
+        self.assertIn("self.llm_combo = QComboBox()", window_src)
+        self.assertIn("self.session_combo = QComboBox()", window_src)
+        self.assertIn("self.new_session_btn = QPushButton(\"新建\")", window_src)
+        self.assertIn("self.regen_btn = QPushButton(\"重试\")", window_src)
+        self.assertIn("def _enter_tray_floating_mode(self):", window_src)
+        self.assertIn("def _restore_from_tray_mode(self):", window_src)
+        self.assertIn("if self.isVisible() and not self._tray_mode_active:", window_src)
+        self.assertIn("def _show_floating_chat_window_only(self):", window_src)
+        self.assertIn('menu.addAction("🗕  缩小到托盘，仅保留悬浮窗")', shell_src)
+        self.assertIn("floating.apply_theme()", shell_src)
+        self.assertIn("floating_sync = getattr(self, \"_sync_floating_llm_combo\", None)", bridge_src)
+
+    def test_window_shell_rerenders_api_cards_after_theme_switch(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        path = os.path.join(root, "qt_chat_parts", "window_shell.py")
+        with open(path, "r", encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn('renderer = getattr(self, "_render_api_cards", None)', src)
+        self.assertIn("renderer()", src)
+
+    def test_chat_view_supports_user_row_anchor_and_jump_latest_visibility(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        path = os.path.join(root, "qt_chat_parts", "chat_view.py")
+        with open(path, "r", encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("def _scroll_row_to_top", src)
+        self.assertIn("def _latest_user_row", src)
+        self.assertIn("self._refresh_jump_latest_button()", src)
+        self.assertIn("btn.setVisible(not near_bottom)", src)
+        self.assertIn("def _add_message_row(self, role: str, text: str, finished: bool = True, *, auto_scroll: bool = True)", src)
+
+    def test_text_input_accepts_image_paste_and_drop_for_single_turn_attachments(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        common_path = os.path.join(root, "qt_chat_parts", "common.py")
+        window_path = os.path.join(root, "launcher_app", "window.py")
+        bridge_path = os.path.join(root, "qt_chat_parts", "bridge_runtime.py")
+        bridge_py_path = os.path.join(root, "bridge.py")
+        with open(common_path, "r", encoding="utf-8") as f:
+            common_src = f.read()
+        with open(window_path, "r", encoding="utf-8") as f:
+            window_src = f.read()
+        with open(bridge_path, "r", encoding="utf-8") as f:
+            bridge_src = f.read()
+        with open(bridge_py_path, "r", encoding="utf-8") as f:
+            bridge_py_src = f.read()
+        self.assertIn("def canInsertFromMimeData(self, source) -> bool", common_src)
+        self.assertIn("def insertFromMimeData(self, source) -> None", common_src)
+        self.assertIn("def dropEvent(self, event) -> None", common_src)
+        self.assertIn("image_cb=self._handle_input_image_attachments", window_src)
+        self.assertIn("image_cb=host._handle_input_image_attachments", window_src)
+        self.assertIn("self.input_attachment_host", window_src)
+        self.assertIn("self._pending_input_attachments_data = []", window_src)
+        self.assertIn("def _attachment_bar_targets(self):", bridge_src)
+        self.assertIn("self._render_attachment_bar_target(host, layout, summary)", bridge_src)
+        self.assertIn("def _handle_input_image_attachments", bridge_src)
+        self.assertIn("def _clear_active_turn_attachments", bridge_src)
+        self.assertIn('"images": [str(item.get("path") or "").strip() for item in attachments]', bridge_src)
+        self.assertIn('agent.put_task(cmd.get("text", ""), source="user", images=images)', bridge_py_src
+        )
+
+    def test_bridge_runtime_anchors_send_to_user_row(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        path = os.path.join(root, "qt_chat_parts", "bridge_runtime.py")
+        with open(path, "r", encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn('display_text = text or f"[已发送 {len(attachments)} 张图片]"', src)
+        self.assertIn('user_row = self._add_message_row("user", display_text, finished=True, auto_scroll=False)', src)
+        self.assertIn('self._stream_row = self._add_message_row("assistant", "", finished=False, auto_scroll=False)', src)
+        self.assertIn("self._scroll_row_to_top(user_row)", src)
+
+    def test_window_builds_jump_latest_button(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        path = os.path.join(root, "launcher_app", "window.py")
+        with open(path, "r", encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("self.jump_latest_btn = QPushButton(self.scroll.viewport())", src)
+        self.assertIn('self.jump_latest_btn.setToolTip("跳到最新对话")', src)
+        self.assertIn("self.jump_latest_btn.clicked.connect(self._jump_to_latest_dialogue)", src)
+        self.assertIn("self.scroll.viewport().installEventFilter(self)", src)
+
+    def test_window_shell_jump_latest_targets_latest_user_row(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        path = os.path.join(root, "qt_chat_parts", "window_shell.py")
+        with open(path, "r", encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn('getter = getattr(self, "_latest_user_row", None)', src)
+        self.assertIn("latest_user_row = getter()", src)
+        self.assertIn("self._scroll_row_to_top(latest_user_row)", src)
+        self.assertIn("self._scroll_to_bottom(force=True)", src)
+
+    def test_session_shell_repositions_jump_latest_button_on_viewport_resize(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        path = os.path.join(root, "qt_chat_parts", "session_shell.py")
+        with open(path, "r", encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("event.type() in (QEvent.Resize, QEvent.Show)", src)
+        self.assertIn('placer = getattr(self, "_place_jump_latest_button", None)', src)
+
+    def test_personal_settings_exposes_reply_notification_toggles(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        settings_path = os.path.join(root, "qt_chat_parts", "settings_panel.py")
+        with open(settings_path, "r", encoding="utf-8") as f:
+            settings_src = f.read()
+        self.assertIn('notify_title = QLabel("回复提醒")', settings_src)
+        self.assertIn('self.settings_disable_reply_sound = QCheckBox("关闭提示音")', settings_src)
+        self.assertIn('self.settings_disable_reply_message = QCheckBox("关闭提示消息")', settings_src)
+        self.assertIn("notify_save_btn.clicked.connect(self._save_personal_preferences)", settings_src)
+
+        personal_path = os.path.join(root, "qt_chat_parts", "personal_usage.py")
+        with open(personal_path, "r", encoding="utf-8") as f:
+            personal_src = f.read()
+        self.assertIn("def _reload_personal_preferences", personal_src)
+        self.assertIn('self.cfg["disable_reply_sound"]', personal_src)
+        self.assertIn('self.cfg["disable_reply_message"]', personal_src)
+
+    def test_usage_log_page_mentions_langfuse_and_richer_sections(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        settings_path = os.path.join(root, "qt_chat_parts", "settings_panel.py")
+        personal_path = os.path.join(root, "qt_chat_parts", "personal_usage.py")
+        channels_path = os.path.join(root, "launcher_core_parts", "channels.py")
+        with open(settings_path, "r", encoding="utf-8") as f:
+            settings_src = f.read()
+        with open(personal_path, "r", encoding="utf-8") as f:
+            personal_src = f.read()
+        with open(channels_path, "r", encoding="utf-8") as f:
+            channels_src = f.read()
+        self.assertIn('("usage", "🧾  使用日志")', settings_src)
+        self.assertIn('"使用日志"', settings_src)
+        self.assertIn("Langfuse 追踪", personal_src)
+        self.assertIn("日志来源", personal_src)
+        self.assertIn("高消耗会话", personal_src)
+        self.assertIn("最近活动", personal_src)
+        self.assertIn("高级模式 · Langfuse", personal_src)
+        self.assertIn("def _usage_table_card", personal_src)
+        self.assertIn("def _usage_metric_card", personal_src)
+        self.assertIn("def _usage_cache_label", personal_src)
+        self.assertIn("数据不足", personal_src)
+        self.assertIn("def _load_langfuse_status", personal_src)
+        self.assertIn("def _save_langfuse_config", personal_src)
+        self.assertIn("def _clear_langfuse_config", personal_src)
+        self.assertIn("保存并重启内核", personal_src)
+        self.assertIn("使用官方云端", personal_src)
+        self.assertIn("langfuse_config", personal_src)
+        self.assertIn('"langfuse_config"', channels_src)
+
+    def test_schedule_page_recognizes_upstream_tasks(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        settings_path = os.path.join(root, "qt_chat_parts", "settings_panel.py")
+        runtime_path = os.path.join(root, "qt_chat_parts", "schedule_runtime.py")
+        nav_path = os.path.join(root, "qt_chat_parts", "navigation.py")
+        with open(settings_path, "r", encoding="utf-8") as f:
+            settings_src = f.read()
+        with open(runtime_path, "r", encoding="utf-8") as f:
+            runtime_src = f.read()
+        with open(nav_path, "r", encoding="utf-8") as f:
+            nav_src = f.read()
+        self.assertIn('schedule_add_btn.clicked.connect(self._schedule_add_task_card)', settings_src)
+        self.assertIn('schedule_refresh_btn.clicked.connect(self._reload_schedule_panel)', settings_src)
+        self.assertIn("self.settings_schedule_notice", settings_src)
+        self.assertIn("self.settings_schedule_list_layout", settings_src)
+        self.assertIn("def _reload_schedule_panel", runtime_src)
+        self.assertIn("def _render_schedule_task_cards", runtime_src)
+        self.assertIn("def _schedule_save_task_state", runtime_src)
+        self.assertIn("def _schedule_delete_task_state", runtime_src)
+        self.assertIn("def _start_scheduler_process", runtime_src)
+        self.assertIn("def _stop_scheduler_process", runtime_src)
+        self.assertIn("新建任务", runtime_src)
+        self.assertIn("保存任务", runtime_src)
+        self.assertIn("高级参数", runtime_src)
+        self.assertIn("detect_scheduler_lock", runtime_src)
+        self.assertIn("启动调度器", runtime_src)
+        self.assertIn("调度状态", runtime_src)
+        self.assertIn("sche_tasks", runtime_src)
+        self.assertIn("scheduler.log", runtime_src)
+        self.assertIn("启动日志", runtime_src)
+        self.assertIn("_start_autostart_scheduler", nav_src)
+
+    def test_quick_start_skips_dependency_check_but_locate_page_keeps_it(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        setup_path = os.path.join(root, "qt_chat_parts", "setup_pages.py")
+        with open(setup_path, "r", encoding="utf-8") as f:
+            setup_src = f.read()
+        self.assertIn("self.enter_chat_btn.clicked.connect(self._quick_enter_chat)", setup_src)
+        self.assertIn("欢迎页的“直接启动”不会先做这一步", setup_src)
+
+        nav_path = os.path.join(root, "qt_chat_parts", "navigation.py")
+        with open(nav_path, "r", encoding="utf-8") as f:
+            nav_src = f.read()
+        self.assertIn("def _quick_enter_chat(self):", nav_src)
+        self.assertIn("self._enter_chat(skip_dependency_check=True)", nav_src)
+        self.assertIn("def _enter_chat(self, *, skip_dependency_check=False):", nav_src)
+        self.assertIn('if (not skip_dependency_check) and (not self._check_runtime_dependencies(purpose="载入内核")):', nav_src)
+
+    def test_quick_start_skips_dependency_check_but_locate_page_keeps_it(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        setup_path = os.path.join(root, "qt_chat_parts", "setup_pages.py")
+        with open(setup_path, "r", encoding="utf-8") as f:
+            setup_src = f.read()
+        self.assertIn("self.enter_chat_btn.clicked.connect(self._quick_enter_chat)", setup_src)
+        self.assertIn("欢迎页的“直接启动”不会先做这一步", setup_src)
+
+        nav_path = os.path.join(root, "qt_chat_parts", "navigation.py")
+        with open(nav_path, "r", encoding="utf-8") as f:
+            nav_src = f.read()
+        self.assertIn("def _quick_enter_chat(self):", nav_src)
+        self.assertIn("self._enter_chat(skip_dependency_check=True)", nav_src)
+        self.assertIn("def _enter_chat(self, *, skip_dependency_check=False):", nav_src)
+        self.assertIn('if (not skip_dependency_check) and (not self._check_runtime_dependencies(purpose="载入内核")):', nav_src)
+
+    def test_spec_uses_local_hooks_dir(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        path = os.path.join(root, "GenericAgentLauncher.spec")
+        with open(path, "r", encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("hookspath=['hooks']", src)
+
+    def test_claude_template_defaults_follow_upstream_model_names(self):
+        self.assertEqual(lz.TEMPLATE_INDEX["anthropic"]["defaults"]["model"], "claude-opus-4-7[1m]")
+        self.assertEqual(lz.TEMPLATE_INDEX["cc-switch"]["defaults"]["model"], "claude-opus-4-7")
+        self.assertEqual(lz.TEMPLATE_INDEX["crs-claude"]["defaults"]["model"], "claude-opus-4-7[1m]")
+        self.assertEqual(lz.TEMPLATE_INDEX["crs-gemini"]["defaults"]["model"], "claude-opus-4-7-thinking")
+        self.assertEqual(lz.TEMPLATE_INDEX["openrouter"]["defaults"]["model"], "anthropic/claude-opus-4-7")
+
+    def test_custom_importlib_resources_hook_guards_missing_trees_module(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        path = os.path.join(root, "hooks", "hook-importlib_resources.py")
+        with open(path, "r", encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn('find_spec("importlib_resources.trees") is not None', src)
 
     def test_private_python_installer_has_atomic_download_and_retry(self):
         root = os.path.dirname(os.path.dirname(__file__))

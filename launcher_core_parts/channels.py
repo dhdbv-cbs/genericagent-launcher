@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast as _ast
 import importlib.util as _il_util
 import os
+import re
 
 KIND_LABEL = {
     "native_claude": "原生 Claude",
@@ -16,6 +17,7 @@ KIND_LABEL = {
 
 EXTRA_KEYS = {
     "proxy",
+    "langfuse_config",
     "tg_bot_token",
     "tg_allowed_users",
     "qq_app_id",
@@ -205,21 +207,21 @@ def parse_mykey_py(path):
         if name in seen:
             continue
         seen.add(name)
-        if name in values and _is_config_var(name, values[name]):
+        if name in values and name in EXTRA_KEYS:
+            out["extras"][name] = values[name]
+        elif name in values and _is_config_var(name, values[name]):
             out["configs"].append({"var": name, "kind": _classify_config_kind(name), "data": dict(values[name])})
         elif name in values and _is_passthrough_var(name, values[name]):
             out["passthrough"].append({"name": name, "value": values[name]})
-        elif name in values and name in EXTRA_KEYS:
-            out["extras"][name] = values[name]
     for name, v in values.items():
         if name in seen:
             continue
-        if _is_config_var(name, v):
+        if name in EXTRA_KEYS:
+            out["extras"][name] = v
+        elif _is_config_var(name, v):
             out["configs"].append({"var": name, "kind": _classify_config_kind(name), "data": dict(v)})
         elif _is_passthrough_var(name, v):
             out["passthrough"].append({"name": name, "value": v})
-        elif name in EXTRA_KEYS:
-            out["extras"][name] = v
     return out
 
 
@@ -230,6 +232,7 @@ _FIELD_ORDER = [
     "model",
     "api_mode",
     "fake_cc_system_prompt",
+    "user_agent",
     "thinking_type",
     "thinking_budget_tokens",
     "reasoning_effort",
@@ -316,6 +319,7 @@ def serialize_mykey_py(configs, extras, passthrough=None):
         parts.append("\n# ── 全局代理 / 聊天平台集成 ─────────────────────────────────────────\n")
         extra_order = [
             "proxy",
+            "langfuse_config",
             "tg_bot_token",
             "tg_allowed_users",
             "qq_app_id",
@@ -355,16 +359,38 @@ def auto_config_var(kind, existing_vars):
     return f"{base}{i}"
 
 
+def sync_config_var_kind(kind, current_var, existing_vars):
+    current = str(current_var or "").strip()
+    existing = {str(name or "").strip() for name in (existing_vars or ()) if str(name or "").strip()}
+    if current:
+        existing.discard(current)
+    if current and _classify_config_kind(current) == kind and current not in existing:
+        return current
+    base = {
+        "native_claude": "native_claude_config",
+        "native_oai": "native_oai_config",
+        "mixin": "mixin_config",
+        "claude": "claude_config",
+        "oai": "oai_config",
+    }.get(kind, "config")
+    match = re.search(r"(\d+)$", current)
+    if match:
+        candidate = f"{base}{match.group(1)}"
+        if candidate not in existing:
+            return candidate
+    return auto_config_var(kind, existing)
+
+
 CHANNEL_TEMPLATES = [
-    ("anthropic", "Anthropic 官方", "native_claude", {"apibase": "https://api.anthropic.com", "model": "claude-opus-4-6[1m]"}),
-    ("cc-switch", "CC Switch / 反代中转", "native_claude", {"apibase": "", "model": "claude-opus-4-6", "fake_cc_system_prompt": True}),
-    ("crs-claude", "CRS 反代 Claude Max", "native_claude", {"apibase": "", "model": "claude-opus-4-6[1m]", "fake_cc_system_prompt": True, "max_tokens": 32768, "read_timeout": 180}),
-    ("crs-gemini", "CRS Gemini Ultra", "native_claude", {"apibase": "", "model": "claude-opus-4-6-thinking", "stream": False, "max_tokens": 32768, "read_timeout": 180}),
+    ("anthropic", "Anthropic 官方", "native_claude", {"apibase": "https://api.anthropic.com", "model": "claude-opus-4-7[1m]"}),
+    ("cc-switch", "CC Switch / 反代中转", "native_claude", {"apibase": "", "model": "claude-opus-4-7", "fake_cc_system_prompt": True}),
+    ("crs-claude", "CRS 反代 Claude Max", "native_claude", {"apibase": "", "model": "claude-opus-4-7[1m]", "fake_cc_system_prompt": True, "max_tokens": 32768, "read_timeout": 180}),
+    ("crs-gemini", "CRS Gemini Ultra", "native_claude", {"apibase": "", "model": "claude-opus-4-7-thinking", "stream": False, "max_tokens": 32768, "read_timeout": 180}),
     ("glm", "智谱 GLM-5.1", "native_claude", {"apibase": "https://open.bigmodel.cn/api/anthropic", "model": "glm-5.1"}),
     ("minimax-anth", "MiniMax (Anthropic 路径)", "native_claude", {"apibase": "https://api.minimaxi.com/anthropic", "model": "MiniMax-M2.7"}),
     ("oai-generic", "通用 OAI 原生", "native_oai", {"apibase": "", "model": "gpt-5.4"}),
     ("openai", "OpenAI 官方", "native_oai", {"apibase": "https://api.openai.com/v1", "model": "gpt-5.4"}),
-    ("openrouter", "OpenRouter", "native_oai", {"apibase": "https://openrouter.ai/api/v1", "model": "anthropic/claude-opus-4-6"}),
+    ("openrouter", "OpenRouter", "native_oai", {"apibase": "https://openrouter.ai/api/v1", "model": "anthropic/claude-opus-4-7"}),
     ("minimax-oai", "MiniMax (OAI 路径)", "native_oai", {"apibase": "https://api.minimaxi.com/v1", "model": "MiniMax-M2.7", "context_win": 50000}),
     ("kimi", "Kimi / Moonshot", "native_oai", {"apibase": "https://api.moonshot.cn/v1", "model": "kimi-k2-turbo-preview"}),
     ("mixin", "Mixin 故障转移", "mixin", {"llm_nos": [], "max_retries": 10, "base_delay": 0.5}),

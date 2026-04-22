@@ -7,6 +7,7 @@ import time
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import (
     QApplication,
+    QComboBox,
     QDialog,
     QFrame,
     QHBoxLayout,
@@ -17,6 +18,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QStackedWidget,
     QTextBrowser,
     QVBoxLayout,
@@ -42,6 +44,35 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: none;
 
 
 class WindowShellMixin:
+    def _jump_latest_button_style(self) -> str:
+        return (
+            f"QPushButton {{ background: {C['panel']}; color: {C['text']}; border: 1px solid {C['stroke_default']}; "
+            f"border-radius: 18px; padding: 0; }}"
+            f"QPushButton:hover {{ background: {C['layer2']}; border-color: {C['stroke_hover']}; }}"
+            f"QPushButton:pressed {{ background: {C['layer1']}; border-color: {C['stroke_default']}; }}"
+        )
+
+    def _jump_to_latest_dialogue(self):
+        latest_user_row = None
+        getter = getattr(self, "_latest_user_row", None)
+        if callable(getter):
+            latest_user_row = getter()
+        if latest_user_row is not None:
+            self._scroll_row_to_top(latest_user_row)
+            return
+        self._scroll_to_bottom(force=True)
+
+    def _place_jump_latest_button(self):
+        btn = getattr(self, "jump_latest_btn", None)
+        viewport = getattr(getattr(self, "scroll", None), "viewport", lambda: None)()
+        if btn is None or viewport is None:
+            return
+        margin = 18
+        x = max(margin, viewport.width() - btn.width() - margin)
+        y = max(margin, viewport.height() - btn.height() - margin)
+        btn.move(x, y)
+        btn.raise_()
+
     def _build_shell(self):
         self.pages = QStackedWidget()
         self.setCentralWidget(self.pages)
@@ -162,6 +193,13 @@ class WindowShellMixin:
         from launcher_app import theme as qt_theme
 
         normalized = qt_theme.set_theme(mode)
+        refresh_assets = getattr(self, "_refresh_theme_background_assets_for_mode", None)
+        if callable(refresh_assets):
+            try:
+                refresh_assets()
+            except Exception:
+                pass
+        qt_theme.configure_visual_preferences(self.cfg)
         app = QApplication.instance()
         if app is not None:
             app.setStyleSheet(qt_theme.build_qss())
@@ -184,8 +222,27 @@ class WindowShellMixin:
             self.update()
         except Exception:
             pass
+        renderer = getattr(self, "_render_api_cards", None)
+        if callable(renderer):
+            try:
+                renderer()
+            except Exception:
+                pass
+        floating = getattr(self, "_floating_chat_window", None)
+        if floating is not None:
+            try:
+                floating.apply_theme()
+                refresher = getattr(self, "_refresh_floating_chat_window", None)
+                if callable(refresher):
+                    refresher()
+            except Exception:
+                pass
 
     def _restyle_factory_widgets(self):
+        from launcher_app import theme as qt_theme
+
+        chat_bg = qt_theme.chat_surface_background()
+        body_fs = qt_theme.font_body_size()
         action_variants = {
             "action-primary": lambda: self._action_button_style(primary=True),
             "action-default": lambda: self._action_button_style(),
@@ -210,12 +267,31 @@ class WindowShellMixin:
                     except Exception:
                         pass
                     break
+        combo_styler = getattr(self, "_api_combo_style", None)
+        if callable(combo_styler):
+            combo_style = combo_styler()
+            popup_style = (
+                f"QAbstractItemView {{ background: {C['layer1']}; color: {C['text']}; "
+                f"border: 1px solid {C['stroke_hover']}; border-radius: {F['radius_md']}px; padding: 4px; "
+                f"selection-background-color: {C['accent_soft_bg']}; selection-color: {C['text']}; outline: 0; }}"
+            )
+            for combo in self.findChildren(QComboBox):
+                try:
+                    combo.setStyleSheet(combo_style)
+                    view = combo.view()
+                    if view is not None:
+                        view.setStyleSheet(popup_style)
+                        vp = view.viewport()
+                        if vp is not None:
+                            vp.setStyleSheet(f"background: {C['layer1']}; color: {C['text']};")
+                except Exception:
+                    pass
         self._restyle_download_page_widgets()
         ib = getattr(self, "input_box", None)
         if ib is not None:
             try:
                 ib.setStyleSheet(
-                    f"QTextEdit {{ background: transparent; border: none; color: {C['text']}; font-size: 14px; padding: 2px; }}"
+                    f"QTextEdit {{ background: transparent; border: none; color: {C['text']}; font-size: {body_fs}px; padding: 2px; }}"
                 )
             except Exception:
                 pass
@@ -231,13 +307,24 @@ class WindowShellMixin:
         scr = getattr(self, "scroll", None)
         if scr is not None:
             try:
-                scr.setStyleSheet(f"QScrollArea {{ border: none; background: {C['bg']}; }}" + _SCROLLBAR_STYLE)
+                scr.setStyleSheet(f"QScrollArea {{ border: none; background: {chat_bg}; }}" + _SCROLLBAR_STYLE)
+                viewport = scr.viewport()
+                if viewport is not None:
+                    viewport.setStyleSheet(f"background: {chat_bg};")
             except Exception:
                 pass
+        jump_btn = getattr(self, "jump_latest_btn", None)
+        if jump_btn is not None:
+            try:
+                jump_btn.setStyleSheet(self._jump_latest_button_style())
+                jump_btn.setIcon(chat_common._svg_icon("jump_latest", chat_common._SVG_CHEVRON_DOWN, color=C["text"], size=16))
+            except Exception:
+                pass
+            self._place_jump_latest_button()
         msg_root = getattr(self, "msg_root", None)
         if msg_root is not None:
             try:
-                msg_root.setStyleSheet(f"background: {C['bg']};")
+                msg_root.setStyleSheet(f"background: {chat_bg};")
             except Exception:
                 pass
         wi = getattr(self, "welcome_icon", None)
@@ -248,12 +335,26 @@ class WindowShellMixin:
                 pass
         for browser in self.findChildren(QTextBrowser):
             try:
+                is_bot = str(getattr(browser, "objectName", lambda: "")() or "") == "botMsgBrowser"
+                fg = C["text"] if is_bot else C["text_soft"]
                 browser.setStyleSheet(
-                    f"QTextBrowser {{ background: transparent; color: {C['text_soft']}; border: none; padding: 0; font-size: 14px; }}"
+                    f"QTextBrowser {{ background: transparent; color: {fg}; border: none; padding: 0; font-size: {body_fs}px; }}"
                 )
-                browser.document().setDefaultStyleSheet(chat_common._MD_CSS)
-                html = browser.toHtml()
-                browser.setHtml(html)
+                md_css = chat_common._build_md_css()
+                browser.document().setDefaultStyleSheet(md_css)
+                markdown_text = browser.property("_markdownText")
+                if isinstance(markdown_text, str):
+                    html = chat_common._md_to_html(markdown_text)
+                    html_lower = html.lower()
+                    has_wide = ("<table" in html_lower) or ("<pre" in html_lower)
+                    browser.setProperty("_hasWideContent", has_wide)
+                    browser.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded if has_wide else Qt.ScrollBarAlwaysOff)
+                    browser.setSizePolicy(QSizePolicy.Ignored if has_wide else QSizePolicy.Expanding, QSizePolicy.Minimum)
+                    browser.setHtml(html)
+                    browser.setProperty("_fitForce", True)
+                    fit = getattr(chat_common, "_fit_browser_height", None)
+                    if callable(fit):
+                        fit(browser)
             except Exception:
                 pass
 
@@ -297,6 +398,7 @@ class WindowShellMixin:
         auto_on = bool(self.cfg.get("autonomous_enabled", False))
         settings_action = menu.addAction("⚙  设置")
         welcome_action = menu.addAction("⌂  欢迎页")
+        tray_action = menu.addAction("🗕  缩小到托盘，仅保留悬浮窗")
         menu.addSeparator()
         reinject_action = menu.addAction("🛠  重新注入工具示范")
         pet_action = menu.addAction("🐱  启动桌面宠物")
@@ -311,6 +413,8 @@ class WindowShellMixin:
             self._show_settings()
         elif chosen is welcome_action:
             self._show_welcome()
+        elif chosen is tray_action:
+            self._enter_tray_floating_mode()
         elif chosen is reinject_action:
             self._reinject_tools()
         elif chosen is pet_action:

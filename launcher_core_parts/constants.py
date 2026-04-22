@@ -4,6 +4,7 @@ import os
 import sys
 
 REPO_URL = "https://github.com/lsdefine/GenericAgent"
+LAUNCHER_REPO_URL = "https://github.com/dhdbv-cbs/genericagent-launcher"
 APP_DIR = os.path.dirname(os.path.abspath(sys.argv[0]))
 CONFIG_PATH = os.path.join(APP_DIR, "launcher_config.json")
 WX_BOT_API = "https://ilinkai.weixin.qq.com"

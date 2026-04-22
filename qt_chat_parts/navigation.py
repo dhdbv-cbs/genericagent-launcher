@@ -8,6 +8,9 @@ from launcher_app import core as lz
 
 
 class NavigationMixin:
+    def _quick_enter_chat(self):
+        self._enter_chat(skip_dependency_check=True)
+
     def _set_agent_dir(self, path: str, *, persist: bool = True):
         raw = str(path or "").strip()
         new_dir = os.path.abspath(raw) if raw else ""
@@ -16,6 +19,9 @@ class NavigationMixin:
         if changed:
             self._stop_bridge()
             self._stop_all_managed_channels(refresh=False)
+            stopper = getattr(self, "_stop_scheduler_process", None)
+            if callable(stopper):
+                stopper(refresh=False)
             self._last_dependency_check = None
             self._last_dependency_report = None
             self.current_session = None
@@ -136,7 +142,7 @@ class NavigationMixin:
     def _save_settings_and_enter_chat(self):
         self._enter_chat()
 
-    def _enter_chat(self):
+    def _enter_chat(self, *, skip_dependency_check=False):
         if not lz.is_valid_agent_dir(self.agent_dir):
             QMessageBox.warning(self, "目录无效", "请选择有效的 GenericAgent 根目录。\n\n将返回载入内核页面。")
             self._show_locate()
@@ -157,7 +163,7 @@ class NavigationMixin:
                 "已初始化配置文件",
                 "已自动创建 mykey.py。\n\n接下来如果提示未配置 LLM，请在后续 Qt 设置页补充 API 配置。",
             )
-        if not self._check_runtime_dependencies(purpose="载入内核"):
+        if (not skip_dependency_check) and (not self._check_runtime_dependencies(purpose="载入内核")):
             return
         self._show_chat_page()
         self._refresh_sessions()
@@ -166,5 +172,8 @@ class NavigationMixin:
         else:
             self._reset_chat_area("选择一个会话，或新建会话开始聊天。")
         self._start_autostart_channels()
+        starter = getattr(self, "_start_autostart_scheduler", None)
+        if callable(starter):
+            starter()
         if self.bridge_proc is None or self.bridge_proc.poll() is not None:
             self._safe_start_bridge()

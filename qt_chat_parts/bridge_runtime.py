@@ -6,15 +6,243 @@ import queue
 import subprocess
 import threading
 import time
+import uuid
 
-from PySide6.QtWidgets import QApplication, QMessageBox, QStyle, QSystemTrayIcon
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QPixmap
+from PySide6.QtWidgets import QApplication, QFrame, QHBoxLayout, QLabel, QMessageBox, QPushButton, QStyle, QSystemTrayIcon, QVBoxLayout, QWidget
 
 from launcher_app import core as lz
+from launcher_app.theme import C
 
 from .common import _session_copy
 
 
 class BridgeRuntimeMixin:
+    def _attachment_bar_targets(self):
+        targets = []
+        host = getattr(self, "input_attachment_host", None)
+        layout = getattr(self, "input_attachment_list_layout", None)
+        summary = getattr(self, "input_attachment_summary", None)
+        if host is not None and layout is not None and summary is not None:
+            targets.append((host, layout, summary))
+        floating = getattr(self, "_floating_chat_window", None)
+        host = getattr(floating, "input_attachment_host", None)
+        layout = getattr(floating, "input_attachment_list_layout", None)
+        summary = getattr(floating, "input_attachment_summary", None)
+        if host is not None and layout is not None and summary is not None:
+            targets.append((host, layout, summary))
+        return targets
+
+    def _render_attachment_bar_target(self, host, layout, summary):
+        if host is None or layout is None or summary is None:
+            return
+        list_widget = getattr(layout, "parentWidget", lambda: None)()
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            child = item.layout()
+            if child is not None:
+                self._clear_layout(child)
+            spacer = item.spacerItem()
+            if spacer is not None:
+                del spacer
+            if widget is not None:
+                widget.hide()
+                widget.setParent(None)
+                widget.deleteLater()
+        pending_items = list(self._pending_input_attachments())
+        active_items = list(self._active_turn_attachments())
+        active_mode = bool(active_items)
+        items = active_items if active_mode else pending_items
+        host.setVisible(bool(items))
+        if list_widget is not None:
+            list_widget.setVisible(bool(items))
+        if not items:
+            summary.setText("")
+            layout.invalidate()
+            self._refresh_attachment_geometry(host)
+            return
+        if active_mode:
+            summary.setText(f"本轮已附带 {len(items)} 张图片。当前回复结束后会自动清除。")
+        else:
+            summary.setText(f"本轮将附带 {len(items)} 张图片。发送成功后它们只对这一轮有效。")
+        for idx, item in enumerate(items):
+            row = QFrame()
+            row.setObjectName("cardInset")
+            box = QHBoxLayout(row)
+            box.setContentsMargins(10, 8, 10, 8)
+            box.setSpacing(10)
+
+            thumb = QLabel()
+            thumb.setFixedSize(44, 44)
+            thumb.setAlignment(Qt.AlignCenter)
+            thumb.setStyleSheet(f"background: {C['field_bg']}; border-radius: 8px;")
+            pix = QPixmap(str(item.get("path") or ""))
+            if not pix.isNull():
+                thumb.setPixmap(pix.scaled(44, 44, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            else:
+                thumb.setText("图")
+            box.addWidget(thumb, 0)
+
+            text_col = QVBoxLayout()
+            text_col.setContentsMargins(0, 0, 0, 0)
+            text_col.setSpacing(2)
+            title = QLabel(str(item.get("name") or f"图片 {idx + 1}"))
+            title.setObjectName("bodyText")
+            text_col.addWidget(title)
+            path_label = QLabel(str(item.get("path") or ""))
+            path_label.setObjectName("softTextSmall")
+            path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            path_label.setWordWrap(True)
+            text_col.addWidget(path_label)
+            box.addLayout(text_col, 1)
+
+            remove_btn = QPushButton("移除")
+            remove_btn.setStyleSheet(self._action_button_style())
+            remove_btn.setEnabled(not active_mode)
+            if not active_mode:
+                remove_btn.clicked.connect(lambda _=False, i=idx: self._remove_pending_input_attachment(i))
+            box.addWidget(remove_btn, 0)
+            layout.addWidget(row)
+        layout.invalidate()
+        self._refresh_attachment_geometry(host)
+
+    def _refresh_attachment_geometry(self, host):
+        current = host
+        seen = set()
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            is_window = bool(getattr(current, "isWindow", lambda: False)())
+            try:
+                if current.layout() is not None:
+                    current.layout().activate()
+            except Exception:
+                pass
+            try:
+                current.updateGeometry()
+                if not is_window:
+                    current.adjustSize()
+                current.update()
+            except Exception:
+                pass
+            if is_window:
+                break
+            current = current.parentWidget()
+
+    def _pending_input_attachments(self):
+        items = getattr(self, "_pending_input_attachments_data", None)
+        if not isinstance(items, list):
+            items = []
+            self._pending_input_attachments_data = items
+        return items
+
+    def _active_turn_attachments(self):
+        items = getattr(self, "_active_turn_attachments_data", None)
+        if not isinstance(items, list):
+            items = []
+            self._active_turn_attachments_data = items
+        return items
+
+    def _input_attachment_temp_dir(self):
+        root = self.agent_dir if lz.is_valid_agent_dir(self.agent_dir) else os.path.join(os.path.expanduser("~"), ".genericagent_launcher")
+        path = os.path.join(root, "temp", "launcher_input_images")
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    def _save_input_clipboard_image(self, image, name_hint="clipboard.png"):
+        qimage = image if image is not None else None
+        if qimage is None or qimage.isNull():
+            raise ValueError("剪贴板图片无效。")
+        ext = os.path.splitext(str(name_hint or "clipboard.png"))[1].lower() or ".png"
+        if ext not in (".png", ".jpg", ".jpeg", ".webp", ".bmp"):
+            ext = ".png"
+        fmt = "PNG" if ext == ".png" else ("JPG" if ext in (".jpg", ".jpeg") else ext[1:].upper())
+        file_name = f"{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}{ext}"
+        path = os.path.join(self._input_attachment_temp_dir(), file_name)
+        if not qimage.save(path, fmt):
+            raise ValueError("保存剪贴板图片失败。")
+        return path
+
+    def _release_attachment_files(self, items):
+        for item in list(items or []):
+            if not bool(item.get("owned")):
+                continue
+            path = str(item.get("path") or "").strip()
+            if not path:
+                continue
+            try:
+                if os.path.isfile(path):
+                    os.remove(path)
+            except Exception:
+                pass
+
+    def _clear_active_turn_attachments(self):
+        items = list(self._active_turn_attachments())
+        self._active_turn_attachments_data = []
+        self._release_attachment_files(items)
+
+    def _clear_pending_input_attachments(self, *, delete_owned=True):
+        items = list(self._pending_input_attachments())
+        self._pending_input_attachments_data = []
+        if delete_owned:
+            self._release_attachment_files(items)
+        self._refresh_input_attachment_bar()
+
+    def _remove_pending_input_attachment(self, index):
+        items = self._pending_input_attachments()
+        try:
+            idx = int(index)
+        except Exception:
+            return
+        if idx < 0 or idx >= len(items):
+            return
+        item = items.pop(idx)
+        self._release_attachment_files([item])
+        self._refresh_input_attachment_bar()
+
+    def _refresh_input_attachment_bar(self):
+        for host, layout, summary in self._attachment_bar_targets():
+            self._render_attachment_bar_target(host, layout, summary)
+
+    def _handle_input_image_attachments(self, attachments):
+        if self._is_channel_process_session():
+            QMessageBox.information(self, "不可添加", "当前选中的是渠道进程会话，不能为它附带图片。")
+            return
+        if self._busy or self._active_turn_attachments():
+            QMessageBox.information(self, "请稍候", "当前这一轮还没有结束。等回复完成后，再为下一轮附带图片。")
+            return
+        items = self._pending_input_attachments()
+        existing_paths = {os.path.normcase(os.path.abspath(str(item.get("path") or ""))) for item in items if str(item.get("path") or "").strip()}
+        added = 0
+        errors = []
+        for raw in attachments or []:
+            kind = str((raw or {}).get("kind") or "").strip().lower()
+            try:
+                if kind == "path":
+                    path = os.path.abspath(str(raw.get("path") or "").strip())
+                    if not os.path.isfile(path):
+                        raise ValueError("图片文件不存在。")
+                    norm = os.path.normcase(path)
+                    if norm in existing_paths:
+                        continue
+                    items.append({"path": path, "name": str(raw.get("name") or os.path.basename(path)), "owned": False})
+                    existing_paths.add(norm)
+                    added += 1
+                elif kind == "image":
+                    path = self._save_input_clipboard_image(raw.get("image"), str(raw.get("name") or "clipboard.png"))
+                    norm = os.path.normcase(os.path.abspath(path))
+                    items.append({"path": path, "name": str(raw.get("name") or os.path.basename(path)), "owned": True})
+                    existing_paths.add(norm)
+                    added += 1
+            except Exception as e:
+                errors.append(str(e))
+        self._refresh_input_attachment_bar()
+        if added:
+            self._set_status(f"已附带 {added} 张图片；它们只会用于下一轮发送。")
+        if errors:
+            QMessageBox.warning(self, "添加图片失败", "\n".join(errors[:3]))
+
     def _ensure_reply_notify_tray(self):
         tray = getattr(self, "_reply_notify_tray", None)
         if tray is not None:
@@ -34,7 +262,15 @@ class BridgeRuntimeMixin:
         self._reply_notify_tray = tray
         return tray
 
+    def _reply_sound_enabled(self):
+        return not bool(self.cfg.get("disable_reply_sound", False))
+
+    def _reply_message_enabled(self):
+        return not bool(self.cfg.get("disable_reply_message", False))
+
     def _play_reply_done_sound(self):
+        if not self._reply_sound_enabled():
+            return
         if os.name == "nt":
             try:
                 import winsound
@@ -52,6 +288,8 @@ class BridgeRuntimeMixin:
 
     def _notify_reply_done(self, final_text: str):
         self._play_reply_done_sound()
+        if not self._reply_message_enabled():
+            return
         tray = self._ensure_reply_notify_tray()
         if tray is None:
             return
@@ -61,7 +299,7 @@ class BridgeRuntimeMixin:
             if len(preview) > 72:
                 preview = preview[:72].rstrip() + "…"
             msg = f"{msg}：{preview}"
-        tray.showMessage("GenericAgent 启动器", msg, QSystemTrayIcon.Information, 3000)
+        tray.showMessage("GenericAgent 启动器", msg, QSystemTrayIcon.Information, 1500)
 
     def _request_backend_state(self, session_id=None):
         sid = session_id or ((self.current_session or {}).get("id"))
@@ -133,6 +371,9 @@ class BridgeRuntimeMixin:
             self.llm_combo.addItem("未配置 LLM", -1)
             self.llm_combo.setEnabled(False)
         self._ignore_llm_change = False
+        floating_sync = getattr(self, "_sync_floating_llm_combo", None)
+        if callable(floating_sync):
+            floating_sync()
 
     def _on_llm_changed(self, index: int):
         if self._ignore_llm_change or index < 0 or not self._bridge_ready:
@@ -141,6 +382,9 @@ class BridgeRuntimeMixin:
         if target is None or int(target) < 0:
             return
         self._send_cmd({"cmd": "switch_llm", "idx": int(target)})
+        floating_sync = getattr(self, "_sync_floating_llm_combo", None)
+        if callable(floating_sync):
+            floating_sync()
 
     def _current_llm_index(self) -> int:
         for pos, llm in enumerate(self.llms):
@@ -161,6 +405,9 @@ class BridgeRuntimeMixin:
     def _set_status(self, text: str):
         self.status_label.setText(text)
         self._refresh_info_tooltip()
+        refresher = getattr(self, "_refresh_floating_chat_window", None)
+        if callable(refresher):
+            refresher()
 
     def _send_cmd(self, obj):
         if not self.bridge_proc or self.bridge_proc.poll() is not None:
@@ -214,8 +461,12 @@ class BridgeRuntimeMixin:
                     try:
                         ev = json.loads(line)
                     except Exception:
+                        self._event_queue.put({"event": "bridge_text", "text": line})
                         continue
-                    self._event_queue.put(ev)
+                    if isinstance(ev, dict):
+                        self._event_queue.put(ev)
+                    else:
+                        self._event_queue.put({"event": "bridge_text", "text": str(ev)})
             except Exception:
                 pass
 
@@ -236,6 +487,7 @@ class BridgeRuntimeMixin:
         proc = self.bridge_proc
         self.bridge_proc = None
         self._bridge_ready = False
+        self._clear_active_turn_attachments()
         if proc is None:
             return
         try:
@@ -256,23 +508,37 @@ class BridgeRuntimeMixin:
         self._stop_bridge()
         self._safe_start_bridge()
 
-    def _handle_send(self):
-        text = self.input_box.toPlainText().strip()
-        if not text:
-            return
+    def _submit_user_message(self, text: str, attachments=None, *, source_editor=None):
+        text = str(text or "").strip()
+        attachments = [
+            dict(item)
+            for item in (attachments or [])
+            if os.path.isfile(str((item or {}).get("path") or "").strip())
+        ]
+        if not text and not attachments:
+            return False
         if self._is_channel_process_session():
             QMessageBox.information(self, "不可发送", "当前选中的是渠道进程会话，只能回顾快照，不能从这里继续发送消息。")
-            return
+            return False
         self._last_activity = time.time()
         if not self._bridge_ready:
             QMessageBox.information(self, "尚未就绪", "桥接进程还没准备好，请稍候再发送。")
-            return
+            return False
         self._ensure_session(text)
-        self.input_box.clear()
+        if source_editor is not None:
+            try:
+                source_editor.clear()
+            except Exception:
+                pass
         self._selected_session_id = self.current_session.get("id")
-        self._add_message_row("user", text, finished=True)
-        self.current_session.setdefault("bubbles", []).append({"role": "user", "text": text})
-        self._stream_row = self._add_message_row("assistant", "", finished=False)
+        display_text = text or f"[已发送 {len(attachments)} 张图片]"
+        user_row = self._add_message_row("user", display_text, finished=True, auto_scroll=False)
+        self.current_session.setdefault("bubbles", []).append({"role": "user", "text": display_text})
+        self._stream_row = self._add_message_row("assistant", "", finished=False, auto_scroll=False)
+        follower = getattr(self, "_set_follow_latest_user", None)
+        if callable(follower):
+            follower(True)
+        self._scroll_row_to_top(user_row)
         self._busy = True
         self._abort_requested = False
         self._current_stream_text = ""
@@ -300,18 +566,46 @@ class BridgeRuntimeMixin:
         self._refresh_token_label()
         self._update_stream_row_tokens(live=True)
         try:
-            self._send_cmd({"cmd": "send", "text": text, "session_id": self.current_session.get("id")})
+            self._send_cmd(
+                {
+                    "cmd": "send",
+                    "text": text,
+                    "images": [str(item.get("path") or "").strip() for item in attachments],
+                    "session_id": self.current_session.get("id"),
+                }
+            )
+            self._active_turn_attachments_data = attachments
+            self._pending_input_attachments_data = []
+            self._refresh_input_attachment_bar()
+            refresher = getattr(self, "_refresh_floating_chat_window", None)
+            if callable(refresher):
+                refresher()
+            return True
         except Exception as e:
             self._busy = False
             self.send_btn.setEnabled(True)
             self.stop_btn.setEnabled(False)
             QMessageBox.critical(self, "发送失败", str(e))
+            refresher = getattr(self, "_refresh_floating_chat_window", None)
+            if callable(refresher):
+                refresher()
+            return False
+
+    def _handle_send(self):
+        self._submit_user_message(
+            self.input_box.toPlainText().strip(),
+            attachments=self._pending_input_attachments(),
+            source_editor=self.input_box,
+        )
 
     def _stream_update(self, cumulative_text: str):
         self._pending_stream_text = cumulative_text or ""
         self._current_stream_text = cumulative_text or ""
         self._refresh_token_label()
         self._update_stream_row_tokens(live=True)
+        refresher = getattr(self, "_refresh_floating_chat_window", None)
+        if callable(refresher):
+            refresher()
         if not self._stream_flush_timer.isActive():
             self._stream_flush_timer.start(70)
 
@@ -324,7 +618,11 @@ class BridgeRuntimeMixin:
             return
         self._stream_row.update_content(pending, finished=False)
         self._update_stream_row_tokens(live=True)
-        self._scroll_to_bottom()
+        sync_view = getattr(self, "_sync_current_turn_view", None)
+        if callable(sync_view):
+            sync_view()
+        else:
+            self._scroll_to_bottom()
 
     def _format_interrupted_text(self, final_text=None):
         text = (final_text or "").strip()
@@ -354,6 +652,7 @@ class BridgeRuntimeMixin:
         self.stop_btn.setEnabled(False)
         self._set_status("已完成。")
         self._refresh_composer_enabled()
+        self._clear_active_turn_attachments()
         if not was_aborted:
             self._notify_reply_done(final_text)
 
@@ -407,7 +706,17 @@ class BridgeRuntimeMixin:
             self._persist_session(self.current_session)
             self._request_backend_state(self.current_session.get("id"))
         self._refresh_token_label()
-        self._scroll_to_bottom()
+        follower = getattr(self, "_set_follow_latest_user", None)
+        if callable(follower):
+            follower(False)
+        sync_view = getattr(self, "_sync_current_turn_view", None)
+        if callable(sync_view):
+            sync_view(force=True)
+        refresher = getattr(self, "_refresh_floating_chat_window", None)
+        if callable(refresher):
+            refresher()
+        else:
+            self._scroll_to_bottom()
 
     def _abort(self):
         if not self._busy or self._abort_requested:
@@ -416,6 +725,9 @@ class BridgeRuntimeMixin:
         self.stop_btn.setEnabled(False)
         self._set_status("正在中断…")
         self._refresh_composer_enabled()
+        refresher = getattr(self, "_refresh_floating_chat_window", None)
+        if callable(refresher):
+            refresher()
         try:
             self._send_cmd({"cmd": "abort"})
         except Exception as e:
@@ -427,16 +739,33 @@ class BridgeRuntimeMixin:
                 ev = self._event_queue.get_nowait()
             except queue.Empty:
                 break
+            if isinstance(ev, str):
+                text = ev.strip()
+                if not text:
+                    continue
+                try:
+                    parsed = json.loads(text)
+                except Exception:
+                    ev = {"event": "bridge_text", "text": text}
+                else:
+                    ev = parsed if isinstance(parsed, dict) else {"event": "bridge_text", "text": str(parsed)}
+            elif not isinstance(ev, dict):
+                ev = {"event": "bridge_text", "text": str(ev)}
             self._handle_event(ev)
         proc = self.bridge_proc
         if proc is not None and proc.poll() is not None and not self._bridge_ready and not self._busy:
+            self._clear_active_turn_attachments()
             stderr_tail = "\n".join(self._stderr_buf[-20:]) or "(空)"
             self._set_status("桥接进程已退出。")
             QMessageBox.critical(self, "桥接进程退出", f"启动失败或已退出。\n\nstderr 尾部：\n{stderr_tail}")
             self.bridge_proc = None
 
     def _handle_event(self, ev):
+        if not isinstance(ev, dict):
+            return
         et = ev.get("event")
+        if et == "bridge_text":
+            return
         if et == "launcher_autonomous_trigger":
             if not self._busy:
                 self._send(text=self.AUTO_TASK_TEXT, auto=True)
@@ -510,7 +839,11 @@ class BridgeRuntimeMixin:
         if et == "error":
             msg = ev.get("msg", "")
             trace = ev.get("trace", "")
+            self._clear_active_turn_attachments()
             self._busy = False
+            follower = getattr(self, "_set_follow_latest_user", None)
+            if callable(follower):
+                follower(False)
             self.send_btn.setEnabled(True)
             self.stop_btn.setEnabled(False)
             self._set_status(f"错误: {msg}")

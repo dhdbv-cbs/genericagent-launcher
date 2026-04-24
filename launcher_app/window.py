@@ -704,9 +704,14 @@ class FloatingOrbWindow(QWidget):
             row.update_content(str(stream_text or ""), finished=False)
             self.msg_layout.insertWidget(insert_index, row)
             self._rendered_rows.append(row)
-        keep_latest_user = self._focus_latest_user_after_refresh or bool(getattr(self._host, "_follow_latest_user_message", False))
+        host_follow_latest = bool(getattr(self._host, "_follow_latest_user_message", False))
+        keep_latest_user = self._focus_latest_user_after_refresh or host_follow_latest
         if keep_latest_user:
             self._focus_latest_user_after_refresh = False
+            if host_follow_latest:
+                follower = getattr(self._host, "_set_follow_latest_user", None)
+                if callable(follower):
+                    follower(False)
             QTimer.singleShot(0, self._scroll_to_latest_dialogue)
         else:
             QTimer.singleShot(0, self._scroll_to_bottom)

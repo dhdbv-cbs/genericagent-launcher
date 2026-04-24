@@ -24,6 +24,14 @@ def _python_creationflags():
     return subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
 
+def _ensure_windows_no_window_creationflags(kwargs):
+    if os.name != "nt":
+        return
+    if "creationflags" in kwargs and kwargs.get("creationflags") is not None:
+        return
+    kwargs["creationflags"] = _python_creationflags()
+
+
 def _python_utf8_subprocess_env(base_env=None):
     env = dict(base_env or os.environ)
     env["PYTHONIOENCODING"] = "utf-8"
@@ -105,12 +113,14 @@ def _external_subprocess_runtime():
 
 def _run_external_subprocess(args, **kwargs):
     kwargs["env"] = _external_subprocess_env(kwargs.get("env"))
+    _ensure_windows_no_window_creationflags(kwargs)
     with _external_subprocess_runtime():
         return subprocess.run(args, **kwargs)
 
 
 def _popen_external_subprocess(args, **kwargs):
     kwargs["env"] = _external_subprocess_env(kwargs.get("env"))
+    _ensure_windows_no_window_creationflags(kwargs)
     with _external_subprocess_runtime():
         return subprocess.Popen(args, **kwargs)
 

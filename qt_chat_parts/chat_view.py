@@ -288,7 +288,9 @@ class ChatViewMixin:
             latest_user_row = self._latest_user_row()
             if latest_user_row is not None:
                 self._scroll_row_to_top(latest_user_row)
+                self._set_follow_latest_user(False)
                 return
+            self._set_follow_latest_user(False)
         self._scroll_to_bottom(force=force)
 
     def _refresh_jump_latest_button(self):

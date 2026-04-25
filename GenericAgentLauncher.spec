@@ -2,7 +2,7 @@
 from PyInstaller.utils.hooks import collect_data_files
 
 datas = [("bridge.py", ".")]
-hiddenimports = ["launcher_app.window", "shiboken6"]
+hiddenimports = ["launcher_app.window", "shiboken6", "requests", "simplejson", "charset_normalizer"]
 binaries = []
 
 hiddenimports += [

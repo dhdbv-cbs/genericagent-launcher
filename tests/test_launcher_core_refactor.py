@@ -140,6 +140,15 @@ class LauncherCoreFacadeTests(unittest.TestCase):
         self.assertEqual(os.path.normpath(bridge_path), os.path.normpath(expected))
         self.assertTrue(os.path.isfile(bridge_path), msg=f"missing bridge.py: {bridge_path}")
 
+    def test_launcher_bootstrap_avoids_launcher_core_facade_import(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        path = os.path.join(root, "launcher_bootstrap.py")
+        with open(path, "r", encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("from launcher_core_parts.constants import MAIN_EXE_NAME", src)
+        self.assertIn("from launcher_core_parts.runtime import (", src)
+        self.assertNotIn("from launcher_app import core as lz", src)
+
     def test_normalize_token_usage_from_bubbles(self):
         session = {
             "id": "s1",

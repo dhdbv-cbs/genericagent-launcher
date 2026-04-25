@@ -58,9 +58,12 @@ if errorlevel 1 (
     exit /b 1
 )
 
-python tools/build_release_bundle.py --version %VERSION% --out release --allow-unsigned
+python tools/build_release_bundle.py --version %VERSION% --out release
 if errorlevel 1 (
     echo [ERROR] Build release bundle failed
+    echo [ERROR] Release builds require update signing keys. Use GitHub Actions secrets or set:
+    echo [ERROR]   GA_LAUNCHER_UPDATE_PRIVATE_KEY_PEM
+    echo [ERROR]   GA_LAUNCHER_UPDATE_PUBLIC_KEY_PEM
     pause
     popd
     exit /b 1

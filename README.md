@@ -120,6 +120,8 @@ python launcher.py
 build.bat 0.1.8
 ```
 
+正式发布不再允许 unsigned 兜底；如果没有配置更新签名密钥，`build.bat` 会直接失败，而不是继续产出空的 `manifest.sig`。
+
 `build.bat` 会自动查找 Inno Setup 编译器，查找顺序如下：
 
 1. 环境变量 `INNO_ISCC` 指向的 `ISCC.exe`

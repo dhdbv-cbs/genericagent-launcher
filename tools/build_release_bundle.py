@@ -94,6 +94,14 @@ def _load_public_key_pem() -> str:
     return ""
 
 
+def _remove_file_if_exists(path: str) -> None:
+    try:
+        if os.path.isfile(path):
+            os.remove(path)
+    except OSError:
+        pass
+
+
 def _sign_manifest_bytes(manifest_bytes: bytes, private_key_pem: str) -> str:
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -172,21 +180,27 @@ def main() -> int:
         },
     }
     manifest_path = os.path.join(update_root, "manifest.json")
+    manifest_sig_path = os.path.join(update_root, "manifest.sig")
     manifest_bytes = json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8")
     with open(manifest_path, "wb") as f:
         f.write(manifest_bytes)
 
     key_pem = _load_private_key_pem()
+    public_key_pem = _load_public_key_pem()
     signature = ""
     if key_pem:
+        if not public_key_pem:
+            raise SystemExit("update signing public key is missing (set GA_LAUNCHER_UPDATE_PUBLIC_KEY_PEM or *_FILE)")
         signature = _sign_manifest_bytes(manifest_bytes, key_pem)
     elif not args.allow_unsigned:
         raise SystemExit("update signing key is missing (set GA_LAUNCHER_UPDATE_PRIVATE_KEY_PEM or *_FILE)")
 
-    with open(os.path.join(update_root, "manifest.sig"), "w", encoding="utf-8") as f:
-        f.write(signature.strip())
+    if signature.strip():
+        with open(manifest_sig_path, "w", encoding="utf-8") as f:
+            f.write(signature.strip())
+    else:
+        _remove_file_if_exists(manifest_sig_path)
 
-    public_key_pem = _load_public_key_pem()
     if public_key_pem:
         with open(os.path.join(install_root, "update_public_key.pem"), "w", encoding="utf-8") as f:
             f.write(public_key_pem.strip() + "\n")
@@ -194,8 +208,8 @@ def main() -> int:
     with open(os.path.join(update_root, "sha256sums.txt"), "w", encoding="utf-8") as f:
         f.write(f"{package_sha256}  {package_name}\n")
         f.write(f"{_sha256_file(manifest_path)}  manifest.json\n")
-        if os.path.isfile(os.path.join(update_root, "manifest.sig")):
-            f.write(f"{_sha256_file(os.path.join(update_root, 'manifest.sig'))}  manifest.sig\n")
+        if os.path.isfile(manifest_sig_path):
+            f.write(f"{_sha256_file(manifest_sig_path)}  manifest.sig\n")
 
     print(f"Release bundle ready: {release_root}")
     print(f"- install: {install_root}")

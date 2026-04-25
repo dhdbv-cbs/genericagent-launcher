@@ -2,12 +2,42 @@ from __future__ import annotations
 
 import os
 
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QFileDialog, QMessageBox
 
 from launcher_app import core as lz
 
 
 class NavigationMixin:
+    def _schedule_local_channel_autostart(self, delay_ms=260):
+        if not lz.is_valid_agent_dir(self.agent_dir):
+            return
+        if bool(getattr(self, "_local_channel_autostart_scheduled", False)):
+            return
+        self._local_channel_autostart_scheduled = True
+
+        def run():
+            self._local_channel_autostart_scheduled = False
+            self._start_autostart_channels()
+
+        QTimer.singleShot(max(0, int(delay_ms or 0)), self, run)
+
+    def _defer_chat_runtime_bootstrap(self):
+        if bool(getattr(self, "_chat_runtime_bootstrap_pending", False)):
+            return
+        self._chat_runtime_bootstrap_pending = True
+
+        def run():
+            self._chat_runtime_bootstrap_pending = False
+            self._start_autostart_channels()
+            starter = getattr(self, "_start_autostart_scheduler", None)
+            if callable(starter):
+                starter()
+            if self.bridge_proc is None or self.bridge_proc.poll() is not None:
+                self._safe_start_bridge()
+
+        QTimer.singleShot(160, self, run)
+
     def _quick_enter_chat(self):
         self._enter_chat(skip_dependency_check=True)
 
@@ -31,15 +61,30 @@ class NavigationMixin:
             self.session_list.clear()
             self._ignore_session_select = False
             self._last_session_list_signature = None
+            if hasattr(self, "_session_index_warmup_started"):
+                self._session_index_warmup_started = False
+            if hasattr(self, "_settings_loaded_categories"):
+                self._settings_loaded_categories.clear()
         if persist:
             self.cfg["agent_dir"] = self.agent_dir
             lz.save_config(self.cfg)
         self._refresh_welcome_state()
-        self._settings_reload()
+        in_settings = bool(getattr(self, "pages", None) is not None and self.pages.currentWidget() is getattr(self, "_settings_page", None))
+        if in_settings:
+            self._settings_reload(categories=[getattr(self, "_current_settings_category", "api")], force=True)
+        else:
+            self._settings_reload(categories=[])
         if lz.is_valid_agent_dir(self.agent_dir):
+            warmer = getattr(self, "_schedule_session_index_warmup", None)
+            if callable(warmer):
+                warmer()
             lz.purge_archived_sessions(self.agent_dir)
             self._enforce_session_archive_limits(refresh=False)
             self._refresh_sessions()
+            self._schedule_local_channel_autostart()
+            lan_starter = getattr(self, "_schedule_lan_interface_autostart", None)
+            if callable(lan_starter):
+                lan_starter()
 
     def _refresh_welcome_state(self):
         valid = lz.is_valid_agent_dir(self.agent_dir)
@@ -53,6 +98,13 @@ class NavigationMixin:
             self.locate_path_edit.setText(self.agent_dir or "")
         if hasattr(self, "locate_python_edit"):
             self.locate_python_edit.setText(str(self.cfg.get("python_exe") or "").strip())
+        if hasattr(self, "locate_dependency_installer_combo"):
+            mode = str(self.cfg.get("dependency_installer") or "auto").strip().lower()
+            if mode not in ("auto", "uv", "pip"):
+                mode = "auto"
+            idx = self.locate_dependency_installer_combo.findData(mode)
+            if idx >= 0 and self.locate_dependency_installer_combo.currentIndex() != idx:
+                self.locate_dependency_installer_combo.setCurrentIndex(idx)
         if hasattr(self, "locate_status_label"):
             py_cfg = str(self.cfg.get("python_exe") or "").strip()
             if py_cfg:
@@ -60,16 +112,24 @@ class NavigationMixin:
                 py_text = f"\nPython 可执行文件：{py_cfg}\n解析后：{py_resolved}"
             else:
                 py_text = "\nPython 可执行文件：未指定（将自动探测）"
+            installer_mode = str(self.cfg.get("dependency_installer") or "auto").strip().lower()
+            if installer_mode not in ("auto", "uv", "pip"):
+                installer_mode = "auto"
+            installer_text = {
+                "auto": "自动（优先 uv，失败回退 pip）",
+                "uv": "强制 uv",
+                "pip": "强制 pip",
+            }.get(installer_mode, "自动（优先 uv，失败回退 pip）")
             self.locate_status_label.setText(
-                (f"当前目录有效，可以直接载入：\n{self.agent_dir}{py_text}")
+                (f"当前目录有效，可以直接载入：\n{self.agent_dir}{py_text}\n依赖安装器：{installer_text}")
                 if valid
-                else ("当前还没有有效的 GenericAgent 目录。请先浏览并选择正确的项目根目录。" + py_text)
+                else ("当前还没有有效的 GenericAgent 目录。请先浏览并选择正确的项目根目录。" + py_text + f"\n依赖安装器：{installer_text}")
             )
         self._refresh_download_state()
         if hasattr(self, "_refresh_dependency_status"):
             self._refresh_dependency_status()
         if hasattr(self, "settings_status_label"):
-            self._settings_reload()
+            self._settings_reload(categories=[])
 
     def _choose_agent_dir(self):
         path = QFileDialog.getExistingDirectory(
@@ -117,12 +177,22 @@ class NavigationMixin:
             self.cfg["python_exe"] = lz._make_config_relative_path(resolved)
         else:
             self.cfg.pop("python_exe", None)
+        mode = "auto"
+        combo = getattr(self, "locate_dependency_installer_combo", None)
+        if combo is not None:
+            selected = str(combo.currentData() or "").strip().lower()
+            if selected in ("auto", "uv", "pip"):
+                mode = selected
+        self.cfg["dependency_installer"] = mode
         lz.save_config(self.cfg)
         self._set_agent_dir(raw)
         self._enter_chat()
 
     def _show_settings(self):
         self.setWindowTitle("GenericAgent 启动器")
+        ensure = getattr(self, "_ensure_settings_page_built", None)
+        if callable(ensure):
+            ensure()
         self.pages.setCurrentWidget(self._settings_page)
         valid = lz.is_valid_agent_dir(self.agent_dir)
         if self._settings_top_back_btn is not None:
@@ -133,7 +203,7 @@ class NavigationMixin:
                 pass
             self._settings_top_back_btn.clicked.connect(self._show_chat_page if valid else self._show_welcome)
         self._refresh_welcome_state()
-        self._settings_reload()
+        self._settings_reload(categories=[getattr(self, "_current_settings_category", "api")], force=True)
 
     def _show_chat_page(self):
         self.setWindowTitle("GenericAgent 启动器")
@@ -171,9 +241,4 @@ class NavigationMixin:
             self._render_session(self.current_session)
         else:
             self._reset_chat_area("选择一个会话，或新建会话开始聊天。")
-        self._start_autostart_channels()
-        starter = getattr(self, "_start_autostart_scheduler", None)
-        if callable(starter):
-            starter()
-        if self.bridge_proc is None or self.bridge_proc.poll() is not None:
-            self._safe_start_bridge()
+        self._defer_chat_runtime_bootstrap()

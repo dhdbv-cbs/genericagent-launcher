@@ -6,6 +6,11 @@ __pycache__/
 build/
 dist/
 temp/
+release/
+update_public_key.pem
+temp_patch_extract/
+tools/InnoSetup/
+tmp_*.png
 
 launcher_config.json
 *.log

@@ -42,48 +42,106 @@ class SessionShellMixin:
     def _persist_session(self, session):
         if not isinstance(session, dict):
             return
+        scope = "local"
+        resolver = getattr(self, "_session_device_scope_id", None)
+        if callable(resolver):
+            try:
+                scope, _did = resolver(session)
+            except Exception:
+                scope = "local"
+        is_remote = scope == "remote"
         if self._is_channel_process_session(session):
             self._ensure_session_usage_metadata(session)
             lz.save_session(self.agent_dir, session)
             self._selected_session_id = session.get("id")
             self._refresh_sessions()
             return
-        self._bind_session_to_current_bridge(session)
+        if not is_remote:
+            self._bind_session_to_current_bridge(session)
+        else:
+            session["llm_idx"] = int(session.get("llm_idx", 0) or 0)
+            snapshot = dict(session.get("snapshot") or {})
+            snapshot["version"] = int(snapshot.get("version", 1) or 1)
+            snapshot["kind"] = str(snapshot.get("kind") or "turn_complete").strip() or "turn_complete"
+            snapshot["captured_at"] = float(session.get("updated_at", time.time()) or time.time())
+            snapshot["turns"] = int(snapshot.get("turns", ((session.get("token_usage") or {}).get("turns", 0) or 0)) or 0)
+            snapshot["llm_idx"] = int(session.get("llm_idx", 0) or 0)
+            snapshot["process_pid"] = int(session.get("process_pid", 0) or 0)
+            snapshot["has_backend_history"] = bool(session.get("backend_history"))
+            snapshot["has_agent_history"] = bool(session.get("agent_history"))
+            session["snapshot"] = snapshot
         self._ensure_session_usage_metadata(session)
         lz.save_session(self.agent_dir, session)
+        if is_remote:
+            sync_remote_async = getattr(self, "_save_remote_session_source_async", None)
+            if callable(sync_remote_async):
+                sync_remote_async(session, on_error_status=True)
+            else:
+                sync_remote = getattr(self, "_save_remote_session_source", None)
+                if callable(sync_remote):
+                    ok, err = sync_remote(session)
+                    if not ok:
+                        self._set_status(f"远端会话同步失败：{err}")
         self._selected_session_id = session.get("id")
         self._enforce_session_archive_limits(
             channel_id=session.get("channel_id"),
+            device_scope=session.get("device_scope"),
+            device_id=session.get("device_id"),
             exclude_session_ids={session.get("id")},
             refresh=False,
         )
         self._refresh_sessions()
 
-    def _enforce_session_archive_limits(self, channel_id=None, exclude_session_ids=None, refresh=True):
+    def _enforce_session_archive_limits(self, channel_id=None, device_scope=None, device_id=None, exclude_session_ids=None, refresh=True):
         if not lz.is_valid_agent_dir(self.agent_dir):
             return 0
         excluded = {str(item).strip() for item in (exclude_session_ids or set()) if str(item or "").strip()}
         if self.current_session and self.current_session.get("id"):
             excluded.add(str(self.current_session.get("id")))
         sessions = []
+        target_cid = lz._normalize_usage_channel_id(channel_id, "launcher") if channel_id else ""
+        target_scope = str(device_scope or "").strip().lower()
+        if target_scope not in ("local", "remote"):
+            target_scope = ""
+        target_did = str(device_id or "").strip()
         for meta in lz.list_sessions(self.agent_dir):
-            try:
-                data = lz.load_session(self.agent_dir, meta["id"])
-            except Exception:
-                data = None
-            if not data:
+            sid = str(meta.get("id") or "").strip()
+            if not sid:
                 continue
-            cid = lz._normalize_usage_channel_id(data.get("channel_id"), "launcher")
-            if channel_id and cid != lz._normalize_usage_channel_id(channel_id, "launcher"):
+            cid = lz._normalize_usage_channel_id(meta.get("channel_id"), "launcher")
+            if target_cid and cid != target_cid:
                 continue
-            data["channel_id"] = cid
-            sessions.append(data)
+            scope = str(meta.get("device_scope") or "local").strip().lower()
+            if scope not in ("local", "remote"):
+                scope = "local"
+            did = str(meta.get("device_id") or "").strip() if scope == "remote" else "local"
+            if target_scope:
+                if scope != target_scope:
+                    continue
+                if scope == "remote" and target_did and did != target_did:
+                    continue
+            sessions.append(
+                {
+                    "id": sid,
+                    "channel_id": cid,
+                    "device_scope": scope,
+                    "device_id": did,
+                    "updated_at": float(meta.get("updated_at", 0) or 0),
+                    "pinned": bool(meta.get("pinned", False)),
+                }
+            )
         grouped = {}
         for data in sessions:
-            grouped.setdefault(data.get("channel_id") or "launcher", []).append(data)
+            key = (
+                data.get("channel_id") or "launcher",
+                data.get("device_scope") or "local",
+                data.get("device_id") or "local",
+            )
+            grouped.setdefault(key, []).append(data)
         removed = 0
-        for cid, items in grouped.items():
-            limit = self._archive_limit_for_channel(cid)
+        for key, items in grouped.items():
+            cid, scope, did = key
+            limit = self._archive_limit_for_channel(cid, device_scope=scope, device_id=did)
             if limit <= 0 or len(items) <= limit:
                 continue
             keep_ids = set(excluded)
@@ -93,6 +151,16 @@ class SessionShellMixin:
             )
             overflow = len(items) - limit
             for victim in removable[: max(0, overflow)]:
+                if str(victim.get("device_scope") or "").strip().lower() == "remote":
+                    sync_delete = getattr(self, "_delete_remote_session_source", None)
+                    if callable(sync_delete):
+                        try:
+                            payload = lz.load_session(self.agent_dir, victim.get("id")) or dict(victim)
+                            ok, _err = sync_delete(payload)
+                            if not ok:
+                                continue
+                        except Exception:
+                            continue
                 lz.archive_session(self.agent_dir, victim.get("id"), victim, reason="auto_limit")
                 removed += 1
         if removed and refresh:
@@ -153,6 +221,18 @@ class SessionShellMixin:
                 self._hide_info_tooltip()
             elif et == QEvent.ToolTip:
                 return True
+        if watched is getattr(self, "server_status_btn", None):
+            et = event.type()
+            if et == QEvent.Enter:
+                shower = getattr(self, "_show_server_status_tooltip", None)
+                if callable(shower):
+                    shower()
+            elif et == QEvent.Leave:
+                hider = getattr(self, "_hide_server_status_tooltip", None)
+                if callable(hider):
+                    hider()
+            elif et == QEvent.ToolTip:
+                return True
         viewport = getattr(getattr(self, "scroll", None), "viewport", lambda: None)()
         if watched is viewport and event.type() in (QEvent.Resize, QEvent.Show):
             placer = getattr(self, "_place_jump_latest_button", None)
@@ -166,6 +246,13 @@ class SessionShellMixin:
 
     def _refresh_composer_enabled(self):
         disabled = self._is_channel_process_session()
+        remote = False
+        checker = getattr(self, "_is_remote_session", None)
+        if callable(checker):
+            try:
+                remote = bool(checker())
+            except Exception:
+                remote = False
         input_box = getattr(self, "input_box", None)
         send_btn = getattr(self, "send_btn", None)
         stop_btn = getattr(self, "stop_btn", None)
@@ -175,12 +262,12 @@ class SessionShellMixin:
             input_box.setPlaceholderText(
                 "渠道进程会话仅用于回顾日志与快照，不能在这里继续发送消息"
                 if disabled
-                else "输入消息，Enter 发送，Shift+Enter 换行"
+                else ("当前会话在远程设备执行，使用 SSH 发送。Enter 发送，Shift+Enter 换行" if remote else "输入消息，Enter 发送，Shift+Enter 换行")
             )
         if send_btn is not None:
             send_btn.setEnabled((not disabled) and (not self._busy))
         if stop_btn is not None:
-            stop_btn.setEnabled((not disabled) and self._busy and (not self._abort_requested))
+            stop_btn.setEnabled((not disabled) and (not remote) and self._busy and (not self._abort_requested))
         if llm_combo is not None:
             llm_combo.setEnabled((not disabled) and bool(self.llms))
         floating_sync = getattr(self, "_sync_floating_llm_combo", None)
@@ -190,29 +277,66 @@ class SessionShellMixin:
         if callable(refresher):
             refresher()
 
-    def _active_sessions_for_channel(self, channel_id: str):
+    def _active_sessions_for_channel(self, channel_id: str, device_scope=None, device_id=None):
         cid = lz._normalize_usage_channel_id(channel_id, "launcher")
+        scope = str(device_scope or "").strip().lower()
+        did = str(device_id or "").strip()
+        if scope not in ("local", "remote"):
+            scope = "local"
+            did = "local"
+            resolver = getattr(self, "_current_device_context", None)
+            if callable(resolver):
+                try:
+                    scope, did = resolver()
+                except Exception:
+                    scope, did = "local", "local"
+        if scope == "remote":
+            did = did or "local"
+        else:
+            scope = "local"
+            did = "local"
         out = []
         if not lz.is_valid_agent_dir(self.agent_dir):
             return out
         for meta in lz.list_sessions(self.agent_dir):
-            try:
-                data = lz.load_session(self.agent_dir, meta["id"])
-            except Exception:
-                data = None
-            if not data:
+            if lz._normalize_usage_channel_id(meta.get("channel_id"), "launcher") != cid:
                 continue
-            if lz._normalize_usage_channel_id(data.get("channel_id"), "launcher") != cid:
+            session_scope = str(meta.get("device_scope") or "local").strip().lower()
+            if session_scope not in ("local", "remote"):
+                session_scope = "local"
+            if session_scope != scope:
                 continue
-            out.append(data)
+            if session_scope == "remote":
+                if str(meta.get("device_id") or "").strip() != str(did or "").strip():
+                    continue
+            out.append(
+                {
+                    "id": meta.get("id"),
+                    "pinned": bool(meta.get("pinned", False)),
+                    "updated_at": float(meta.get("updated_at", 0) or 0),
+                }
+            )
         return out
 
-    def _can_create_session_for_channel(self, channel_id: str, show_message: bool = True) -> bool:
+    def _can_create_session_for_channel(self, channel_id: str, show_message: bool = True, device_scope=None, device_id=None) -> bool:
         cid = lz._normalize_usage_channel_id(channel_id, "launcher")
-        limit = self._archive_limit_for_channel(cid)
+        scope = str(device_scope or "").strip().lower()
+        did = str(device_id or "").strip()
+        if scope not in ("local", "remote"):
+            resolver = getattr(self, "_current_device_context", None)
+            if callable(resolver):
+                try:
+                    scope, did = resolver()
+                except Exception:
+                    scope, did = "local", "local"
+            else:
+                scope, did = "local", "local"
+        if scope != "remote":
+            scope, did = "local", "local"
+        limit = self._archive_limit_for_channel(cid, device_scope=scope, device_id=did)
         if limit <= 0:
             return True
-        sessions = self._active_sessions_for_channel(cid)
+        sessions = self._active_sessions_for_channel(cid, device_scope=scope, device_id=did)
         active_count = len(sessions)
         pinned_count = sum(1 for item in sessions if bool(item.get("pinned", False)))
         if active_count >= limit and pinned_count >= limit:

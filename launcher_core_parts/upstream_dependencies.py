@@ -13,6 +13,12 @@ LAUNCHER_BOOTSTRAP_DEPENDENCIES = [
         "optional": False,
         "note": "启动器维护：兼容 requests/simplejson 的 JSONDecodeError；自动修复时直接升级到最新版",
     },
+    {
+        "package": "charset-normalizer>=3.3",
+        "import": "charset_normalizer",
+        "optional": False,
+        "note": "启动器维护：避免 requests 在缺少字符集依赖时触发 RequestsDependencyWarning",
+    },
 ]
 
 

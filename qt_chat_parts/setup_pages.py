@@ -1,8 +1,11 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+import threading
+
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -200,6 +203,27 @@ class SetupPagesMixin:
         self.locate_python_hint_label.setWordWrap(True)
         self.locate_python_hint_label.setObjectName("mutedText")
         card_box.addWidget(self.locate_python_hint_label)
+
+        installer_label = QLabel("依赖安装器策略")
+        installer_label.setObjectName("mutedText")
+        card_box.addWidget(installer_label)
+        installer_row = QHBoxLayout()
+        installer_row.setSpacing(8)
+        self.locate_dependency_installer_combo = QComboBox()
+        self.locate_dependency_installer_combo.addItem("自动（优先 uv，失败回退 pip）", "auto")
+        self.locate_dependency_installer_combo.addItem("强制 uv", "uv")
+        self.locate_dependency_installer_combo.addItem("强制 pip", "pip")
+        current_mode = str(self.cfg.get("dependency_installer") or "auto").strip().lower()
+        idx = self.locate_dependency_installer_combo.findData(current_mode if current_mode in ("auto", "uv", "pip") else "auto")
+        self.locate_dependency_installer_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        installer_row.addWidget(self.locate_dependency_installer_combo, 1)
+        card_box.addLayout(installer_row)
+        self.locate_dependency_installer_hint_label = QLabel(
+            "💡  提示：默认自动优先 uv（若可用），失败会自动回退 pip。"
+        )
+        self.locate_dependency_installer_hint_label.setWordWrap(True)
+        self.locate_dependency_installer_hint_label.setObjectName("mutedText")
+        card_box.addWidget(self.locate_dependency_installer_hint_label)
         body_layout.addWidget(card)
 
         self.locate_status_card = QFrame()
@@ -255,6 +279,111 @@ class SetupPagesMixin:
         body_layout.addWidget(enter_btn)
         body_layout.addStretch(1)
         return page
+
+    def _download_dependency_placeholder(self):
+        return {
+            "git_ok": False,
+            "git_text": "正在检测 Git…",
+            "python_ok": False,
+            "python_text": "正在检测系统 Python…",
+            "python_warn": True,
+            "requests_ok": False,
+            "requests_text": "正在检测 requests…",
+            "requests_warn": True,
+        }
+
+    def _download_dependency_severity(self, ok: bool, *, warning: bool = False):
+        if ok and not warning:
+            return "ok", "✓"
+        if warning:
+            return "warn", "!"
+        return "error", "✕"
+
+    def _refresh_download_dependency_row(self, key: str, title_text: str, ok: bool, detail: str, *, warning: bool = False):
+        rows = getattr(self, "download_dependency_rows", None)
+        if not isinstance(rows, dict):
+            return
+        row = rows.get(str(key or ""))
+        if not isinstance(row, dict):
+            return
+        severity, mark = self._download_dependency_severity(bool(ok), warning=bool(warning))
+        card = row.get("card")
+        icon = row.get("icon")
+        name = row.get("name")
+        detail_label = row.get("detail")
+        if card is not None:
+            try:
+                card.setObjectName({"ok": "depRowOk", "warn": "depRowWarn", "error": "depRowError"}[severity])
+                card.style().unpolish(card)
+                card.style().polish(card)
+            except Exception:
+                pass
+        if icon is not None:
+            try:
+                icon.setText(mark)
+                icon.setProperty("severity", severity)
+                icon.style().unpolish(icon)
+                icon.style().polish(icon)
+            except Exception:
+                pass
+        if name is not None:
+            try:
+                name.setText(title_text)
+            except Exception:
+                pass
+        if detail_label is not None:
+            try:
+                detail_label.setText(detail)
+            except Exception:
+                pass
+
+    def _schedule_download_requirements_probe(self):
+        if bool(getattr(self, "_download_requirements_probe_running", False)):
+            return
+        self._download_requirements_probe_running = True
+
+        def worker():
+            try:
+                deps = _probe_download_requirements()
+            except Exception as e:
+                deps = self._download_dependency_placeholder()
+                deps["git_text"] = f"环境检测失败：{e}"
+                deps["python_text"] = "环境检测失败。"
+                deps["requests_text"] = "环境检测失败。"
+
+            def done():
+                self._download_requirements_probe_running = False
+                if bool(getattr(self, "_closing_in_progress", False)):
+                    return
+                self._refresh_download_dependency_row("git", "Git", deps["git_ok"], deps["git_text"])
+                self._refresh_download_dependency_row(
+                    "python",
+                    "Python",
+                    deps["python_ok"],
+                    deps["python_text"],
+                    warning=deps.get("python_warn", False),
+                )
+                self._refresh_download_dependency_row(
+                    "requests",
+                    "requests",
+                    deps["requests_ok"],
+                    deps["requests_text"],
+                    warning=deps.get("requests_warn", True),
+                )
+
+            poster = getattr(self, "_api_on_ui_thread", None)
+            if callable(poster):
+                try:
+                    poster(done)
+                    return
+                except Exception:
+                    pass
+            try:
+                QTimer.singleShot(0, done)
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, name="download-requirements-probe", daemon=True).start()
 
     def _build_download_page(self) -> QWidget:
         page = QWidget()
@@ -322,7 +451,7 @@ class SetupPagesMixin:
 
         body_layout.addWidget(card)
 
-        deps = _probe_download_requirements()
+        deps = self._download_dependency_placeholder()
         deps_card = self._panel_card()
         deps_box = QVBoxLayout(deps_card)
         deps_box.setContentsMargins(20, 18, 20, 18)
@@ -340,16 +469,10 @@ class SetupPagesMixin:
         deps_desc.setObjectName("cardDesc")
         deps_box.addWidget(deps_desc)
 
-        def add_dep_row(title_text: str, ok: bool, detail: str, *, warning: bool = False):
-            if ok and not warning:
-                severity = "ok"
-                mark = "✓"
-            elif warning:
-                severity = "warn"
-                mark = "!"
-            else:
-                severity = "error"
-                mark = "✕"
+        self.download_dependency_rows = {}
+
+        def add_dep_row(key: str, title_text: str, ok: bool, detail: str, *, warning: bool = False):
+            severity, mark = self._download_dependency_severity(ok, warning=warning)
             row_card = QFrame()
             row_card.setObjectName({"ok": "depRowOk", "warn": "depRowWarn", "error": "depRowError"}[severity])
             row = QHBoxLayout(row_card)
@@ -370,10 +493,16 @@ class SetupPagesMixin:
             detail_label.setWordWrap(True)
             row.addWidget(detail_label, 1)
             deps_box.addWidget(row_card)
+            self.download_dependency_rows[str(key or "")] = {
+                "card": row_card,
+                "icon": icon,
+                "name": name,
+                "detail": detail_label,
+            }
 
-        add_dep_row("Git", deps["git_ok"], deps["git_text"])
-        add_dep_row("Python", deps["python_ok"], deps["python_text"], warning=deps.get("python_warn", False))
-        add_dep_row("requests", deps["requests_ok"], deps["requests_text"], warning=True)
+        add_dep_row("git", "Git", deps["git_ok"], deps["git_text"], warning=True)
+        add_dep_row("python", "Python", deps["python_ok"], deps["python_text"], warning=deps.get("python_warn", False))
+        add_dep_row("requests", "requests", deps["requests_ok"], deps["requests_text"], warning=True)
         body_layout.addWidget(deps_card)
 
         log_card = self._panel_card()
@@ -454,6 +583,7 @@ class SetupPagesMixin:
         layout.addWidget(footer, 0)
         self._restyle_download_page_widgets()
         self._append_download_log("等待开始…")
+        self._schedule_download_requirements_probe()
         return page
 
     def _show_locate(self):
@@ -463,6 +593,9 @@ class SetupPagesMixin:
 
     def _show_download(self):
         self.setWindowTitle("GenericAgent 启动器")
+        ensure = getattr(self, "_ensure_download_page_built", None)
+        if callable(ensure):
+            ensure()
         self.pages.setCurrentWidget(self._download_page)
         self._refresh_download_state()
 

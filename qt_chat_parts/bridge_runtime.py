@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import posixpath
 import queue
+import shlex
 import subprocess
 import threading
 import time
@@ -15,10 +17,64 @@ from PySide6.QtWidgets import QApplication, QFrame, QHBoxLayout, QLabel, QMessag
 from launcher_app import core as lz
 from launcher_app.theme import C
 
-from .common import _session_copy
+from .common import _session_copy, normalize_remote_agent_dir, normalize_ssh_error_text
 
 
 class BridgeRuntimeMixin:
+    def _remote_parse_bridge_event_text(self, text):
+        raw = str(text or "").strip()
+        if not raw:
+            return None
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            parsed = None
+        if isinstance(parsed, dict):
+            return parsed
+        for idx, ch in enumerate(raw):
+            if ch != "{":
+                continue
+            try:
+                parsed = json.loads(raw[idx:])
+            except Exception:
+                continue
+            if isinstance(parsed, dict):
+                return parsed
+        return None
+
+    def _resolve_bridge_python(self):
+        cfg_py = str((getattr(self, "cfg", {}) or {}).get("python_exe") or "").strip()
+        if cfg_py:
+            resolved = lz._resolve_config_path(cfg_py)
+            if resolved and os.path.isfile(resolved):
+                return resolved, None
+
+        cached = getattr(self, "_last_dependency_check", None) or {}
+        cached_py = str(cached.get("python") or "").strip()
+        if cached_py and os.path.isfile(cached_py):
+            return cached_py, None
+
+        return lz._find_compatible_system_python(self.agent_dir)
+
+    def _remember_bridge_python(self, py_path):
+        py = str(py_path or "").strip()
+        if not py:
+            return
+        try:
+            rel = lz._make_config_relative_path(py)
+        except Exception:
+            return
+        if not rel:
+            return
+        current = str((getattr(self, "cfg", {}) or {}).get("python_exe") or "").strip()
+        if current == rel:
+            return
+        self.cfg["python_exe"] = rel
+        try:
+            lz.save_config(self.cfg)
+        except Exception:
+            pass
+
     def _attachment_bar_targets(self):
         targets = []
         host = getattr(self, "input_attachment_host", None)
@@ -356,6 +412,28 @@ class BridgeRuntimeMixin:
             return str(self.llm_combo.itemText(idx) or "").strip()
         return ""
 
+    def _mark_current_llm_index(self, combo_index: int):
+        try:
+            combo_pos = int(combo_index)
+        except Exception:
+            combo_pos = -1
+        target_data = None
+        if combo_pos >= 0 and getattr(self, "llm_combo", None) is not None:
+            try:
+                target_data = self.llm_combo.itemData(combo_pos)
+            except Exception:
+                target_data = None
+        for pos, llm in enumerate(self.llms):
+            current = False
+            if target_data is not None:
+                try:
+                    current = int(llm.get("idx", pos) or pos) == int(target_data)
+                except Exception:
+                    current = str(llm.get("idx", pos)) == str(target_data)
+            elif combo_pos >= 0:
+                current = pos == combo_pos
+            llm["current"] = bool(current)
+
     def _sync_llm_combo(self):
         self._ignore_llm_change = True
         self.llm_combo.clear()
@@ -376,10 +454,28 @@ class BridgeRuntimeMixin:
             floating_sync()
 
     def _on_llm_changed(self, index: int):
-        if self._ignore_llm_change or index < 0 or not self._bridge_ready:
+        if self._ignore_llm_change or index < 0:
             return
         target = self.llm_combo.itemData(index)
         if target is None or int(target) < 0:
+            return
+        if self._is_remote_session():
+            self._mark_current_llm_index(index)
+            if isinstance(self.current_session, dict) and self.current_session.get("id"):
+                self.current_session["llm_idx"] = int(target)
+                snapshot = dict(self.current_session.get("snapshot") or {})
+                snapshot["llm_idx"] = int(target)
+                self.current_session["snapshot"] = snapshot
+                try:
+                    lz.save_session(self.agent_dir, self.current_session, touch=False)
+                except Exception:
+                    pass
+            self._set_status("远程会话模型已记录，将在下一次发送时传给服务器 agant。")
+            floating_sync = getattr(self, "_sync_floating_llm_combo", None)
+            if callable(floating_sync):
+                floating_sync()
+            return
+        if not self._bridge_ready:
             return
         self._send_cmd({"cmd": "switch_llm", "idx": int(target)})
         floating_sync = getattr(self, "_sync_floating_llm_combo", None)
@@ -409,6 +505,403 @@ class BridgeRuntimeMixin:
         if callable(refresher):
             refresher()
 
+    def _session_device_scope_id(self, session):
+        data = session if isinstance(session, dict) else {}
+        scope = str(data.get("device_scope") or "local").strip().lower()
+        if scope not in ("local", "remote"):
+            scope = "local"
+        if scope == "remote":
+            did = str(data.get("device_id") or "").strip()
+            if did:
+                return scope, did
+        return "local", "local"
+
+    def _is_remote_session(self, session=None):
+        if isinstance(session, dict):
+            data = session
+        elif isinstance(self.current_session, dict) and self.current_session.get("id"):
+            data = self.current_session
+        else:
+            resolver = getattr(self, "_current_device_context", None)
+            if callable(resolver):
+                try:
+                    scope, _did = resolver()
+                    return str(scope or "").strip().lower() == "remote"
+                except Exception:
+                    pass
+            data = {}
+        scope, _did = self._session_device_scope_id(data)
+        return scope == "remote"
+
+    def _remote_device_payload(self, session):
+        getter = getattr(self, "_remote_device_by_id", None)
+        if not callable(getter):
+            raise RuntimeError("当前构建未包含远程设备配置能力。")
+        _scope, did = self._session_device_scope_id(session)
+        dev = getter(did)
+        if not isinstance(dev, dict):
+            raise RuntimeError("远程设备配置不存在，请先在“其他设备”里确认连接信息。")
+        checker = getattr(self, "_remote_device_auto_ssh_enabled", None)
+        if callable(checker):
+            try:
+                if not bool(checker(dev)):
+                    raise RuntimeError("该远程设备已关闭自动 SSH，请先在“其他设备”中打开开关。")
+            except RuntimeError:
+                raise
+            except Exception:
+                pass
+        key_path = str(dev.get("ssh_key_path") or "").strip()
+        key_abs = lz._resolve_config_path(key_path) if key_path else ""
+        if key_path and (not key_abs or not os.path.isfile(key_abs)):
+            raise RuntimeError("远程设备 SSH 私钥路径无效，请先修正设备配置。")
+        payload = {
+            "host": str(dev.get("host") or "").strip(),
+            "username": str(dev.get("username") or "").strip(),
+            "port": int(dev.get("port") or 22),
+            "password": str(dev.get("password") or "").strip(),
+            "key_abs": key_abs,
+        }
+        if not payload["host"] or not payload["username"]:
+            raise RuntimeError("远程设备缺少 host/username。")
+        if (not payload["password"]) and (not payload["key_abs"]):
+            raise RuntimeError("远程设备至少需要 SSH 私钥或密码。")
+        return dev, payload
+
+    def _remote_bridge_source_text(self):
+        bridge_path = lz._bridge_script_path()
+        if not os.path.isfile(bridge_path):
+            raise RuntimeError(f"bridge.py 不存在：{bridge_path}")
+        with open(bridge_path, "r", encoding="utf-8", errors="replace") as f:
+            return f.read()
+
+    def _remote_stage_bridge_runtime(self, client, remote_dir: str):
+        base_dir = normalize_remote_agent_dir(remote_dir)
+        runtime_dir = posixpath.join(str(base_dir).rstrip("/"), "temp", "launcher_runtime")
+        rc, _out, err = self._vps_exec_remote(client, f"mkdir -p {shlex.quote(runtime_dir)}", timeout=20)
+        if rc != 0:
+            raise RuntimeError(str(err or "创建远端 bridge 运行目录失败。").strip() or "创建远端 bridge 运行目录失败。")
+        remote_bridge = posixpath.join(runtime_dir, "bridge.py")
+        text = self._remote_bridge_source_text()
+        sftp = client.open_sftp()
+        try:
+            with sftp.open(remote_bridge, "wb") as fp:
+                fp.write(text.encode("utf-8"))
+        finally:
+            try:
+                sftp.close()
+            except Exception:
+                pass
+        return remote_bridge
+
+    def _remote_stage_chat_images(self, client, remote_dir: str, images):
+        local_images = [str(p or "").strip() for p in (images or []) if os.path.isfile(str(p or "").strip())]
+        if not local_images:
+            return []
+        base_dir = normalize_remote_agent_dir(remote_dir)
+        upload_dir = posixpath.join(str(base_dir).rstrip("/"), "temp", "launcher_runtime", "chat_uploads")
+        rc, _out, err = self._vps_exec_remote(client, f"mkdir -p {shlex.quote(upload_dir)}", timeout=20)
+        if rc != 0:
+            raise RuntimeError(str(err or "创建远端图片上传目录失败。").strip() or "创建远端图片上传目录失败。")
+        remote_paths = []
+        sftp = client.open_sftp()
+        try:
+            for local_fp in local_images:
+                name = f"{uuid.uuid4().hex[:12]}_{os.path.basename(local_fp)}"
+                remote_fp = posixpath.join(upload_dir, name)
+                sftp.put(local_fp, remote_fp)
+                remote_paths.append(remote_fp)
+        finally:
+            try:
+                sftp.close()
+            except Exception:
+                pass
+        return remote_paths
+
+    def _remote_cleanup_files(self, client, remote_paths):
+        paths = [str(p or "").strip() for p in (remote_paths or []) if str(p or "").strip()]
+        if (client is None) or (not paths):
+            return
+        cmd = "rm -f " + " ".join(shlex.quote(path) for path in paths) + " >/dev/null 2>&1 || true"
+        try:
+            self._vps_exec_remote(client, cmd, timeout=20)
+        except Exception:
+            pass
+
+    def _remote_emit_bridge_event(self, ev, *, session_id=""):
+        event = dict(ev or {})
+        if session_id and not str(event.get("session_id") or "").strip():
+            event["session_id"] = str(session_id)
+        self._event_queue.put(event)
+
+    def _remote_exec_chat_turn(self, session, prompt_text: str, images):
+        dev, payload = self._remote_device_payload(session)
+        remote_dir = normalize_remote_agent_dir(dev.get("agent_dir"), username=dev.get("username"))
+        python_cmd = str(dev.get("python_cmd") or "python3").strip() or "python3"
+        client, err_msg, detail, missing = self._open_vps_ssh_client(payload, timeout=12)
+        if client is None:
+            if missing:
+                raise RuntimeError("缺少 paramiko，无法连接远程设备。")
+            text = (err_msg or "SSH 连接失败。") + (f"\n{detail}" if detail else "")
+            raise RuntimeError(normalize_ssh_error_text(text, context="远端 SSH 连接"))
+        remote_cleanup = []
+        try:
+            remote_bridge = self._remote_stage_bridge_runtime(client, remote_dir)
+            remote_images = self._remote_stage_chat_images(client, remote_dir, images)
+            remote_cleanup.extend(remote_images)
+            try:
+                stdin, stdout, stderr = client.exec_command(
+                    (
+                        "set -e; "
+                        f"cd {shlex.quote(remote_dir)}; "
+                        f"PY_BIN={shlex.quote(python_cmd)}; "
+                        "if ! command -v \"$PY_BIN\" >/dev/null 2>&1; then "
+                        "if command -v python3 >/dev/null 2>&1; then PY_BIN=python3; "
+                        "elif command -v python >/dev/null 2>&1; then PY_BIN=python; "
+                        "else echo '{\"event\":\"error\",\"msg\":\"远端设备未检测到 Python，可在设备配置里指定 python_cmd。\"}'; exit 62; fi; "
+                        "fi; "
+                        "export PYTHONIOENCODING=utf-8 PYTHONUTF8=1; "
+                        f"\"$PY_BIN\" -u {shlex.quote(remote_bridge)} {shlex.quote(remote_dir)}"
+                    ),
+                    timeout=7200,
+                    get_pty=False,
+                )
+            except Exception as e:
+                detail = normalize_ssh_error_text(str(e), context="远端 bridge 连接")
+                raise RuntimeError(f"启动远端 bridge 失败：{detail}")
+
+            channel = stdout.channel
+            try:
+                channel.settimeout(None)
+            except Exception:
+                pass
+            line_queue: queue.Queue = queue.Queue()
+            stderr_lines = []
+
+            def decode_line(raw):
+                if isinstance(raw, bytes):
+                    return raw.decode("utf-8", errors="replace")
+                return str(raw or "")
+
+            def read_stdout():
+                try:
+                    for raw in stdout:
+                        text = decode_line(raw).rstrip("\r\n")
+                        if text:
+                            line_queue.put(("stdout", text))
+                except Exception as e:
+                    line_queue.put(("stdout_error", str(e)))
+
+            def read_stderr():
+                try:
+                    for raw in stderr:
+                        text = decode_line(raw).rstrip("\r\n")
+                        if not text:
+                            continue
+                        stderr_lines.append(text)
+                        if len(stderr_lines) > 80:
+                            del stderr_lines[:-80]
+                        line_queue.put(("stderr", text))
+                except Exception as e:
+                    line_queue.put(("stderr_error", str(e)))
+
+            threading.Thread(target=read_stdout, daemon=True, name="remote-bridge-stdout").start()
+            threading.Thread(target=read_stderr, daemon=True, name="remote-bridge-stderr").start()
+
+            session_id = str((session or {}).get("id") or "").strip()
+            state_payload = {
+                "cmd": "set_state",
+                "backend_history": list((session or {}).get("backend_history") or []),
+                "agent_history": list((session or {}).get("agent_history") or []),
+                "llm_idx": (session or {}).get("llm_idx", (((session or {}).get("snapshot") or {}).get("llm_idx"))),
+            }
+            send_payload = {
+                "cmd": "send",
+                "text": str(prompt_text or ""),
+                "images": list(remote_images or []),
+                "session_id": session_id,
+            }
+
+            def send_cmd(obj):
+                text = json.dumps(obj if isinstance(obj, dict) else {}, ensure_ascii=False) + "\n"
+                try:
+                    stdin.write(text)
+                except TypeError:
+                    stdin.write(text.encode("utf-8"))
+                stdin.flush()
+
+            ready_seen = False
+            state_loaded = False
+            done_text = ""
+            done_seen = False
+            post_done_deadline = 0.0
+            bridge_errors = []
+
+            while True:
+                if done_seen and post_done_deadline > 0 and time.time() >= post_done_deadline:
+                    break
+                try:
+                    kind, text = line_queue.get(timeout=0.2)
+                except queue.Empty:
+                    if channel.exit_status_ready():
+                        break
+                    continue
+                if kind == "stderr":
+                    continue
+                if kind.endswith("_error"):
+                    bridge_errors.append(normalize_ssh_error_text(str(text or "").strip(), context="远端 bridge 连接"))
+                    continue
+                ev = self._remote_parse_bridge_event_text(text)
+                if not isinstance(ev, dict):
+                    bridge_errors.append(str(text or "").strip())
+                    continue
+                et = str(ev.get("event") or "").strip()
+                if et == "log":
+                    continue
+                if et == "ready":
+                    ready_seen = True
+                    send_cmd(state_payload)
+                    continue
+                if et == "state_loaded":
+                    state_loaded = True
+                    send_cmd(send_payload)
+                    continue
+                if et == "next":
+                    self._remote_emit_bridge_event({"event": "remote_next", "text": ev.get("text", "")}, session_id=session_id)
+                    continue
+                if et == "done":
+                    done_text = str(ev.get("text") or "").strip()
+                    done_seen = True
+                    post_done_deadline = time.time() + 2.5
+                    payload = {
+                        "event": "remote_done",
+                        "text": done_text,
+                        "usage": ev.get("usage") if isinstance(ev.get("usage"), dict) else None,
+                    }
+                    self._remote_emit_bridge_event(payload, session_id=session_id)
+                    continue
+                if et == "turn_snapshot":
+                    payload = {
+                        "event": "remote_turn_snapshot",
+                        "backend_history": ev.get("backend_history") or [],
+                        "agent_history": ev.get("agent_history") or [],
+                        "llm_idx": ev.get("llm_idx"),
+                        "process_pid": ev.get("process_pid"),
+                        "snapshot_ts": ev.get("snapshot_ts"),
+                    }
+                    self._remote_emit_bridge_event(payload, session_id=(ev.get("session_id") or session_id))
+                    if done_seen:
+                        post_done_deadline = time.time() + 0.2
+                    continue
+                if et == "state":
+                    payload = {
+                        "event": "remote_state",
+                        "backend_history": ev.get("backend_history") or [],
+                        "agent_history": ev.get("agent_history") or [],
+                        "llm_idx": ev.get("llm_idx"),
+                    }
+                    self._remote_emit_bridge_event(payload, session_id=(ev.get("session_id") or session_id))
+                    continue
+                if et == "error":
+                    msg = str(ev.get("msg") or "远端 bridge 执行失败。").strip() or "远端 bridge 执行失败。"
+                    trace = str(ev.get("trace") or "").strip()
+                    if trace:
+                        msg = msg + "\n" + trace
+                    raise RuntimeError(msg)
+
+            try:
+                send_cmd({"cmd": "quit"})
+            except Exception:
+                pass
+
+            if not ready_seen:
+                tail = "\n".join([line for line in bridge_errors if line][-10:] + stderr_lines[-10:]).strip()
+                raise RuntimeError(tail or "远端 bridge 未成功启动。")
+            if ready_seen and (not state_loaded):
+                tail = "\n".join([line for line in bridge_errors if line][-10:] + stderr_lines[-10:]).strip()
+                raise RuntimeError(tail or "远端 bridge 状态恢复失败。")
+            if not done_seen:
+                tail = "\n".join([line for line in bridge_errors if line][-10:] + stderr_lines[-10:]).strip()
+                raise RuntimeError(tail or "远端聊天未返回完成事件。")
+            if not done_text:
+                raise RuntimeError("远端返回为空，请检查服务器日志。")
+            return done_text
+        finally:
+            self._remote_cleanup_files(client, remote_cleanup)
+            try:
+                client.close()
+            except Exception:
+                pass
+
+    def _submit_remote_user_message(self, text: str, attachments=None, *, source_editor=None):
+        clean_text = str(text or "").strip()
+        files = [
+            str(item.get("path") or "").strip()
+            for item in (attachments or [])
+            if os.path.isfile(str((item or {}).get("path") or "").strip())
+        ]
+        if not clean_text and not files:
+            return False
+        self._last_activity = time.time()
+        self._ensure_session(clean_text)
+        if source_editor is not None:
+            try:
+                source_editor.clear()
+            except Exception:
+                pass
+        self._selected_session_id = self.current_session.get("id")
+        display_text = clean_text or f"[已发送 {len(files)} 张图片]"
+        user_row = self._add_message_row("user", display_text, finished=True, auto_scroll=False)
+        self.current_session.setdefault("bubbles", []).append({"role": "user", "text": display_text})
+        self._stream_row = self._add_message_row("assistant", "", finished=False, auto_scroll=False)
+        follower = getattr(self, "_set_follow_latest_user", None)
+        if callable(follower):
+            follower(True)
+        self._scroll_row_to_top(user_row)
+        self._busy = True
+        self._abort_requested = False
+        self._current_stream_text = ""
+        self._pending_stream_text = None
+        self.send_btn.setEnabled(False)
+        self.stop_btn.setEnabled(False)
+        self._set_status("远程生成中…")
+        self._refresh_composer_enabled()
+
+        usage = self.current_session.get("token_usage") or {}
+        event = {
+            "ts": time.time(),
+            "input_tokens": lz._estimate_tokens(clean_text),
+            "output_tokens": 0,
+            "total_tokens": lz._estimate_tokens(clean_text),
+            "channel_id": str(self.current_session.get("channel_id") or "launcher").strip().lower(),
+            "model": "remote",
+            "usage_source": "estimate",
+        }
+        usage.setdefault("events", []).append(event)
+        usage["last_model"] = "remote"
+        self.current_session["token_usage"] = usage
+        self._active_token_event_ts = event["ts"]
+        self._persist_session(self.current_session)
+        self._refresh_token_label()
+        self._update_stream_row_tokens(live=True)
+
+        session_id = str(self.current_session.get("id") or "")
+        session_copy = _session_copy(self.current_session)
+
+        def worker():
+            try:
+                self._remote_exec_chat_turn(session_copy, clean_text, files)
+            except Exception as e:
+                self._event_queue.put({"event": "remote_error", "session_id": session_id, "msg": str(e)})
+
+        threading.Thread(target=worker, name="remote-chat-turn", daemon=True).start()
+        self._active_turn_attachments_data = [dict(item) for item in (attachments or []) if os.path.isfile(str((item or {}).get("path") or "").strip())]
+        self._pending_input_attachments_data = []
+        self._refresh_input_attachment_bar()
+        refresher = getattr(self, "_refresh_floating_chat_window", None)
+        if callable(refresher):
+            refresher()
+        return True
+
     def _send_cmd(self, obj):
         if not self.bridge_proc or self.bridge_proc.poll() is not None:
             raise RuntimeError("桥接进程未运行")
@@ -425,9 +918,10 @@ class BridgeRuntimeMixin:
     def _start_bridge(self):
         if self.bridge_proc and self.bridge_proc.poll() is None:
             return
-        py, py_err = lz._find_compatible_system_python(self.agent_dir)
+        py, py_err = self._resolve_bridge_python()
         if not py:
             raise RuntimeError(py_err or "未找到可用的系统 Python。")
+        self._remember_bridge_python(py)
         bridge = lz._bridge_script_path()
         if not os.path.isfile(bridge):
             raise RuntimeError(f"bridge.py 不存在：{bridge}")
@@ -491,16 +985,7 @@ class BridgeRuntimeMixin:
         if proc is None:
             return
         try:
-            if proc.poll() is None:
-                try:
-                    proc.stdin.write('{"cmd":"quit"}\n')
-                    proc.stdin.flush()
-                except Exception:
-                    pass
-                try:
-                    proc.terminate()
-                except Exception:
-                    pass
+            lz.terminate_process_tree(proc, quit_line='{"cmd":"quit"}\n', terminate_timeout=0.8, kill_timeout=0.8)
         except Exception:
             pass
 
@@ -520,6 +1005,8 @@ class BridgeRuntimeMixin:
         if self._is_channel_process_session():
             QMessageBox.information(self, "不可发送", "当前选中的是渠道进程会话，只能回顾快照，不能从这里继续发送消息。")
             return False
+        if self._is_remote_session(self.current_session):
+            return self._submit_remote_user_message(text, attachments=attachments, source_editor=source_editor)
         self._last_activity = time.time()
         if not self._bridge_ready:
             QMessageBox.information(self, "尚未就绪", "桥接进程还没准备好，请稍候再发送。")
@@ -704,7 +1191,8 @@ class BridgeRuntimeMixin:
                 )
             self._active_token_event_ts = None
             self._persist_session(self.current_session)
-            self._request_backend_state(self.current_session.get("id"))
+            if not self._is_remote_session(self.current_session):
+                self._request_backend_state(self.current_session.get("id"))
         self._refresh_token_label()
         follower = getattr(self, "_set_follow_latest_user", None)
         if callable(follower):
@@ -720,6 +1208,9 @@ class BridgeRuntimeMixin:
 
     def _abort(self):
         if not self._busy or self._abort_requested:
+            return
+        if self._is_remote_session(self.current_session):
+            QMessageBox.information(self, "提示", "远程会话当前不支持即时中断，请等待该轮完成。")
             return
         self._abort_requested = True
         self.stop_btn.setEnabled(False)
@@ -765,6 +1256,50 @@ class BridgeRuntimeMixin:
             return
         et = ev.get("event")
         if et == "bridge_text":
+            return
+        if et == "remote_done":
+            target_sid = str(ev.get("session_id") or "").strip()
+            current_sid = str((self.current_session or {}).get("id") or "").strip()
+            if target_sid and current_sid and target_sid != current_sid:
+                return
+            provider_usage = ev.get("usage") if isinstance(ev.get("usage"), dict) else None
+            self._stream_done(ev.get("text", ""), provider_usage=provider_usage)
+            return
+        if et == "remote_next":
+            target_sid = str(ev.get("session_id") or "").strip()
+            current_sid = str((self.current_session or {}).get("id") or "").strip()
+            if target_sid and current_sid and target_sid != current_sid:
+                return
+            self._stream_update(ev.get("text", ""))
+            return
+        if et == "remote_state":
+            self._apply_state_to_session(
+                ev.get("session_id") or ((self.current_session or {}).get("id")),
+                ev.get("backend_history") or [],
+                ev.get("agent_history") or [],
+                llm_idx=ev.get("llm_idx"),
+            )
+            return
+        if et == "remote_turn_snapshot":
+            self._apply_state_to_session(
+                ev.get("session_id") or ((self.current_session or {}).get("id")),
+                ev.get("backend_history") or [],
+                ev.get("agent_history") or [],
+                llm_idx=ev.get("llm_idx"),
+                process_pid=ev.get("process_pid"),
+                snapshot_ts=ev.get("snapshot_ts"),
+            )
+            return
+        if et == "remote_error":
+            msg = str(ev.get("msg") or "远程执行失败。").strip() or "远程执行失败。"
+            self._clear_active_turn_attachments()
+            self._busy = False
+            self._abort_requested = False
+            self.send_btn.setEnabled(True)
+            self.stop_btn.setEnabled(False)
+            self._set_status(msg)
+            self._refresh_composer_enabled()
+            QMessageBox.warning(self, "远程聊天失败", msg)
             return
         if et == "launcher_autonomous_trigger":
             if not self._busy:

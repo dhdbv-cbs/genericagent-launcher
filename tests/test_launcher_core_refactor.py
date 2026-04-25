@@ -1,14 +1,33 @@
 from __future__ import annotations
 
+import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
+from unittest import mock
 
 from launcher_app import core as lz
 from launcher_core_parts import model_api, runtime
 
 
 class LauncherCoreFacadeTests(unittest.TestCase):
+    @staticmethod
+    def _pid_exists(pid: int) -> bool:
+        target = int(pid or 0)
+        if target <= 0:
+            return False
+        try:
+            os.kill(target, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        except OSError:
+            return False
+        return True
+
     def test_facade_exports_expected_symbols(self):
         required = [
             "load_config",
@@ -16,6 +35,7 @@ class LauncherCoreFacadeTests(unittest.TestCase):
             "_resolve_config_path",
             "_make_config_relative_path",
             "_normalize_token_usage_inplace",
+            "terminate_process_tree",
             "list_scheduled_tasks",
             "tail_scheduler_log",
             "fold_turns",
@@ -45,6 +65,74 @@ class LauncherCoreFacadeTests(unittest.TestCase):
                 self.assertEqual(os.path.normpath(resolved), os.path.normpath(nested))
             finally:
                 runtime.APP_DIR = original_app_dir
+
+    def test_load_config_migrates_launcher_config_from_install_root(self):
+        with tempfile.TemporaryDirectory() as td:
+            install_root = os.path.join(td, "Programs", "GenericAgentLauncher")
+            version_dir = os.path.join(install_root, "app", "versions", "1.2.3")
+            data_root = os.path.join(td, "GenericAgentLauncherData")
+            os.makedirs(version_dir, exist_ok=True)
+            legacy_path = os.path.join(install_root, "launcher_config.json")
+            expected = {"agent_dir": "agent", "remote_devices": [{"id": "srv-1", "host": "10.0.0.8"}]}
+            with open(legacy_path, "w", encoding="utf-8") as f:
+                json.dump(expected, f, ensure_ascii=False, indent=2)
+
+            patched = {
+                "APP_DIR": version_dir,
+                "PROGRAMS_ROOT": install_root,
+                "DATA_ROOT": data_root,
+                "CONFIG_PATH": os.path.join(data_root, "config", "launcher_config.json"),
+                "LEGACY_CONFIG_PATH": os.path.join(version_dir, "launcher_config.json"),
+                "STATE_DIR": os.path.join(data_root, "state"),
+                "UPDATES_DIR": os.path.join(data_root, "updates"),
+                "UPDATE_JOBS_DIR": os.path.join(data_root, "updates", "jobs"),
+                "UPDATE_DOWNLOADS_DIR": os.path.join(data_root, "updates", "downloads"),
+                "UPDATE_STAGING_DIR": os.path.join(data_root, "updates", "staging"),
+            }
+            originals = {name: getattr(runtime, name) for name in patched}
+            try:
+                for name, value in patched.items():
+                    setattr(runtime, name, value)
+                with mock.patch.dict(os.environ, {"GA_LAUNCHER_PROGRAMS_ROOT": ""}, clear=False):
+                    loaded = runtime.load_config()
+            finally:
+                for name, value in originals.items():
+                    setattr(runtime, name, value)
+
+            self.assertEqual(loaded, expected)
+            self.assertTrue(os.path.isfile(patched["CONFIG_PATH"]))
+            with open(patched["CONFIG_PATH"], "r", encoding="utf-8") as f:
+                persisted = json.load(f)
+            self.assertEqual(persisted, expected)
+
+    def test_terminate_process_tree_kills_spawned_child_process(self):
+        script = (
+            "import subprocess, sys, time\n"
+            "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+            "print(child.pid, flush=True)\n"
+            "time.sleep(60)\n"
+        )
+        proc = subprocess.Popen(
+            [sys.executable, "-u", "-c", script],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+        try:
+            child_line = str(proc.stdout.readline() if proc.stdout is not None else "").strip()
+            self.assertTrue(child_line.isdigit(), msg=f"unexpected child pid line: {child_line!r}")
+            child_pid = int(child_line)
+            self.assertTrue(runtime.terminate_process_tree(proc, terminate_timeout=0.3, kill_timeout=1.5))
+            proc.wait(timeout=5)
+            self.assertFalse(self._pid_exists(child_pid), msg=f"child process still alive: {child_pid}")
+        finally:
+            try:
+                runtime.terminate_process_tree(proc, terminate_timeout=0.1, kill_timeout=0.2)
+            except Exception:
+                pass
 
     def test_bridge_script_path_points_to_repo_root_bridge(self):
         bridge_path = lz._bridge_script_path()

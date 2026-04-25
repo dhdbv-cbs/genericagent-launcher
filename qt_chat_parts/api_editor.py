@@ -4,6 +4,7 @@ import threading
 
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -16,6 +17,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from shiboken6 import isValid
 
 from launcher_app import core as lz
 from launcher_app.theme import C, F
@@ -112,8 +114,42 @@ _API_KIND_ADVANCED_FIELDS = {
 
 
 class ApiEditorMixin:
+    def _launcher_is_closing(self) -> bool:
+        return bool(getattr(self, "_closing_in_progress", False) or getattr(self, "_force_exit_requested", False))
+
+    def _qt_object_alive(self, obj) -> bool:
+        if obj is None:
+            return False
+        try:
+            return bool(isValid(obj))
+        except Exception:
+            return False
+
     def _api_on_ui_thread(self, fn):
-        QTimer.singleShot(0, self, fn)
+        callback = fn if callable(fn) else (lambda: None)
+        owner = self
+        app = QApplication.instance()
+
+        def run():
+            if not self._qt_object_alive(owner):
+                return
+            if self._launcher_is_closing():
+                return
+            try:
+                callback()
+            except RuntimeError as e:
+                text = str(e or "")
+                if "already deleted" in text or "Internal C++ object" in text:
+                    return
+                raise
+
+        try:
+            if self._qt_object_alive(app):
+                QTimer.singleShot(0, app, run)
+            else:
+                QTimer.singleShot(0, run)
+        except RuntimeError:
+            pass
 
     def _api_combo_style(self):
         return (
@@ -386,14 +422,7 @@ class ApiEditorMixin:
             configs.append({"var": state["var"], "kind": kind, "data": data})
         return configs + list(self._qt_api_hidden_configs)
 
-    def _reload_api_editor_state(self):
-        if not hasattr(self, "settings_api_notice"):
-            return
-        self._clear_layout(self.settings_api_list_layout)
-        if not lz.is_valid_agent_dir(self.agent_dir):
-            self.settings_api_notice.setText("请先选择有效的 GenericAgent 目录。")
-            return
-        py_path, parsed = self._load_mykey_source()
+    def _apply_loaded_api_source(self, py_path, parsed):
         self._qt_api_py_path = py_path
         self._qt_api_parse_error = parsed.get("error") or ""
         self._qt_api_hidden_configs = [
@@ -419,6 +448,45 @@ class ApiEditorMixin:
             notices.append(f"检测到 {len(self._qt_api_passthrough)} 条表单不直接编辑的原文项，保存时会原样保留。")
         self.settings_api_notice.setText("\n".join(notices))
         self._render_api_cards()
+
+    def _reload_api_editor_state(self):
+        if not hasattr(self, "settings_api_notice"):
+            return
+        self._clear_layout(self.settings_api_list_layout)
+        target_ctx_getter = getattr(self, "_settings_target_context", None)
+        target_ctx = target_ctx_getter() if callable(target_ctx_getter) else {"is_remote": False}
+        if (not bool((target_ctx or {}).get("is_remote"))) and (not lz.is_valid_agent_dir(self.agent_dir)):
+            self.settings_api_notice.setText("请先选择有效的 GenericAgent 目录。")
+            return
+        if bool((target_ctx or {}).get("is_remote")):
+            if bool(getattr(self, "_qt_api_remote_loading", False)):
+                self.settings_api_notice.setText("正在读取远端 mykey.py…")
+                return
+            self._qt_api_remote_loading = True
+            token_getter = getattr(self, "_settings_target_generation", None)
+            target_token = token_getter() if callable(token_getter) else 0
+            self.settings_api_notice.setText("正在读取远端 mykey.py…")
+            loading = QLabel("正在从远端设备拉取 API 配置，请稍候…")
+            loading.setObjectName("mutedText")
+            self.settings_api_list_layout.addWidget(loading)
+
+            def worker():
+                py_path, parsed = self._load_mykey_source()
+
+                def done():
+                    current_token = token_getter() if callable(token_getter) else target_token
+                    if int(current_token or 0) != int(target_token or 0):
+                        return
+                    self._qt_api_remote_loading = False
+                    self._clear_layout(self.settings_api_list_layout)
+                    self._apply_loaded_api_source(py_path, parsed)
+
+                self._api_on_ui_thread(done)
+
+            threading.Thread(target=worker, name="settings-api-remote-load", daemon=True).start()
+            return
+        py_path, parsed = self._load_mykey_source()
+        self._apply_loaded_api_source(py_path, parsed)
 
     def _render_api_cards(self):
         self._clear_layout(self.settings_api_list_layout)
@@ -764,29 +832,52 @@ class ApiEditorMixin:
                 extras=self._qt_api_extras,
                 passthrough=self._qt_api_passthrough,
             )
-            with open(self._qt_api_py_path, "w", encoding="utf-8") as f:
-                f.write(txt)
+            writer = getattr(self, "_settings_target_write_mykey_text", None)
+            if callable(writer):
+                ok, path_text, err = writer(txt)
+                if not ok:
+                    raise RuntimeError(err or "写入 mykey.py 失败。")
+                self._qt_api_py_path = str(path_text or self._qt_api_py_path)
+            else:
+                with open(self._qt_api_py_path, "w", encoding="utf-8") as f:
+                    f.write(txt)
         except Exception as e:
             QMessageBox.critical(self, "保存失败", str(e))
             return
-        restarted = self._restart_running_channels(show_errors=False)
-        if restart:
+        target_ctx_getter = getattr(self, "_settings_target_context", None)
+        target_ctx = target_ctx_getter() if callable(target_ctx_getter) else {"is_remote": False, "label": "本机"}
+        is_remote_target = bool((target_ctx or {}).get("is_remote"))
+        restarted = 0 if is_remote_target else self._restart_running_channels(show_errors=False)
+        if restart and (not is_remote_target):
             self._restart_bridge()
             QMessageBox.information(self, "已保存", "已写入 mykey.py，并已重启聊天内核。")
         else:
             extra = f"\n已自动重启 {restarted} 个由启动器托管的通讯渠道。" if restarted else ""
-            QMessageBox.information(self, "已保存", "已写入 mykey.py。聊天内核需重启后才会读取新配置。" + extra)
+            if is_remote_target:
+                QMessageBox.information(self, "已保存", "已写入远端 mykey.py。远端渠道请在对应服务器侧重启进程后生效。")
+            else:
+                QMessageBox.information(self, "已保存", "已写入 mykey.py。聊天内核需重启后才会读取新配置。" + extra)
         self._reload_api_editor_state()
         self._reload_channels_editor_state()
 
     def _open_raw_mykey_editor(self):
-        if not lz.is_valid_agent_dir(self.agent_dir):
+        target_ctx_getter = getattr(self, "_settings_target_context", None)
+        target_ctx = target_ctx_getter() if callable(target_ctx_getter) else {"is_remote": False}
+        if (not bool((target_ctx or {}).get("is_remote"))) and (not lz.is_valid_agent_dir(self.agent_dir)):
             QMessageBox.warning(self, "目录无效", "请先选择有效的 GenericAgent 目录。")
             return
         py_path, _ = self._load_mykey_source()
         try:
-            with open(py_path, "r", encoding="utf-8") as f:
-                original = f.read()
+            reader = getattr(self, "_settings_target_read_mykey_text", None)
+            if callable(reader):
+                ok, text, display_path, err = reader()
+                if not ok:
+                    raise RuntimeError(err or "读取 mykey.py 失败。")
+                py_path = str(display_path or py_path)
+                original = str(text or "")
+            else:
+                with open(py_path, "r", encoding="utf-8") as f:
+                    original = f.read()
         except Exception as e:
             QMessageBox.critical(self, "打开失败", str(e))
             return
@@ -839,20 +930,33 @@ class ApiEditorMixin:
                 QMessageBox.warning(dlg, "语法错误", str(e))
                 return
             try:
-                with open(py_path, "w", encoding="utf-8") as f:
-                    f.write(text)
+                writer = getattr(self, "_settings_target_write_mykey_text", None)
+                if callable(writer):
+                    ok, path_text, err = writer(text)
+                    if not ok:
+                        raise RuntimeError(err or "写入 mykey.py 失败。")
+                    if path_text:
+                        path_label.setText(str(path_text))
+                else:
+                    with open(py_path, "w", encoding="utf-8") as f:
+                        f.write(text)
             except Exception as e:
                 QMessageBox.critical(dlg, "保存失败", str(e))
                 return
-            restarted = self._restart_running_channels(show_errors=False)
-            if restart:
+            target_ctx_getter = getattr(self, "_settings_target_context", None)
+            target_ctx = target_ctx_getter() if callable(target_ctx_getter) else {"is_remote": False}
+            is_remote_target = bool((target_ctx or {}).get("is_remote"))
+            restarted = 0 if is_remote_target else self._restart_running_channels(show_errors=False)
+            if restart and (not is_remote_target):
                 self._restart_bridge()
             self._reload_api_editor_state()
             self._reload_channels_editor_state()
             msg = "已写入 mykey.py。"
+            if is_remote_target:
+                msg = "已写入远端 mykey.py。"
             if restarted:
                 msg += f"\n已自动重启 {restarted} 个由启动器托管的通讯渠道。"
-            if restart:
+            if restart and (not is_remote_target):
                 msg += "\n聊天内核也已重启。"
             QMessageBox.information(dlg, "已保存", msg)
             dlg.accept()

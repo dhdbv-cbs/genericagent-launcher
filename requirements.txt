@@ -1,5 +1,8 @@
 PySide6>=6.7
 requests>=2.31
+charset-normalizer>=3.3
 qrcode[pil]>=7.4
 Pillow>=10.0
 markdown>=3.5
+cryptography>=43.0
+paramiko>=3.4

@@ -41,6 +41,68 @@ _MD_CSS = ""
 _HTML_STYLE_ATTR_RE = re.compile(r"\s(?:style|bgcolor|color|face|size)\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s>]+)", re.IGNORECASE)
 _HTML_FONT_OPEN_RE = re.compile(r"<\s*font\b[^>]*>", re.IGNORECASE)
 _HTML_FONT_CLOSE_RE = re.compile(r"<\s*/\s*font\s*>", re.IGNORECASE)
+_LEGACY_REMOTE_AGENT_DIR = "/opt/agant"
+_ROOT_REMOTE_AGENT_DIR = "/root/agant"
+_HOME_REMOTE_AGENT_DIR_RE = re.compile(r"^/home/[^/\s]+/agant/?$")
+_SSH_DISCONNECT_HINTS = (
+    "10054",
+    "远程主机强迫关闭了一个现有的连接",
+    "forcibly closed by the remote host",
+    "connection reset by peer",
+    "software caused connection abort",
+    "socket is closed",
+    "socket closed",
+    "transport is closed",
+    "transport closed",
+    "eof during negotiation",
+    "channel closed",
+)
+
+
+def remote_agent_dir_default(username: str) -> str:
+    user = str(username or "").strip().strip("/")
+    if not user or user.lower() == "root":
+        return _ROOT_REMOTE_AGENT_DIR
+    return f"/home/{user}/agant"
+
+
+def is_auto_remote_agent_dir(path: str) -> bool:
+    value = str(path or "").strip()
+    if not value:
+        return True
+    if value in (_LEGACY_REMOTE_AGENT_DIR, _ROOT_REMOTE_AGENT_DIR):
+        return True
+    return bool(_HOME_REMOTE_AGENT_DIR_RE.fullmatch(value))
+
+
+def normalize_remote_agent_dir(path: str, *, username: str = "") -> str:
+    value = str(path or "").strip()
+    if not value or value == _LEGACY_REMOTE_AGENT_DIR:
+        return remote_agent_dir_default(username)
+    return value
+
+
+def looks_like_ssh_disconnect(detail: str) -> bool:
+    text = str(detail or "").strip().lower()
+    if not text:
+        return False
+    return any(hint in text for hint in _SSH_DISCONNECT_HINTS)
+
+
+def normalize_ssh_error_text(detail: str, *, context: str = "SSH 连接") -> str:
+    text = str(detail or "").strip()
+    lowered = text.lower()
+    if (not text) or ("10054" in lowered) or ("reset by peer" in lowered) or ("forcibly closed by the remote host" in lowered):
+        return f"{context}已被远端重置，请稍后重试。"
+    if ("socket is closed" in lowered) or ("socket closed" in lowered):
+        return f"{context}对应的 socket 已关闭，请重新连接。"
+    if ("transport is closed" in lowered) or ("transport closed" in lowered):
+        return f"{context}传输层已关闭，请重新连接。"
+    if "channel closed" in lowered:
+        return f"{context}通道已关闭，请重新连接。"
+    if "eof during negotiation" in lowered:
+        return f"{context}在握手阶段被远端关闭，请检查服务器 SSH 状态后重试。"
+    return text or f"{context}失败。"
 
 
 def _build_md_css() -> str:

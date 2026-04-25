@@ -43,11 +43,11 @@ COMM_CHANNEL_SPECS = [
         "subtitle": "个人微信扫码登录",
         "script": "wechatapp.py",
         "log_name": "wechatapp.log",
-        "pip": "pycryptodome qrcode requests",
+        "pip": "pycryptodome qrcode requests charset-normalizer",
         "fields": [],
         "required": [],
         "notes": "无需在 mykey.py 填 Key。首次启动会弹二维码完成绑定。",
-        "conflicts_with": ["qq"],
+        "conflicts_with": [],
     },
     {
         "id": "telegram",
@@ -77,8 +77,8 @@ COMM_CHANNEL_SPECS = [
             {"key": "qq_allowed_users", "label": "允许用户", "kind": "list_str", "placeholder": "openid，逗号分隔；可填 *"},
         ],
         "required": ["qq_app_id", "qq_app_secret"],
-        "notes": "QQ 和微信沿用上游同一个单实例锁，不能同时启动。",
-        "conflicts_with": ["wechat"],
+        "notes": "建议按上游最新文档配置开放平台权限与回调。",
+        "conflicts_with": [],
     },
     {
         "id": "feishu",
@@ -119,7 +119,7 @@ COMM_CHANNEL_SPECS = [
         "subtitle": "DingTalk Stream Bot",
         "script": "dingtalkapp.py",
         "log_name": "dingtalkapp.log",
-        "pip": "dingtalk-stream",
+        "pip": "dingtalk-stream>=0.20",
         "fields": [
             {"key": "dingtalk_client_id", "label": "Client ID", "kind": "text", "placeholder": "应用 AppKey"},
             {"key": "dingtalk_client_secret", "label": "Client Secret", "kind": "password", "placeholder": "应用 AppSecret"},

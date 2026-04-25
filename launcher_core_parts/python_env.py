@@ -7,7 +7,6 @@ import re
 import subprocess
 import time
 
-from .constants import CONFIG_PATH
 from .runtime import (
     _bridge_script_path,
     _external_subprocess_env,
@@ -15,6 +14,7 @@ from .runtime import (
     _python_utf8_subprocess_env,
     _resolve_config_path,
     _run_external_subprocess,
+    load_config,
 )
 from .upstream_dependencies import (
     LAUNCHER_BOOTSTRAP_DEPENDENCIES,
@@ -22,8 +22,9 @@ from .upstream_dependencies import (
     UPSTREAM_FRONTEND_DEPENDENCY_GROUPS,
 )
 
-_AUTO_BOOTSTRAP_PACKAGES = ("requests", "simplejson")
+_AUTO_BOOTSTRAP_PACKAGES = ("requests", "simplejson", "charset-normalizer")
 _DEPENDENCY_STATE_FILE = os.path.join("temp", "launcher_dependency_state.json")
+_UV_CMD_CACHE = None
 _PACKAGE_IMPORT_NAME_MAP = {
     "pycryptodome": "Crypto",
     "python-telegram-bot": "telegram",
@@ -37,8 +38,9 @@ def _system_python_commands():
     candidates = []
     cfg_py = None
     try:
-        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-            cfg_py = json.load(f).get("python_exe")
+        cfg = load_config()
+        if isinstance(cfg, dict):
+            cfg_py = cfg.get("python_exe")
     except Exception:
         pass
     if cfg_py:
@@ -263,7 +265,7 @@ def _version_meets_minimum(installed_version, minimum_version):
     return installed >= minimum
 
 
-def _probe_python_dependency(py, spec, *, import_name=""):
+def _probe_python_dependency(py, spec, *, import_name="", strict_version=True):
     name = str(import_name or "").strip() or _package_import_name(spec)
     if not name:
         return False, "无法确定 import 名称", {}
@@ -273,9 +275,15 @@ def _probe_python_dependency(py, spec, *, import_name=""):
     minimum = _minimum_version_from_spec(spec)
     installed = str((payload or {}).get("version") or "").strip()
     if minimum and not installed:
+        if not strict_version:
+            text = (detail or "可导入").strip()
+            return True, f"{text} | 版本未知，跳过最低版本校验（建议 >= {minimum}）", payload
         text = (detail or "可导入").strip()
         return False, f"{text} | 无法识别版本，需要 >= {minimum}", payload
     if minimum and not _version_meets_minimum(installed, minimum):
+        if not strict_version:
+            text = (detail or "可导入").strip()
+            return True, f"{text} | 当前版本可能低于建议值 >= {minimum}", payload
         text = (detail or "可导入").strip()
         return False, f"{text} | 版本过低，需要 >= {minimum}", payload
     return True, detail, payload
@@ -285,10 +293,32 @@ def _core_runtime_packages_ready(py):
     for dep in LAUNCHER_BOOTSTRAP_DEPENDENCIES:
         spec = str(dep.get("package") or "").strip()
         import_name = str(dep.get("import") or "").strip() or _package_import_name(spec)
-        ok, _detail, _payload = _probe_python_dependency(py, spec, import_name=import_name)
+        ok, _detail, _payload = _probe_python_dependency(py, spec, import_name=import_name, strict_version=True)
         if not ok:
             return False
     return True
+
+
+def _core_runtime_packages_import_ready(py):
+    for dep in LAUNCHER_BOOTSTRAP_DEPENDENCIES:
+        spec = str(dep.get("package") or "").strip()
+        import_name = str(dep.get("import") or "").strip() or _package_import_name(spec)
+        ok, _detail, _payload = _probe_python_dependency(py, spec, import_name=import_name, strict_version=False)
+        if not ok:
+            return False
+    return True
+
+
+def _missing_dependency_specs(py, specs, *, strict_version=False):
+    missing = []
+    for spec in specs or []:
+        item = str(spec or "").strip()
+        if not item:
+            continue
+        ok, _detail, _payload = _probe_python_dependency(py, item, strict_version=bool(strict_version))
+        if not ok:
+            missing.append(item)
+    return missing
 
 
 def _should_sync_runtime_dependencies(*, state_matches, extra_packages=None, requirements_path="", force_sync=False):
@@ -327,6 +357,88 @@ def _run_command(cmd, *, timeout=30, cwd=None):
         timeout=timeout,
         cwd=cwd,
     )
+
+
+def _dependency_installer_mode():
+    mode = str(os.environ.get("GA_LAUNCHER_DEP_INSTALLER") or "").strip().lower()
+    if not mode:
+        try:
+            cfg = load_config()
+            if isinstance(cfg, dict):
+                mode = str(cfg.get("dependency_installer") or "").strip().lower()
+        except Exception:
+            mode = ""
+    if mode in ("uv", "pip"):
+        return mode
+    return "auto"
+
+
+def _detect_uv_command():
+    global _UV_CMD_CACHE
+    if _UV_CMD_CACHE is not None:
+        return list(_UV_CMD_CACHE) if _UV_CMD_CACHE else []
+    env_uv = str(os.environ.get("GA_LAUNCHER_UV_EXE") or "").strip()
+    candidates = []
+    if env_uv:
+        candidates.append([env_uv])
+    candidates.append(["uv"])
+    for cmd in candidates:
+        try:
+            r = _run_command([*cmd, "--version"], timeout=10)
+            if r.returncode == 0:
+                _UV_CMD_CACHE = list(cmd)
+                return list(cmd)
+        except Exception:
+            continue
+    _UV_CMD_CACHE = []
+    return []
+
+
+def _dependency_installer_candidates(py, install_args):
+    args = [str(item or "").strip() for item in (install_args or []) if str(item or "").strip()]
+    mode = _dependency_installer_mode()
+    out = []
+    uv_cmd = _detect_uv_command() if mode in ("auto", "uv") else []
+    if uv_cmd:
+        out.append(
+            {
+                "installer": "uv",
+                "cmd": [*uv_cmd, "pip", "install", "--python", str(py or "").strip(), *args],
+            }
+        )
+    elif mode == "uv":
+        out.append({"installer": "uv", "cmd": [], "missing": True})
+    if mode in ("auto", "pip"):
+        out.append({"installer": "pip", "cmd": [str(py or "").strip(), "-m", "pip", "install", *args]})
+    return out, mode
+
+
+def _run_dependency_install(py, install_args, *, timeout, progress=None, stage="install", label="安装依赖"):
+    candidates, mode = _dependency_installer_candidates(py, install_args)
+    errors = []
+    for item in candidates:
+        installer = str(item.get("installer") or "").strip() or "unknown"
+        if item.get("missing"):
+            errors.append("uv: 未找到可用的 uv 命令（可设置 GA_LAUNCHER_UV_EXE 指向 uv.exe）")
+            continue
+        cmd = list(item.get("cmd") or [])
+        if not cmd:
+            continue
+        _emit_dependency_progress(progress, stage, f"{label}（{installer}）")
+        try:
+            result = _run_command(cmd, timeout=timeout)
+        except Exception as e:
+            _emit_dependency_progress(progress, stage, f"{label}（{installer}）异常：{e}", status="warn")
+            errors.append(f"{installer}: {e}")
+            continue
+        if result.returncode == 0:
+            _emit_dependency_progress(progress, stage, f"{label}（{installer}）完成。", status="ok")
+            return True, "", installer
+        _emit_dependency_progress(progress, stage, f"{label}（{installer}）失败，准备尝试下一个安装器…", status="warn")
+        errors.append(f"{installer}: {_short_subprocess_detail(result, f'{label}失败')}")
+    if not errors:
+        return False, f"{label}失败：没有可用安装器（mode={mode}）", ""
+    return False, "；".join(errors), ""
 
 
 def _make_report_item(name, status, detail="", *, optional=False, fixed=False):
@@ -414,47 +526,101 @@ def _probe_python_compile(py, file_path, *, cwd=None):
 
 
 def _bootstrap_python_runtime(py, *, progress=None):
-    _emit_dependency_progress(progress, "ensurepip", f"检查 pip：{py}")
-    try:
-        _run_python_command(py, ["-m", "ensurepip", "--upgrade"], timeout=180)
-    except Exception:
-        pass
-    _emit_dependency_progress(progress, "bootstrap", "正在升级基础依赖 requests / simplejson 到最新版…")
-    try:
-        result = _run_python_command(py, ["-m", "pip", "install", "--upgrade", *_AUTO_BOOTSTRAP_PACKAGES], timeout=600)
-    except Exception as e:
-        return False, str(e)
-    if result.returncode == 0:
+    mode = _dependency_installer_mode()
+    if mode != "uv":
+        _emit_dependency_progress(progress, "ensurepip", f"检查 pip：{py}")
+        try:
+            _run_python_command(py, ["-m", "ensurepip", "--upgrade"], timeout=180)
+        except Exception:
+            pass
+    missing = _missing_dependency_specs(py, list(_AUTO_BOOTSTRAP_PACKAGES), strict_version=False)
+    if not missing:
+        _emit_dependency_progress(progress, "bootstrap", "基础依赖已可用，跳过安装。", status="ok")
         return True, ""
-    return False, _short_subprocess_detail(result, "pip install 失败")
+    _emit_dependency_progress(progress, "bootstrap", "检测到缺失基础依赖，正在补装…")
+    ok, detail, _installer = _run_dependency_install(
+        py,
+        missing,
+        timeout=600,
+        progress=progress,
+        stage="bootstrap_install",
+        label="安装缺失基础依赖",
+    )
+    if ok:
+        return True, ""
+    # 失败后尝试用户级强制修复：不卸载旧包，直接在 user site 覆盖安装。
+    _emit_dependency_progress(progress, "bootstrap_repair", "常规安装失败，尝试用户级修复安装…", status="warn")
+    repaired, repair_detail = _repair_python_packages_user_site(
+        py,
+        missing,
+        progress=progress,
+        label="修复基础依赖",
+    )
+    if repaired:
+        remain = _missing_dependency_specs(py, list(_AUTO_BOOTSTRAP_PACKAGES), strict_version=False)
+        if not remain:
+            _emit_dependency_progress(progress, "bootstrap_repair_ok", "用户级修复安装完成。", status="ok")
+            return True, ""
+    merged_detail = detail or ""
+    if repair_detail:
+        merged_detail = (merged_detail + "；" + repair_detail).strip("；")
+    return False, merged_detail or "基础依赖安装失败"
 
 
 def _install_python_packages(py, packages, *, progress=None, label="安装依赖"):
     items = [str(item or "").strip() for item in (packages or []) if str(item or "").strip()]
     if not items:
         return True, ""
-    _emit_dependency_progress(progress, "pip_install", f"{label}：{' '.join(items)}")
-    try:
-        result = _run_python_command(py, ["-m", "pip", "install", *items], timeout=1800)
-    except Exception as e:
-        return False, str(e)
-    if result.returncode == 0:
+    ok, detail, _installer = _run_dependency_install(
+        py,
+        items,
+        timeout=1800,
+        progress=progress,
+        stage="dep_install",
+        label=f"{label}：{' '.join(items)}",
+    )
+    if ok:
         return True, ""
-    return False, _short_subprocess_detail(result, f"{label}失败")
+    return False, detail or f"{label}失败"
+
+
+def _repair_python_packages_user_site(py, packages, *, progress=None, label="修复依赖"):
+    items = [str(item or "").strip() for item in (packages or []) if str(item or "").strip()]
+    if not items:
+        return True, ""
+    errors = []
+    for spec in items:
+        _emit_dependency_progress(progress, "repair_install", f"{label}：{spec}（pip --user --ignore-installed）")
+        try:
+            result = _run_command(
+                [str(py or "").strip(), "-m", "pip", "install", "--user", "--ignore-installed", spec],
+                timeout=1200,
+            )
+        except Exception as e:
+            errors.append(f"{spec}: {e}")
+            continue
+        if result.returncode != 0:
+            errors.append(f"{spec}: {_short_subprocess_detail(result, '修复安装失败')}")
+    if errors:
+        return False, "；".join(errors)
+    return True, ""
 
 
 def _install_python_requirements(py, requirements_path, *, progress=None):
     req_path = str(requirements_path or "").strip()
     if not req_path:
         return True, ""
-    _emit_dependency_progress(progress, "pip_requirements", f"正在同步 GenericAgent requirements.txt：{req_path}")
-    try:
-        result = _run_python_command(py, ["-m", "pip", "install", "-r", req_path], timeout=1800)
-    except Exception as e:
-        return False, str(e)
-    if result.returncode == 0:
+    ok, detail, _installer = _run_dependency_install(
+        py,
+        ["-r", req_path],
+        timeout=1800,
+        progress=progress,
+        stage="requirements_install",
+        label=f"正在同步 GenericAgent requirements.txt：{req_path}",
+    )
+    if ok:
         return True, ""
-    return False, _short_subprocess_detail(result, "requirements 安装失败")
+    return False, detail or "requirements 安装失败"
 
 
 def _probe_python_agent_compat(py, agent_dir):
@@ -507,6 +673,7 @@ def _prepare_python_runtime_candidate(info, agent_dir, *, extra_packages=None, p
     req_path = _agent_requirements_path(agent_dir)
     state_matches = _dependency_state_matches(agent_dir, py, extra_packages=extra_packages)
     core_ready = _core_runtime_packages_ready(py)
+    core_import_ready = _core_runtime_packages_import_ready(py)
 
     _emit_dependency_progress(progress, "candidate", f"检查解释器：{label}")
     ok, detail = _probe_python_agent_compat(py, agent_dir)
@@ -519,7 +686,12 @@ def _prepare_python_runtime_candidate(info, agent_dir, *, extra_packages=None, p
         requirements_path=req_path,
         force_sync=force_sync,
     )
-    if not core_ready:
+    missing_extra = _missing_dependency_specs(py, extra_packages, strict_version=False)
+    if (not missing_extra) and ok and core_import_ready and (not force_sync):
+        need_sync = False
+    if (not core_ready) and (not core_import_ready):
+        need_sync = True
+    if missing_extra:
         need_sync = True
     if (not ok) and req_path:
         need_sync = True
@@ -541,8 +713,8 @@ def _prepare_python_runtime_candidate(info, agent_dir, *, extra_packages=None, p
             if not req_ok:
                 return False, req_detail, meta
             meta["requirements_synced"] = True
-        if extra_packages:
-            extra_ok, extra_detail = _install_python_packages(py, extra_packages, progress=progress, label="安装渠道依赖")
+        if missing_extra:
+            extra_ok, extra_detail = _install_python_packages(py, missing_extra, progress=progress, label="安装渠道依赖")
             if not extra_ok:
                 return False, extra_detail, meta
             meta["extra_synced"] = True
@@ -647,6 +819,23 @@ def _build_dependency_report(agent_dir, py, *, candidate_meta=None, failures=Non
         git_item["optional"] = True
         git_item["detail"] = (git_item.get("detail") or "") + "（仅下载/更新仓库时需要）"
     system_items.append(git_item)
+    installer_mode = _dependency_installer_mode()
+    uv_cmd = _detect_uv_command() if installer_mode in ("auto", "uv") else []
+    system_items.append(_make_report_item("依赖安装器策略", "info", f"{installer_mode}（auto=优先 uv，失败回退 pip）", optional=True))
+    if uv_cmd:
+        uv_item = _probe_command_version([*uv_cmd, "--version"], "uv")
+        uv_item["optional"] = True
+        system_items.append(uv_item)
+    elif installer_mode == "uv":
+        system_items.append(
+            _make_report_item(
+                "uv",
+                "error",
+                "策略为 uv，但未找到 uv 命令。可安装 uv 或设置环境变量 GA_LAUNCHER_UV_EXE。",
+            )
+        )
+    else:
+        system_items.append(_make_report_item("uv", "info", "未检测到 uv，将使用 pip 安装依赖。", optional=True))
     if py:
         try:
             py_ver = _run_python_command(py, ["-c", "import sys;print(sys.version.split()[0])"], timeout=15)

@@ -1,0 +1,123 @@
+name: release-installer
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g. 1.2.3)"
+        required: true
+        type: string
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: ver
+        shell: pwsh
+        run: |
+          $v = "${{ github.event.inputs.version }}"
+          if (-not $v) {
+            $ref = "${{ github.ref_name }}"
+            if ($ref.StartsWith("v")) { $v = $ref.Substring(1) } else { $v = $ref }
+          }
+          if (-not $v) { throw "Unable to resolve release version" }
+          "value=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pyinstaller
+
+      - name: Build app/bootstrap/updater
+        shell: pwsh
+        run: |
+          python -m PyInstaller --clean --noconfirm GenericAgentLauncher.spec
+          python -m PyInstaller --clean --noconfirm LauncherBootstrap.spec
+          python -m PyInstaller --clean --noconfirm Updater.spec
+
+      - name: Validate signing secrets
+        shell: pwsh
+        env:
+          GA_LAUNCHER_UPDATE_PRIVATE_KEY_PEM: ${{ secrets.UPDATE_SIGNING_PRIVATE_KEY_PEM }}
+          GA_LAUNCHER_UPDATE_PUBLIC_KEY_PEM: ${{ secrets.UPDATE_SIGNING_PUBLIC_KEY_PEM }}
+        run: |
+          if (-not $env:GA_LAUNCHER_UPDATE_PRIVATE_KEY_PEM) {
+            throw "Missing secret: UPDATE_SIGNING_PRIVATE_KEY_PEM"
+          }
+          if (-not $env:GA_LAUNCHER_UPDATE_PUBLIC_KEY_PEM) {
+            throw "Missing secret: UPDATE_SIGNING_PUBLIC_KEY_PEM"
+          }
+
+      - name: Build release bundle
+        shell: pwsh
+        env:
+          GA_LAUNCHER_UPDATE_PRIVATE_KEY_PEM: ${{ secrets.UPDATE_SIGNING_PRIVATE_KEY_PEM }}
+          GA_LAUNCHER_UPDATE_PUBLIC_KEY_PEM: ${{ secrets.UPDATE_SIGNING_PUBLIC_KEY_PEM }}
+        run: |
+          python tools/build_release_bundle.py --version "${{ steps.ver.outputs.value }}" --out release
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup -y --no-progress
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          iscc /DMyVersion="${{ steps.ver.outputs.value }}" installer\GenericAgentLauncher.iss
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: launcher-release-${{ steps.ver.outputs.value }}
+          path: |
+            release/${{ steps.ver.outputs.value }}/**
+
+      - name: Publish GitHub release assets
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $v = "${{ steps.ver.outputs.value }}"
+          $tag = "v$v"
+          $required = @(
+            "release/$v/update/manifest.json",
+            "release/$v/update/manifest.sig",
+            "release/$v/update/sha256sums.txt",
+            "release/$v/update/GenericAgentLauncher-app-$v.zip"
+          )
+          foreach ($p in $required) {
+            if (-not (Test-Path $p)) { throw "Missing release asset: $p" }
+          }
+          $installer = Get-ChildItem "release/$v/installer/*.exe" | Select-Object -First 1
+          if (-not $installer) { throw "Installer exe not found" }
+          gh release view $tag | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --title "GenericAgent Launcher $tag" --notes "Automated release for $tag"
+            if ($LASTEXITCODE -ne 0) { throw "Failed to create GitHub release: $tag" }
+          }
+          gh release upload $tag `
+            "release/$v/update/manifest.json" `
+            "release/$v/update/manifest.sig" `
+            "release/$v/update/sha256sums.txt" `
+            "release/$v/update/GenericAgentLauncher-app-$v.zip" `
+            "$($installer.FullName)" `
+            --clobber

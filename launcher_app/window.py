@@ -16,7 +16,7 @@ import ctypes
 from ctypes import byref, c_int
 from datetime import datetime
 
-from PySide6.QtCore import QByteArray, QEvent, QPoint, QRect, QRectF, QSize, Qt, QTimer, qInstallMessageHandler
+from PySide6.QtCore import QByteArray, QEvent, QMetaObject, QPoint, QRect, QRectF, QSize, Qt, QTimer, qInstallMessageHandler
 from PySide6.QtGui import QColor, QCursor, QIcon, QKeyEvent, QPainter, QPainterPath, QPixmap, QRegion, QTextCursor
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -1043,13 +1043,16 @@ class FloatingChatWindow(QWidget):
 class QtChatWindow(ApiEditorMixin, ChannelRuntimeMixin, DependencyRuntimeMixin, ScheduleRuntimeMixin, PersonalUsageMixin, WindowShellMixin, BridgeRuntimeMixin, SessionShellMixin, NavigationMixin, ChatViewMixin, SetupPagesMixin, SettingsPanelMixin, DownloadMixin, SidebarSessionsMixin, QMainWindow):
     def __init__(self, agent_dir: str | None = None):
         super().__init__()
-        self.cfg = lz.load_config() if isinstance(lz.load_config(), dict) else {}
+        loaded_cfg = lz.load_config()
+        self.cfg = loaded_cfg if isinstance(loaded_cfg, dict) else {}
         initial_dir = str(agent_dir or self.cfg.get("agent_dir") or "").strip()
         self.agent_dir = os.path.abspath(initial_dir) if initial_dir else ""
         self.install_parent = str(self.cfg.get("install_parent") or os.path.expanduser("~")).strip() or os.path.expanduser("~")
         self.sidebar_collapsed = bool(self.cfg.get("sidebar_collapsed", False))
         self._session_filter_keyword = ""
-        self._sidebar_view_mode = "channels"
+        self._sidebar_view_mode = "roots"
+        self._sidebar_device_scope = "local"
+        self._sidebar_device_id = "local"
         self._sidebar_channel_id = "launcher"
         self._download_running = False
         self._download_mode = ""
@@ -1065,6 +1068,9 @@ class QtChatWindow(ApiEditorMixin, ChannelRuntimeMixin, DependencyRuntimeMixin, 
         self._channel_snapshot_timer = QTimer(self)
         self._channel_snapshot_timer.timeout.connect(self._sync_all_channel_process_sessions)
         self._channel_snapshot_timer.start(2000)
+        self._server_status_timer = QTimer(self)
+        self._server_status_timer.timeout.connect(self._request_server_connection_probe)
+        self._server_status_timer.start(15000)
 
         self._stream_flush_timer = QTimer(self)
         self._stream_flush_timer.setSingleShot(True)
@@ -1129,22 +1135,354 @@ class QtChatWindow(ApiEditorMixin, ChannelRuntimeMixin, DependencyRuntimeMixin, 
         self._scheduler_proc = None
         self._scheduler_log_handle = None
         self._scheduler_last_exit_code = None
+        self._lan_interface_proc = None
+        self._lan_interface_log_handle = None
+        self._lan_interface_last_exit_code = None
         self._last_session_list_signature = None
+        self._session_index_warmup_started = False
+        self._server_status_state = "unconfigured"
+        self._server_status_detail = ""
+        self._server_status_host = ""
+        self._server_status_checked_at = 0.0
+        self._server_status_probe_running = False
+        self._server_status_probe_pending = False
+        self._shutdown_cleanup_started = False
+        self._app_quit_requested = False
 
         self.setWindowTitle("GenericAgent 启动器")
         self.resize(1440, 920)
         self.setMinimumSize(1100, 700)
+        app = QApplication.instance()
+        if app is not None:
+            try:
+                app.installEventFilter(self)
+            except Exception:
+                pass
+            try:
+                app.aboutToQuit.connect(self._on_app_about_to_quit)
+            except Exception:
+                pass
         self._build_shell()
+        self._schedule_session_index_warmup()
         self._refresh_welcome_state()
         self._show_welcome()
+        startup_channel_starter = getattr(self, "_schedule_local_channel_autostart", None)
+        if callable(startup_channel_starter):
+            try:
+                startup_channel_starter()
+            except Exception:
+                pass
+        startup_lan_starter = getattr(self, "_schedule_lan_interface_autostart", None)
+        if callable(startup_lan_starter):
+            try:
+                startup_lan_starter()
+            except Exception:
+                pass
         startup_update_checker = getattr(self, "_schedule_startup_update_check", None)
         if callable(startup_update_checker):
             try:
                 startup_update_checker()
             except Exception:
                 pass
+        QTimer.singleShot(1800, self, self._startup_server_connection_probe)
+
+    def _startup_server_connection_probe(self):
+        if bool(getattr(self, "_closing_in_progress", False)):
+            return
+        try:
+            self._request_server_connection_probe(force=True)
+        except Exception:
+            pass
+
+    def _begin_window_trace(self, context: str, *, duration_ms: int = 2600, suppress_blank_dialogs: bool = False):
+        duration = max(200, int(duration_ms or 2600))
+        self._window_trace_context = str(context or "").strip()
+        self._window_trace_until = time.time() + (duration / 1000.0)
+        self._window_trace_suppress_blank_dialogs = bool(suppress_blank_dialogs)
+
+    def _window_trace_active(self) -> bool:
+        until = float(getattr(self, "_window_trace_until", 0.0) or 0.0)
+        return until > 0 and time.time() <= until
+
+    def _append_window_trace_log(self, line: str):
+        text = str(line or "").strip()
+        if not text:
+            return
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            path = lz.launcher_data_path("ui_window_trace.log")
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(f"[{stamp}] {text}\n")
+        except Exception:
+            pass
+
+    def _request_app_quit(self):
+        if bool(getattr(self, "_app_quit_requested", False)):
+            return
+        self._app_quit_requested = True
+        app = QApplication.instance()
+        if app is None:
+            return
+        try:
+            QMetaObject.invokeMethod(app, "quit", Qt.QueuedConnection)
+            return
+        except Exception:
+            pass
+        try:
+            QTimer.singleShot(0, app, app.quit)
+            return
+        except Exception:
+            pass
+        try:
+            app.quit()
+        except Exception:
+            pass
+
+    def _start_shutdown_cleanup(self):
+        self._stop_background_activity_for_shutdown()
+        self._close_tray_helpers()
+        shutdown_items = self._detach_processes_for_shutdown()
+        self._clear_attachments_for_shutdown_fast()
+        if bool(getattr(self, "_shutdown_cleanup_started", False)):
+            return
+        self._shutdown_cleanup_started = True
+        if not shutdown_items:
+            self._request_app_quit()
+            return
+        threading.Thread(
+            target=self._run_shutdown_process_cleanup,
+            args=(shutdown_items,),
+            name="launcher-shutdown-cleanup",
+            daemon=False,
+        ).start()
+
+    def _on_app_about_to_quit(self):
+        if bool(getattr(self, "_shutdown_cleanup_started", False)):
+            return
+        self._closing_in_progress = True
+        self._force_exit_requested = True
+        self._start_shutdown_cleanup()
+
+    def _stop_background_activity_for_shutdown(self):
+        for attr in ("_drain_timer", "_channel_snapshot_timer", "_server_status_timer", "_stream_flush_timer"):
+            timer = getattr(self, attr, None)
+            if timer is None:
+                continue
+            try:
+                timer.stop()
+            except Exception:
+                pass
+        self._server_status_probe_running = False
+        self._server_status_probe_pending = False
+        self._qt_api_remote_loading = False
+        self._qt_channel_remote_loading = False
+        self._settings_personal_remote_sync_running = False
+        self._settings_usage_remote_sync_running = False
+        self._remote_channel_sync_running = False
+        self._remote_launcher_sync_running = False
+        disconnect_terminal = getattr(self, "_disconnect_vps_terminal", None)
+        if callable(disconnect_terminal):
+            try:
+                disconnect_terminal(reason="启动器正在关闭。")
+            except Exception:
+                pass
+
+    def _clear_attachments_for_shutdown_fast(self):
+        pending = list(getattr(self, "_pending_input_attachments_data", []) or [])
+        active = list(getattr(self, "_active_turn_attachments_data", []) or [])
+        self._pending_input_attachments_data = []
+        self._active_turn_attachments_data = []
+        releaser = getattr(self, "_release_attachment_files", None)
+        if callable(releaser):
+            try:
+                releaser(pending + active)
+            except Exception:
+                pass
+
+    def _append_shutdown_process(self, items, name: str, proc, log_handle=None, *, quit_line: str = ""):
+        if log_handle is not None:
+            try:
+                log_handle.flush()
+            except Exception:
+                pass
+        if proc is None:
+            if log_handle is not None:
+                try:
+                    log_handle.close()
+                except Exception:
+                    pass
+            return
+        if quit_line:
+            try:
+                if proc.poll() is None and getattr(proc, "stdin", None) is not None:
+                    proc.stdin.write(quit_line)
+                    proc.stdin.flush()
+            except Exception:
+                pass
+        items.append({"name": str(name or "process"), "proc": proc, "log_handle": log_handle})
+
+    def _detach_processes_for_shutdown(self):
+        items = []
+        bridge_proc = getattr(self, "bridge_proc", None)
+        self.bridge_proc = None
+        self._bridge_ready = False
+        self._append_shutdown_process(items, "bridge", bridge_proc, quit_line='{"cmd":"quit"}\n')
+
+        channel_map = dict(getattr(self, "_channel_procs", {}) or {})
+        self._channel_procs = {}
+        for channel_id, info in channel_map.items():
+            data = info if isinstance(info, dict) else {}
+            self._append_shutdown_process(
+                items,
+                f"channel:{channel_id}",
+                data.get("proc"),
+                data.get("log_handle"),
+            )
+            data["log_handle"] = None
+
+        scheduler_proc = getattr(self, "_scheduler_proc", None)
+        scheduler_handle = getattr(self, "_scheduler_log_handle", None)
+        self._scheduler_proc = None
+        self._scheduler_log_handle = None
+        self._append_shutdown_process(items, "scheduler", scheduler_proc, scheduler_handle)
+
+        lan_proc = getattr(self, "_lan_interface_proc", None)
+        lan_handle = getattr(self, "_lan_interface_log_handle", None)
+        self._lan_interface_proc = None
+        self._lan_interface_log_handle = None
+        self._append_shutdown_process(items, "lan-interface", lan_proc, lan_handle)
+        return items
+
+    def _run_shutdown_process_cleanup(self, items):
+        records = [item for item in (items or []) if isinstance(item, dict)]
+        for item in records:
+            proc = item.get("proc")
+            if proc is None:
+                continue
+            try:
+                lz.terminate_process_tree(proc, terminate_timeout=1.4, kill_timeout=1.4)
+            except Exception:
+                pass
+        for item in records:
+            proc = item.get("proc")
+            handle = item.get("log_handle")
+            if handle is not None:
+                try:
+                    handle.close()
+                except Exception:
+                    pass
+        self._request_app_quit()
+
+    def eventFilter(self, watched, event):
+        if event is not None:
+            try:
+                et = event.type()
+            except Exception:
+                et = None
+            if et in (QEvent.Show, QEvent.ShowToParent) and bool(getattr(self, "_closing_in_progress", False)):
+                widget = watched if isinstance(watched, QWidget) else None
+                if widget is not None:
+                    try:
+                        is_window = bool(widget.isWindow())
+                    except Exception:
+                        is_window = False
+                    if is_window and (isinstance(widget, QMessageBox) or (isinstance(widget, QDialog) and (not str(widget.windowTitle() or "").strip()))):
+                        try:
+                            cls_name = str(widget.metaObject().className() or widget.__class__.__name__ or "").strip()
+                        except Exception:
+                            cls_name = widget.__class__.__name__
+                        self._append_window_trace_log(f"context=shutdown suppressed_dialog class={cls_name or '-'}")
+                        QTimer.singleShot(0, lambda w=widget: (w.hide(), getattr(w, "reject", lambda: None)(), w.deleteLater()))
+                        return True
+            if et in (QEvent.Show, QEvent.ShowToParent) and self._window_trace_active():
+                widget = watched if isinstance(watched, QWidget) else None
+                if widget is not None:
+                    try:
+                        is_window = bool(widget.isWindow())
+                    except Exception:
+                        is_window = False
+                    if is_window:
+                        title = str(widget.windowTitle() or "").strip()
+                        object_name = str(widget.objectName() or "").strip()
+                        cls_name = str(widget.metaObject().className() or widget.__class__.__name__ or "").strip()
+                        context = str(getattr(self, "_window_trace_context", "") or "").strip()
+                        focus_widget = None
+                        try:
+                            focus_widget = QApplication.focusWidget()
+                        except Exception:
+                            focus_widget = None
+                        focus_cls = ""
+                        focus_name = ""
+                        if focus_widget is not None:
+                            try:
+                                focus_cls = str(focus_widget.metaObject().className() or focus_widget.__class__.__name__ or "").strip()
+                            except Exception:
+                                focus_cls = ""
+                            try:
+                                focus_name = str(focus_widget.objectName() or "").strip()
+                            except Exception:
+                                focus_name = ""
+                        combo_owner_name = ""
+                        combo_owner = focus_widget
+                        while combo_owner is not None:
+                            try:
+                                if isinstance(combo_owner, QComboBox):
+                                    combo_owner_name = str(combo_owner.objectName() or "").strip()
+                                    break
+                            except Exception:
+                                pass
+                            try:
+                                combo_owner = combo_owner.parentWidget()
+                            except Exception:
+                                combo_owner = None
+                        watched_combo_owner = watched if isinstance(watched, QWidget) else None
+                        watched_combo_name = ""
+                        while watched_combo_owner is not None:
+                            try:
+                                if isinstance(watched_combo_owner, QComboBox):
+                                    watched_combo_name = str(watched_combo_owner.objectName() or "").strip()
+                                    break
+                            except Exception:
+                                pass
+                            try:
+                                watched_combo_owner = watched_combo_owner.parentWidget()
+                            except Exception:
+                                watched_combo_owner = None
+                        self._append_window_trace_log(
+                            f"context={context or '-'} class={cls_name or '-'} object={object_name or '-'} title={title or '-'} focus={focus_cls or '-'} focus_object={focus_name or '-'} focus_combo={combo_owner_name or '-'} watched_combo={watched_combo_name or '-'}"
+                        )
+                        if (
+                            bool(getattr(self, "_window_trace_suppress_blank_dialogs", False))
+                            and isinstance(widget, QDialog)
+                            and (not title)
+                            and cls_name in ("QDialog", "QMessageBox")
+                        ):
+                            self._append_window_trace_log(
+                                f"context={context or '-'} suppressed_blank_dialog class={cls_name or '-'} object={object_name or '-'}"
+                            )
+                            self._set_status(f"已抑制远端渠道页空白弹窗：{cls_name or 'QDialog'}")
+                            QTimer.singleShot(0, lambda w=widget: (w.hide(), w.reject()))
+                            return True
+        return super().eventFilter(watched, event)
 
     AUTO_TASK_TEXT = "[AUTO]🤖 用户已经离开超过30分钟，作为自主智能体，请阅读自动化sop，执行自动任务。"
+    def _schedule_session_index_warmup(self):
+        if self._session_index_warmup_started:
+            return
+        if not lz.is_valid_agent_dir(self.agent_dir):
+            return
+        self._session_index_warmup_started = True
+        target_dir = str(self.agent_dir or "")
+
+        def _worker():
+            try:
+                lz.list_sessions(target_dir)
+            except Exception:
+                pass
+
+        threading.Thread(target=_worker, daemon=True).start()
+
     def _clear_layout(self, layout) -> None:
         while layout.count():
             item = layout.takeAt(0)
@@ -1191,6 +1529,13 @@ class QtChatWindow(ApiEditorMixin, ChannelRuntimeMixin, DependencyRuntimeMixin, 
         self.mode_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         head_layout.addWidget(self.chat_title, 0, Qt.AlignVCenter)
         head_layout.addStretch(1)
+        self.server_status_btn = QPushButton("●")
+        self.server_status_btn.setCursor(Qt.PointingHandCursor)
+        self.server_status_btn.setFixedSize(36, 32)
+        self.server_status_btn.installEventFilter(self)
+        self.server_status_btn.clicked.connect(self._on_server_status_clicked)
+        head_layout.addWidget(self.server_status_btn, 0, Qt.AlignRight | Qt.AlignVCenter)
+        self._refresh_server_status_indicator()
         self.theme_btn = QPushButton("☀")
         self.theme_btn.setCursor(Qt.PointingHandCursor)
         self.theme_btn.setFixedSize(36, 32)
@@ -1526,25 +1871,18 @@ class QtChatWindow(ApiEditorMixin, ChannelRuntimeMixin, DependencyRuntimeMixin, 
             sid = str(meta.get("id") or "")
             if not sid:
                 continue
-            data = None
-            if sid == current_sid and isinstance(self.current_session, dict):
-                data = self.current_session
-            else:
-                try:
-                    data = lz.load_session(self.agent_dir, sid)
-                except Exception:
-                    data = None
-            if not isinstance(data, dict):
-                continue
+            current_data = self.current_session if (sid == current_sid and isinstance(self.current_session, dict)) else {}
             rows.append(
                 {
                     "id": sid,
-                    "title": str(data.get("title") or meta.get("title") or "(未命名)").strip() or "(未命名)",
+                    "title": str((current_data or {}).get("title") or meta.get("title") or "(未命名)").strip() or "(未命名)",
                     "channel_label": str(
-                        data.get("channel_label") or lz._usage_channel_label(data.get("channel_id") or "launcher")
+                        (current_data or {}).get("channel_label")
+                        or meta.get("channel_label")
+                        or lz._usage_channel_label((current_data or {}).get("channel_id") or meta.get("channel_id") or "launcher")
                     ).strip(),
-                    "updated_at": float(data.get("updated_at", meta.get("updated_at", 0)) or 0),
-                    "pinned": bool(data.get("pinned", False)),
+                    "updated_at": float((current_data or {}).get("updated_at", meta.get("updated_at", 0)) or 0),
+                    "pinned": bool((current_data or {}).get("pinned", meta.get("pinned", False))),
                 }
             )
         rows.sort(key=lambda row: (bool(row.get("pinned", False)), float(row.get("updated_at", 0) or 0)), reverse=True)
@@ -1867,9 +2205,6 @@ class QtChatWindow(ApiEditorMixin, ChannelRuntimeMixin, DependencyRuntimeMixin, 
         self._force_exit_requested = True
         self._tray_mode_active = False
         self.close()
-        app = QApplication.instance()
-        if app is not None:
-            QTimer.singleShot(0, app.quit)
 
     def closeEvent(self, event):
         if bool(getattr(self, "_closing_in_progress", False)):
@@ -1877,19 +2212,12 @@ class QtChatWindow(ApiEditorMixin, ChannelRuntimeMixin, DependencyRuntimeMixin, 
             return
         self._closing_in_progress = True
         self._force_exit_requested = True
-        self._close_tray_helpers()
-        self._stop_bridge()
-        self._stop_all_managed_channels(refresh=False)
-        self._stop_scheduler_process(refresh=False)
-        self._clear_pending_input_attachments(delete_owned=True)
-        self._clear_active_turn_attachments()
         try:
-            super().closeEvent(event)
-        finally:
-            event.accept()
-            app = QApplication.instance()
-            if app is not None:
-                QTimer.singleShot(0, app.quit)
+            self.hide()
+        except Exception:
+            pass
+        event.accept()
+        self._start_shutdown_cleanup()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -1904,7 +2232,8 @@ def main(agent_dir: str | None = None) -> int:
     target = agent_dir if agent_dir is not None else (sys.argv[1] if len(sys.argv) > 1 else None)
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName("GenericAgent Launcher")
-    cfg = lz.load_config() if isinstance(lz.load_config(), dict) else {}
+    loaded_cfg = lz.load_config()
+    cfg = loaded_cfg if isinstance(loaded_cfg, dict) else {}
     mode = "light" if str(cfg.get("appearance_mode", "light") or "").strip().lower() == "light" else "dark"
     qt_theme.set_theme(mode)
     qt_theme.configure_visual_preferences(cfg)

@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QStackedWidget,
     QTextBrowser,
+    QToolTip,
     QVBoxLayout,
     QWidget,
 )
@@ -44,6 +45,189 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: none;
 
 
 class WindowShellMixin:
+    def _server_probe_auto_ssh_enabled(self, device):
+        checker = getattr(self, "_remote_device_auto_ssh_enabled", None)
+        if callable(checker):
+            try:
+                return bool(checker(device))
+            except Exception:
+                pass
+        item = device if isinstance(device, dict) else {}
+        value = item.get("auto_ssh", True)
+        if isinstance(value, bool):
+            return value
+        text = str(value).strip().lower()
+        if not text:
+            return True
+        return text not in ("0", "false", "no", "off", "disable", "disabled", "关", "关闭", "否")
+
+    def _server_probe_target_device(self):
+        ctx_getter = getattr(self, "_settings_target_context", None)
+        if callable(ctx_getter):
+            try:
+                ctx = ctx_getter() or {}
+            except Exception:
+                ctx = {}
+            if bool(ctx.get("is_remote")) and isinstance(ctx.get("device"), dict):
+                device = dict(ctx.get("device") or {})
+                return device if self._server_probe_auto_ssh_enabled(device) else None
+        rows_getter = getattr(self, "_settings_remote_devices_for_config", None)
+        if callable(rows_getter):
+            try:
+                rows = [dict(item) for item in (rows_getter() or []) if isinstance(item, dict)]
+            except Exception:
+                rows = []
+            for row in rows:
+                if self._server_probe_auto_ssh_enabled(row):
+                    return row
+        return None
+
+    def _set_server_status_state(self, state: str, detail: str = "", *, host: str = ""):
+        text = str(state or "unconfigured").strip().lower()
+        if text not in ("ok", "error", "checking", "unconfigured"):
+            text = "unconfigured"
+        self._server_status_state = text
+        self._server_status_detail = str(detail or "").strip()
+        self._server_status_host = str(host or "").strip()
+        if text in ("ok", "error"):
+            self._server_status_checked_at = float(time.time())
+        self._refresh_server_status_indicator()
+
+    def _server_status_tooltip(self):
+        state = str(getattr(self, "_server_status_state", "unconfigured") or "unconfigured").strip().lower()
+        detail = str(getattr(self, "_server_status_detail", "") or "").strip()
+        host = str(getattr(self, "_server_status_host", "") or "").strip()
+        checked_at = float(getattr(self, "_server_status_checked_at", 0.0) or 0.0)
+        if state == "ok":
+            title = "服务器连接：已连接"
+        elif state == "error":
+            title = "服务器连接：不可达"
+        elif state == "checking":
+            title = "服务器连接：检测中"
+        else:
+            title = "服务器连接：未配置"
+        lines = [title]
+        if host:
+            lines.append(f"目标：{host}")
+        if detail:
+            lines.append(detail)
+        if checked_at > 0:
+            lines.append("检测时间：" + time.strftime("%H:%M:%S", time.localtime(checked_at)))
+        return "\n".join(lines)
+
+    def _show_server_status_tooltip(self):
+        btn = getattr(self, "server_status_btn", None)
+        if btn is None:
+            return
+        QToolTip.showText(
+            btn.mapToGlobal(btn.rect().bottomLeft()),
+            self._server_status_tooltip(),
+            btn,
+        )
+
+    def _hide_server_status_tooltip(self):
+        QToolTip.hideText()
+
+    def _refresh_server_status_indicator(self):
+        btn = getattr(self, "server_status_btn", None)
+        if btn is None:
+            return
+        state = str(getattr(self, "_server_status_state", "unconfigured") or "unconfigured").strip().lower()
+        color = C["muted"]
+        if state == "ok":
+            color = "#22c55e"
+        elif state == "error":
+            color = C["danger_text"]
+        elif state == "checking":
+            color = "#f59e0b"
+        btn.setText("●")
+        btn.setToolTip(self._server_status_tooltip())
+        btn.setToolTipDuration(15000)
+        btn.setStyleSheet(
+            self._sidebar_button_style() +
+            f"QPushButton {{ color: {color}; font-size: 16px; font-weight: 700; }}"
+            f"QPushButton:disabled {{ color: {C['muted']}; }}"
+        )
+        refresher = getattr(self, "_refresh_floating_chat_window", None)
+        if callable(refresher):
+            refresher()
+
+    def _request_server_connection_probe(self, *, force=False):
+        if bool(getattr(self, "_server_status_probe_running", False)):
+            if force:
+                self._server_status_probe_pending = True
+            return
+        device = self._server_probe_target_device()
+        if not isinstance(device, dict):
+            self._set_server_status_state("unconfigured", "未检测到可用服务器配置，或目标设备已关闭自动 SSH。")
+            return
+        host = str(device.get("host") or "").strip()
+        self._server_status_probe_running = True
+        self._set_server_status_state("checking", "正在检测 SSH 可达性…", host=host)
+
+        def worker():
+            status = "error"
+            detail = ""
+            client = None
+            try:
+                opener = getattr(self, "_settings_target_open_remote_client", None)
+                if callable(opener):
+                    client, msg = opener(device, timeout=6)
+                    if client is None:
+                        detail = str(msg or "SSH 连接失败。")
+                    else:
+                        exec_remote = getattr(self, "_vps_exec_remote", None)
+                        if callable(exec_remote):
+                            rc, out, err = exec_remote(client, "echo GA_LAUNCHER_PING", timeout=8)
+                            text = str(out or err or "").strip()
+                            if rc == 0 and "GA_LAUNCHER_PING" in text:
+                                status = "ok"
+                                detail = "SSH 握手正常，可进行远端配置与会话同步。"
+                            else:
+                                detail = str(text or "服务器命令执行失败。")
+                        else:
+                            status = "ok"
+                            detail = "SSH 握手正常。"
+                else:
+                    detail = "当前构建缺少远端连接能力。"
+            except Exception as e:
+                detail = str(e)
+            finally:
+                try:
+                    if client is not None:
+                        client.close()
+                except Exception:
+                    pass
+
+            def done():
+                self._server_status_probe_running = False
+                self._set_server_status_state(status, detail, host=host)
+                pending = bool(getattr(self, "_server_status_probe_pending", False))
+                self._server_status_probe_pending = False
+                if pending:
+                    self._request_server_connection_probe(force=True)
+
+            poster = getattr(self, "_api_on_ui_thread", None)
+            if callable(poster):
+                try:
+                    poster(done)
+                    return
+                except Exception:
+                    pass
+            app = QApplication.instance()
+            try:
+                if app is not None:
+                    QTimer.singleShot(0, app, done)
+                else:
+                    QTimer.singleShot(0, done)
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, name="server-status-probe", daemon=True).start()
+
+    def _on_server_status_clicked(self):
+        self._request_server_connection_probe(force=True)
+
     def _jump_latest_button_style(self) -> str:
         return (
             f"QPushButton {{ background: {C['panel']}; color: {C['text']}; border: 1px solid {C['stroke_default']}; "
@@ -78,9 +262,9 @@ class WindowShellMixin:
         self.setCentralWidget(self.pages)
         self._welcome_page = self._build_welcome_page()
         self._locate_page = self._build_locate_page()
-        self._download_page = self._build_download_page()
+        self._download_page = self._build_lazy_page_placeholder("下载页准备中…")
         self._chat_page = self._build_ui()
-        self._settings_page = self._build_settings_page()
+        self._settings_page = self._build_lazy_page_placeholder("设置页准备中…")
         self.pages.addWidget(self._welcome_page)
         self.pages.addWidget(self._locate_page)
         self.pages.addWidget(self._download_page)
@@ -89,6 +273,52 @@ class WindowShellMixin:
         if lz.is_valid_agent_dir(self.agent_dir):
             self._refresh_sessions()
         self._reset_chat_area("选择一个会话，或新建会话开始聊天。")
+
+    def _build_lazy_page_placeholder(self, text: str) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(32, 32, 32, 32)
+        layout.addStretch(1)
+        label = QLabel(str(text or "页面准备中…"))
+        label.setObjectName("mutedText")
+        label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(label)
+        layout.addStretch(1)
+        return page
+
+    def _replace_lazy_page(self, attr_name: str, builder):
+        if self.pages is None or not callable(builder):
+            return None
+        current = getattr(self, attr_name, None)
+        index = self.pages.indexOf(current) if current is not None else -1
+        page = builder()
+        if index >= 0:
+            self.pages.removeWidget(current)
+            self.pages.insertWidget(index, page)
+            try:
+                current.deleteLater()
+            except Exception:
+                pass
+        else:
+            self.pages.addWidget(page)
+        setattr(self, attr_name, page)
+        return page
+
+    def _ensure_download_page_built(self):
+        if getattr(self, "_download_page_built", False):
+            return getattr(self, "_download_page", None)
+        page = self._replace_lazy_page("_download_page", self._build_download_page)
+        if page is not None:
+            self._download_page_built = True
+        return page
+
+    def _ensure_settings_page_built(self):
+        if getattr(self, "_settings_page_built", False):
+            return getattr(self, "_settings_page", None)
+        page = self._replace_lazy_page("_settings_page", self._build_settings_page)
+        if page is not None:
+            self._settings_page_built = True
+        return page
 
     def _panel_card(self) -> QFrame:
         card = QFrame()
@@ -209,6 +439,9 @@ class WindowShellMixin:
             pass
         apply_mica(self, dark=(normalized == "dark"))
         self._refresh_theme_button()
+        refresh_server_status = getattr(self, "_refresh_server_status_indicator", None)
+        if callable(refresh_server_status):
+            refresh_server_status()
         self._restyle_factory_widgets()
         try:
             self.style().unpolish(self)

@@ -23,8 +23,11 @@ class DependencyRuntimeMixin:
             req_mtime = 0.0
         py_cfg = str(self.cfg.get("python_exe") or "").strip()
         py_resolved = os.path.normcase(os.path.normpath(lz._resolve_config_path(py_cfg))) if py_cfg else ""
+        installer_mode = str(self.cfg.get("dependency_installer") or "auto").strip().lower()
+        if installer_mode not in ("auto", "uv", "pip"):
+            installer_mode = "auto"
         extras = tuple(sorted(str(item or "").strip() for item in (extra_packages or []) if str(item or "").strip()))
-        return (agent_dir, py_resolved, req_mtime, extras)
+        return (agent_dir, py_resolved, req_mtime, installer_mode, extras)
 
     def _refresh_dependency_status(self):
         label = getattr(self, "locate_dependency_label", None)
@@ -126,7 +129,7 @@ class DependencyRuntimeMixin:
         extras = [str(item or "").strip() for item in (extra_packages or []) if str(item or "").strip()]
         text = (
             "将检查系统 Python、基础依赖、GenericAgent requirements.txt，并验证 agentmain 是否可载入。"
-            "缺少依赖时会自动补齐。"
+            "缺少依赖时会自动补齐。依赖安装器默认 auto（优先 uv，失败回退 pip）。"
         )
         if extras:
             text += "\n\n本次还会同步渠道额外依赖：" + "、".join(extras)
@@ -280,6 +283,13 @@ class DependencyRuntimeMixin:
         return bool(result_holder["ok"])
 
     def _check_runtime_dependencies_from_locate(self):
+        combo = getattr(self, "locate_dependency_installer_combo", None)
+        if combo is not None:
+            selected = str(combo.currentData() or "").strip().lower()
+            if selected not in ("auto", "uv", "pip"):
+                selected = "auto"
+            self.cfg["dependency_installer"] = selected
+            lz.save_config(self.cfg)
         if not lz.is_valid_agent_dir(self.agent_dir):
             self._set_agent_dir(self.locate_path_edit.text().strip() if hasattr(self, "locate_path_edit") else self.agent_dir)
         if not lz.is_valid_agent_dir(self.agent_dir):

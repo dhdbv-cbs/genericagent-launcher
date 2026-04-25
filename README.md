@@ -6,10 +6,10 @@
 
 ## 下载
 
-- 直接下载 exe：
-  [Releases / GenericAgentLauncher.exe](https://github.com/dhdbv-cbs/genericagent-launcher/releases/latest)
+- 直接下载安装包（推荐）：
+  [Releases / GenericAgentLauncher-Setup-*.exe](https://github.com/dhdbv-cbs/genericagent-launcher/releases/latest)
 
-如果你只是普通用户，优先使用 Release 页面里的 `GenericAgentLauncher.exe`。
+如果你只是普通用户，优先使用 Release 页面里的安装包。
 
 ## 致谢
 
@@ -52,24 +52,35 @@
 
 ## 使用方式
 
-### 直接使用 exe
+### 安装包运行（推荐）
 
-如果你只是想使用启动器，直接运行：
+生产发布采用安装包架构：
 
-```text
-dist/GenericAgentLauncher.exe
-```
+- 安装目录：`%LocalAppData%\Programs\GenericAgentLauncher`
+- 用户数据目录：`%LocalAppData%\GenericAgentLauncher`
+- 更新机制：应用内检查 + 外部 `Updater` 原子切换 + 自动回滚
+- 健康确认：`启动确认 + 存活确认` 两阶段校验，失败自动回滚
+- 更新包校验：`Ed25519 签名 + SHA256`
+- 更新诊断：关于页内置“更新诊断”卡片，可查看最近任务状态、错误码、`updater.log` 尾部
 
-这种方式下：
+发布时需要配置更新签名私钥（CI 环境变量）：
 
-- 不需要安装启动器自己的 Python 依赖
-- 不需要执行 `pip install -r requirements.txt`
-- 启动器界面依赖已经被打进 exe
+- `UPDATE_SIGNING_PRIVATE_KEY_PEM`（GitHub Actions secret）
+- `UPDATE_SIGNING_PUBLIC_KEY_PEM`（GitHub Actions secret）
 
 但仍需要注意：
 
 - GenericAgent 内核运行本身仍依赖系统 Python
 - 首次下载或接入上游项目时，建议系统中已安装 Git
+
+可选的生产加固环境变量：
+
+- `GA_LAUNCHER_REQUIRE_AUTHENTICODE=1`
+  强制更新后主程序必须通过 Windows Authenticode 校验
+- `GA_LAUNCHER_HEALTH_MIN_ALIVE_SECONDS`
+  更新后存活确认延时（默认 6 秒）
+- `GA_LAUNCHER_HEALTH_STARTUP_TIMEOUT_SECONDS`
+  启动确认超时（默认 45 秒）
 
 ### 从源码运行
 
@@ -85,6 +96,15 @@ python launcher.py
 ```bash
 build.bat
 ```
+
+`build.bat` 会自动查找 Inno Setup 编译器，查找顺序如下：
+
+1. 环境变量 `INNO_ISCC` 指向的 `ISCC.exe`
+2. 仓库内 `tools\InnoSetup\ISCC.exe`
+3. 仓库内 `temp\InnoSetup\ISCC.exe`
+4. 用户安装目录 `%LocalAppData%\Programs\Inno Setup 6`
+5. 系统默认安装目录 `Program Files\Inno Setup 6`
+6. `PATH` 中的 `iscc`
 
 ## 为什么源码文件不多
 
@@ -137,10 +157,20 @@ build.bat
 - `qq-botpy`
 - `lark-oapi`
 - `wecom_aibot_sdk`
-- `dingtalk-stream`
+- `dingtalk-stream>=0.20`
 - 微信扫码链路相关依赖
 
 这些依赖是否需要安装，取决于你是否真的启用对应渠道。
+
+启动器的依赖检查默认使用 `auto` 安装策略：
+
+- 优先尝试 `uv pip install --python <python_exe> ...`
+- 若 `uv` 不可用或安装失败，自动回退到 `pip`
+
+可通过环境变量调整：
+
+- `GA_LAUNCHER_DEP_INSTALLER=auto|uv|pip`
+- `GA_LAUNCHER_UV_EXE=<uv 可执行文件路径>`
 
 ## 快速开始
 
@@ -159,10 +189,13 @@ cd genericagent-launcher
 python launcher.py
 ```
 
-打包产物默认在：
+打包后默认会生成：
 
 ```text
-dist/GenericAgentLauncher.exe
+dist/GenericAgentLauncher/              主程序（onedir）
+dist/LauncherBootstrap.exe              稳定启动入口
+dist/Updater.exe                        外部更新器
+release/<version>/installer/*.exe       安装包
 ```
 
 ## 使用教程
@@ -220,7 +253,7 @@ dist/GenericAgentLauncher.exe
 - 是否自动启动由启动器自己的 `launcher_config.json` 管理
 - 这些渠道会各自启动独立的 GenericAgent 进程，不与当前聊天页共用会话
 - 微信卡片支持直接扫码登录 / 重新绑定
-- `QQ` 和 `微信` 沿用上游单实例限制，不能同时启动
+- 渠道并行能力以当前上游实现为准；如遇端口占用，优先升级到最新内核版本后再重试
 
 ## 聊天界面
 
@@ -259,7 +292,7 @@ requirements.txt            启动器依赖
 - 本仓库是 GenericAgent 的桌面启动器，不是上游项目本体
 - 某些设置页仍处于占位阶段
 - 如果修改源码后 exe 看起来没变化，通常是旧进程或旧打包产物仍在被使用
-- 打包后的配置文件默认读取启动器所在目录下的 `launcher_config.json`
+- 配置文件与更新状态默认放在 `%LocalAppData%\GenericAgentLauncher\config` 与 `state`
 
 ## License
 

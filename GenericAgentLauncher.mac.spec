@@ -21,7 +21,14 @@ APP_ICON_SVG_PATH = os.path.join(ROOT_DIR, "assets", "launcher_app_icon.svg")
 MACOS_ICON_PATH = os.path.join(ROOT_DIR, "build", "macos-icon", "GenericAgentLauncher.icns")
 
 datas = [(BRIDGE_PATH, "."), (APP_ICON_SVG_PATH, "assets")]
-hiddenimports = ["launcher_app.window", "shiboken6"]
+hiddenimports = [
+    "launcher_app.window",
+    "shiboken6",
+    "requests",
+    "simplejson",
+    "charset_normalizer",
+    "cryptography",
+]
 binaries = []
 
 hiddenimports += [

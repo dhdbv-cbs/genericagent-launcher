@@ -1295,6 +1295,30 @@ tg_bot_token = '123'
             src = f.read()
         self.assertIn('find_spec("importlib_resources.trees") is not None', src)
 
+    def test_custom_requests_hook_collects_runtime_imported_package(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        path = os.path.join(root, "hooks", "hook-requests.py")
+        with open(path, "r", encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("collect_all", src)
+        self.assertIn('collect_all("requests")', src)
+
+        pyinstaller_hooks_module = types.ModuleType("PyInstaller.utils.hooks")
+        calls = {}
+
+        def _collect_all(name):
+            calls["name"] = name
+            return [("requests-data", ".")], ["requests-bin"], ["requests.hidden"]
+
+        pyinstaller_hooks_module.collect_all = _collect_all
+        namespace = {"__builtins__": __builtins__}
+        with mock.patch.dict(sys.modules, {"PyInstaller.utils.hooks": pyinstaller_hooks_module}):
+            exec(compile(src, path, "exec"), namespace)
+        self.assertEqual(calls["name"], "requests")
+        self.assertEqual(namespace["datas"], [("requests-data", ".")])
+        self.assertEqual(namespace["binaries"], ["requests-bin"])
+        self.assertEqual(namespace["hiddenimports"], ["requests.hidden"])
+
     def test_private_python_installer_has_atomic_download_and_retry(self):
         root = os.path.dirname(os.path.dirname(__file__))
         path = os.path.join(root, "qt_chat_parts", "downloads.py")
@@ -2178,8 +2202,11 @@ tg_bot_token = '123'
     def test_macos_spec_bundle_exists(self):
         root = os.path.dirname(os.path.dirname(__file__))
         path = os.path.join(root, "GenericAgentLauncher.mac.spec")
+        main_spec_path = os.path.join(root, "GenericAgentLauncher.spec")
         with open(path, "r", encoding="utf-8") as f:
             src = f.read()
+        with open(main_spec_path, "r", encoding="utf-8") as f:
+            main_spec_src = f.read()
         self.assertIn("BUNDLE(", src)
         self.assertIn("GenericAgent Launcher.app", src)
         self.assertIn('APP_ICON_SVG_PATH = os.path.join(ROOT_DIR, "assets", "launcher_app_icon.svg")', src)
@@ -2213,11 +2240,18 @@ tg_bot_token = '123'
         }
 
         with mock.patch.dict(sys.modules, {"PyInstaller.utils.hooks": pyinstaller_hooks_module}):
+            main_namespace = dict(namespace_base, __file__=main_spec_path)
+            exec(compile(main_spec_src, main_spec_path, "exec"), main_namespace)
+
             namespace = dict(namespace_base, __file__=path)
             exec(compile(src, path, "exec"), namespace)
             self.assertEqual(namespace["ROOT_DIR"], root)
             self.assertEqual(namespace["LAUNCHER_SCRIPT"], os.path.join(root, "launcher.py"))
             self.assertEqual(namespace["HOOKS_DIR"], os.path.join(root, "hooks"))
+            self.assertTrue(
+                set(main_namespace["hiddenimports"]).issubset(set(namespace["hiddenimports"])),
+                msg=f"mac spec hiddenimports drifted from main spec: {sorted(set(main_namespace['hiddenimports']) - set(namespace['hiddenimports']))}",
+            )
 
             namespace = dict(namespace_base, SPEC=path)
             exec(compile(src, path, "exec"), namespace)

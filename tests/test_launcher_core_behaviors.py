@@ -11,6 +11,9 @@ import unittest
 from unittest import mock
 
 import bridge
+from PySide6.QtCore import QEvent, QPointF, Qt
+from PySide6.QtGui import QMouseEvent
+from PySide6.QtWidgets import QApplication, QLabel
 from launcher_app import app_icon as launcher_app_icon
 from launcher_app import core as lz
 from launcher_app import theme as launcher_theme
@@ -22,7 +25,72 @@ from qt_chat_parts.api_editor import ApiEditorMixin
 from qt_chat_parts import common
 
 
+def _workflow_named_steps(path: str) -> list[dict[str, object]]:
+    with open(path, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+
+    steps: list[dict[str, object]] = []
+    current: dict[str, object] | None = None
+    for raw in lines:
+        line = raw.rstrip("\n")
+        match = re.match(r"^ {6}- name: (.+)$", line)
+        if match:
+            if current is not None:
+                steps.append(current)
+            current = {"name": match.group(1).strip(), "lines": []}
+            continue
+        if current is not None:
+            cast_lines = current["lines"]
+            assert isinstance(cast_lines, list)
+            cast_lines.append(line)
+    if current is not None:
+        steps.append(current)
+    return steps
+
+
+def _workflow_step_map(path: str) -> dict[str, str]:
+    steps = _workflow_named_steps(path)
+    return {str(step["name"]): "\n".join(step["lines"]) for step in steps}
+
+
 class LauncherCoreBehaviorTests(unittest.TestCase):
+    def test_option_card_children_allow_parent_click_handling_and_release_triggers_command(self):
+        app = QApplication.instance() or QApplication([])
+        self.addCleanup(lambda: app.processEvents())
+
+        triggered: list[str] = []
+        card = common.OptionCard("⬇", "下载", "进入下载页", lambda: triggered.append("clicked"))
+        card.resize(320, 96)
+
+        labels = card.findChildren(QLabel)
+        self.assertTrue(labels)
+        for label in labels:
+            self.assertTrue(label.testAttribute(Qt.WA_TransparentForMouseEvents), msg=label.text())
+
+        press = QMouseEvent(
+            QEvent.Type.MouseButtonPress,
+            QPointF(24, 24),
+            QPointF(24, 24),
+            QPointF(24, 24),
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        release = QMouseEvent(
+            QEvent.Type.MouseButtonRelease,
+            QPointF(24, 24),
+            QPointF(24, 24),
+            QPointF(24, 24),
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+
+        card.mousePressEvent(press)
+        card.mouseReleaseEvent(release)
+
+        self.assertEqual(triggered, ["clicked"])
+
     def test_python_env_bootstrap_detector_catches_requests_and_simplejson_failures(self):
         self.assertTrue(
             python_env._should_bootstrap_python_runtime("ModuleNotFoundError: No module named 'requests'")
@@ -33,6 +101,27 @@ class LauncherCoreBehaviorTests(unittest.TestCase):
             )
         )
         self.assertFalse(python_env._should_bootstrap_python_runtime("SyntaxError: invalid syntax"))
+
+    def test_setup_pages_imports_os_for_platform_fallbacks(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        path = os.path.join(root, "qt_chat_parts", "setup_pages.py")
+        with open(path, "r", encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("import os", src)
+        self.assertIn('os.name == "nt"', src)
+
+    def test_requirements_include_packaged_runtime_dependencies(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        path = os.path.join(root, "requirements.txt")
+        with open(path, "r", encoding="utf-8") as f:
+            requirements = {line.strip() for line in f if line.strip() and not line.lstrip().startswith("#")}
+        for dependency in (
+            "requests>=2.31",
+            "simplejson>=3.19.3",
+            "charset-normalizer>=3.3",
+            "cryptography>=43.0",
+        ):
+            self.assertIn(dependency, requirements)
 
     def test_python_env_split_requirement_tokens(self):
         self.assertEqual(
@@ -2199,6 +2288,65 @@ tg_bot_token = '123'
         self.assertIn("GA_LAUNCHER_SMOKE_EXIT_MS", src)
         self.assertIn("QTimer.singleShot", src)
 
+    def test_launcher_packaged_import_smoke_requires_frozen_runtime(self):
+        import launcher
+
+        with mock.patch.dict(os.environ, {"GA_LAUNCHER_PACKAGED_IMPORT_SMOKE": "1"}, clear=False):
+            with mock.patch.object(launcher.sys, "frozen", False, create=True):
+                with self.assertRaises(RuntimeError) as ctx:
+                    launcher._maybe_run_packaged_import_smoke()
+        self.assertIn("requires a packaged launcher runtime", str(ctx.exception))
+
+    def test_launcher_packaged_import_smoke_reports_key_runtime_dependencies(self):
+        import launcher
+
+        stub_simplejson = types.SimpleNamespace(__file__=os.path.join(os.getcwd(), "simplejson-stub.py"))
+        with mock.patch.dict(os.environ, {"GA_LAUNCHER_PACKAGED_IMPORT_SMOKE": "1"}, clear=False):
+            with mock.patch.object(launcher.sys, "frozen", True, create=True):
+                with mock.patch.dict(sys.modules, {"simplejson": stub_simplejson}, clear=False):
+                    with mock.patch("builtins.print") as print_mock:
+                        exit_code = launcher._maybe_run_packaged_import_smoke()
+        self.assertEqual(exit_code, 0)
+        print_mock.assert_called_once()
+        line = print_mock.call_args.args[0]
+        self.assertTrue(line.startswith("PACKAGED_IMPORT_SMOKE_OK "))
+        payload = json.loads(line.split(" ", 1)[1])
+        self.assertTrue(payload["frozen"])
+        self.assertTrue(os.path.isfile(payload["asset_candidates"][0]))
+        self.assertIn("requests", payload["modules"])
+        self.assertIn("simplejson", payload["modules"])
+        self.assertIn("bridge", payload["modules"])
+        self.assertIn("PySide6.QtSvg", payload["modules"])
+
+    def test_quality_gate_tool_runs_focused_macos_preflight_targets(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        path = os.path.join(root, "tools", "check_launcher_quality.py")
+        namespace: dict[str, object] = {}
+        with open(path, "r", encoding="utf-8") as f:
+            exec(compile(f.read(), path, "exec"), namespace)
+
+        self.assertEqual(
+            namespace["MACOS_PREFLIGHT_RUFF_TARGETS"],
+            (
+                "launcher.py",
+                "launcher_core_parts/runtime.py",
+                "tools/build_macos_release.py",
+                "tools/check_launcher_quality.py",
+                "tools/validate_macos_release.py",
+                "tests/test_build_macos_release.py",
+                "tests/test_validate_macos_release.py",
+                "tests/test_launcher_core_behaviors.py",
+            ),
+        )
+        self.assertEqual(
+            namespace["MACOS_PREFLIGHT_PYTEST_TARGETS"],
+            (
+                "tests/test_build_macos_release.py",
+                "tests/test_validate_macos_release.py",
+                "tests/test_launcher_core_behaviors.py",
+            ),
+        )
+
     def test_macos_spec_bundle_exists(self):
         root = os.path.dirname(os.path.dirname(__file__))
         path = os.path.join(root, "GenericAgentLauncher.mac.spec")
@@ -2248,6 +2396,12 @@ tg_bot_token = '123'
             self.assertEqual(namespace["ROOT_DIR"], root)
             self.assertEqual(namespace["LAUNCHER_SCRIPT"], os.path.join(root, "launcher.py"))
             self.assertEqual(namespace["HOOKS_DIR"], os.path.join(root, "hooks"))
+            for dependency in ("requests", "simplejson", "charset_normalizer", "cryptography"):
+                self.assertIn(
+                    dependency,
+                    namespace["hiddenimports"],
+                    msg=f"mac spec is missing required runtime dependency: {dependency}",
+                )
             self.assertTrue(
                 set(main_namespace["hiddenimports"]).issubset(set(namespace["hiddenimports"])),
                 msg=f"mac spec hiddenimports drifted from main spec: {sorted(set(main_namespace['hiddenimports']) - set(namespace['hiddenimports']))}",
@@ -2300,28 +2454,53 @@ tg_bot_token = '123'
         path = os.path.join(root, ".github", "workflows", "release-installer.yml")
         with open(path, "r", encoding="utf-8") as f:
             src = f.read()
+        steps = _workflow_step_map(path)
+        ordered_names = [step["name"] for step in _workflow_named_steps(path)]
         self.assertIn("build-macos", src)
-        self.assertIn("macos-15", src)
+        self.assertIn("macos-15-intel", src)
         self.assertIn("contents: write", src)
         self.assertIn("GA_MACOS_RUNNER_LABEL", src)
         self.assertIn("GA_MACOS_EXPECTED_ARCH", src)
-        self.assertIn("python -m pytest tests -q", src)
-        self.assertIn("Source startup smoke", src)
-        self.assertIn("GA_LAUNCHER_SMOKE_EXIT_MS", src)
-        self.assertIn("QT_QPA_PLATFORM: offscreen", src)
-        self.assertIn("build_macos_release.py", src)
-        self.assertIn("--commit", src)
-        self.assertIn("github.sha", src)
-        self.assertIn("Packaged app startup smoke", src)
-        self.assertIn("Runner and bundle diagnostics", src)
-        self.assertIn("codesign --verify --deep --strict", src)
-        self.assertIn("spctl --assess --type execute --verbose=4", src)
-        self.assertIn("GenericAgent Launcher.app/Contents/MacOS/GenericAgentLauncher", src)
-        self.assertIn("validate_macos_release.py", src)
-        self.assertIn("--expected-arch", src)
-        self.assertIn("--expected-runner-label", src)
-        self.assertIn("Validate macOS release contract", src)
-        self.assertIn("Publish macOS release assets", src)
+        self.assertEqual(
+            ordered_names[ordered_names.index("Mac preflight quality gate") : ordered_names.index("Publish macOS release assets") + 1],
+            [
+                "Mac preflight quality gate",
+                "Run tests",
+                "Source startup smoke",
+                "Build macOS app and dmg",
+                "Packaged app import smoke",
+                "Packaged app startup smoke",
+                "Runner and bundle diagnostics",
+                "Validate macOS release contract",
+                "Upload macOS build artifacts",
+                "Publish macOS release assets",
+            ],
+        )
+        self.assertIn("python -m pip install pytest ruff", steps["Install dependencies"])
+        self.assertIn("python tools/check_launcher_quality.py --scope macos-preflight", steps["Mac preflight quality gate"])
+        self.assertIn("python -m pytest tests -q", steps["Run tests"])
+        self.assertIn('GA_LAUNCHER_SMOKE_EXIT_MS: "1200"', steps["Source startup smoke"])
+        self.assertIn("QT_QPA_PLATFORM: offscreen", steps["Source startup smoke"])
+        self.assertIn("python launcher.py", steps["Source startup smoke"])
+        self.assertIn("python tools/build_macos_release.py", steps["Build macOS app and dmg"])
+        self.assertIn("--commit", steps["Build macOS app and dmg"])
+        self.assertIn("github.sha", steps["Build macOS app and dmg"])
+        self.assertIn('GA_LAUNCHER_PACKAGED_IMPORT_SMOKE: "1"', steps["Packaged app import smoke"])
+        self.assertNotIn("GA_LAUNCHER_SMOKE_EXIT_MS", steps["Packaged app import smoke"])
+        self.assertIn("set +e", steps["Packaged app import smoke"])
+        self.assertIn('output="$("$app" 2>&1)"', steps["Packaged app import smoke"])
+        self.assertIn("status=$?", steps["Packaged app import smoke"])
+        self.assertIn('echo "Packaged app import smoke exited with status $status" >&2', steps["Packaged app import smoke"])
+        self.assertIn('grep -q "PACKAGED_IMPORT_SMOKE_OK"', steps["Packaged app import smoke"])
+        self.assertIn("GenericAgent Launcher.app/Contents/MacOS/GenericAgentLauncher", steps["Packaged app import smoke"])
+        self.assertIn('GA_LAUNCHER_SMOKE_EXIT_MS: "1200"', steps["Packaged app startup smoke"])
+        self.assertIn("QT_QPA_PLATFORM: offscreen", steps["Packaged app startup smoke"])
+        self.assertIn('"$app"', steps["Packaged app startup smoke"])
+        self.assertIn("codesign --verify --deep --strict", steps["Runner and bundle diagnostics"])
+        self.assertIn("spctl --assess --type execute --verbose=4", steps["Runner and bundle diagnostics"])
+        self.assertIn("python tools/validate_macos_release.py", steps["Validate macOS release contract"])
+        self.assertIn("--expected-arch", steps["Validate macOS release contract"])
+        self.assertIn("--expected-runner-label", steps["Validate macOS release contract"])
         self.assertIn("README-macOS.txt", src)
         self.assertIn("install-metadata.json", src)
 
@@ -2330,28 +2509,53 @@ tg_bot_token = '123'
         path = os.path.join(root, ".github", "workflows", "macos-validate.yml")
         with open(path, "r", encoding="utf-8") as f:
             src = f.read()
+        steps = _workflow_step_map(path)
+        ordered_names = [step["name"] for step in _workflow_named_steps(path)]
         self.assertIn("macos-validate", src)
-        self.assertIn("macos-15", src)
+        self.assertIn("macos-15-intel", src)
         self.assertIn("pull_request", src)
         self.assertIn("branches:", src)
         self.assertIn("main", src)
         self.assertIn("GA_MACOS_RUNNER_LABEL", src)
         self.assertIn("GA_MACOS_EXPECTED_ARCH", src)
-        self.assertIn("python -m pytest tests -q", src)
-        self.assertIn("Source startup smoke", src)
-        self.assertIn("GA_LAUNCHER_SMOKE_EXIT_MS", src)
-        self.assertIn("QT_QPA_PLATFORM: offscreen", src)
-        self.assertIn("build_macos_release.py", src)
-        self.assertIn("--commit", src)
-        self.assertIn("github.sha", src)
-        self.assertIn("Packaged app startup smoke", src)
-        self.assertIn("Runner and bundle diagnostics", src)
-        self.assertIn("codesign --verify --deep --strict", src)
-        self.assertIn("GenericAgent Launcher.app/Contents/MacOS/GenericAgentLauncher", src)
-        self.assertIn("validate_macos_release.py", src)
-        self.assertIn("--expected-arch", src)
-        self.assertIn("--expected-runner-label", src)
-        self.assertIn("Validate macOS release contract", src)
+        self.assertEqual(
+            ordered_names[ordered_names.index("Mac preflight quality gate") : ordered_names.index("Upload macOS validation artifacts") + 1],
+            [
+                "Mac preflight quality gate",
+                "Run tests",
+                "Source startup smoke",
+                "Build macOS app and dmg",
+                "Packaged app import smoke",
+                "Packaged app startup smoke",
+                "Runner and bundle diagnostics",
+                "Validate macOS release contract",
+                "Upload macOS validation artifacts",
+            ],
+        )
+        self.assertIn("python -m pip install pytest ruff", steps["Install dependencies"])
+        self.assertIn("python tools/check_launcher_quality.py --scope macos-preflight", steps["Mac preflight quality gate"])
+        self.assertIn("python -m pytest tests -q", steps["Run tests"])
+        self.assertIn('GA_LAUNCHER_SMOKE_EXIT_MS: "1200"', steps["Source startup smoke"])
+        self.assertIn("QT_QPA_PLATFORM: offscreen", steps["Source startup smoke"])
+        self.assertIn("python launcher.py", steps["Source startup smoke"])
+        self.assertIn("python tools/build_macos_release.py", steps["Build macOS app and dmg"])
+        self.assertIn("--commit", steps["Build macOS app and dmg"])
+        self.assertIn("github.sha", steps["Build macOS app and dmg"])
+        self.assertIn('GA_LAUNCHER_PACKAGED_IMPORT_SMOKE: "1"', steps["Packaged app import smoke"])
+        self.assertNotIn("GA_LAUNCHER_SMOKE_EXIT_MS", steps["Packaged app import smoke"])
+        self.assertIn("set +e", steps["Packaged app import smoke"])
+        self.assertIn('output="$("$app" 2>&1)"', steps["Packaged app import smoke"])
+        self.assertIn("status=$?", steps["Packaged app import smoke"])
+        self.assertIn('echo "Packaged app import smoke exited with status $status" >&2', steps["Packaged app import smoke"])
+        self.assertIn('grep -q "PACKAGED_IMPORT_SMOKE_OK"', steps["Packaged app import smoke"])
+        self.assertIn("GenericAgent Launcher.app/Contents/MacOS/GenericAgentLauncher", steps["Packaged app import smoke"])
+        self.assertIn('GA_LAUNCHER_SMOKE_EXIT_MS: "1200"', steps["Packaged app startup smoke"])
+        self.assertIn("QT_QPA_PLATFORM: offscreen", steps["Packaged app startup smoke"])
+        self.assertIn('"$app"', steps["Packaged app startup smoke"])
+        self.assertIn("codesign --verify --deep --strict", steps["Runner and bundle diagnostics"])
+        self.assertIn("python tools/validate_macos_release.py", steps["Validate macOS release contract"])
+        self.assertIn("--expected-arch", steps["Validate macOS release contract"])
+        self.assertIn("--expected-runner-label", steps["Validate macOS release contract"])
         self.assertIn("Upload macOS validation artifacts", src)
 
     def test_docs_cover_macos_manual_install_contract_and_smoke_checklist(self):
@@ -2373,13 +2577,13 @@ tg_bot_token = '123'
         self.assertIn("install-metadata.json", readme)
         self.assertIn("System Settings -> Privacy & Security -> Open Anyway", readme)
         self.assertIn("未做 Apple Developer 签名", readme)
-        self.assertIn("macos-15 / arm64", readme)
-        self.assertIn("Intel Mac 不在当前公开发布合同内", readme)
+        self.assertIn("macos-15-intel / x86_64", readme)
+        self.assertIn("面向 Intel / x86_64", readme)
         self.assertIn("手动替换 `.app` 升级", readme)
         self.assertIn("Open Anyway", smoke)
         self.assertIn("Finder 右键 `Open` 作为兼容性备选路径", smoke)
-        self.assertIn("build_arch = arm64", smoke)
-        self.assertIn("runner_label = macos-15", smoke)
+        self.assertIn("build_arch = x86_64", smoke)
+        self.assertIn("runner_label = macos-15-intel", smoke)
         self.assertIn("LAN Web", smoke)
         self.assertIn("手动替换 `/Applications/GenericAgent Launcher.app`", smoke)
         self.assertIn("tools/validate_macos_release.py", runbook)
@@ -2398,6 +2602,8 @@ tg_bot_token = '123'
         self.assertIn('APP_BUNDLE_NAME = f"{APP_NAME}.app"', src)
         self.assertIn('os.readlink(applications_alias) != "/Applications"', src)
         self.assertIn("mounted dmg is missing install-metadata.json", src)
+        self.assertIn('["codesign", "--verify", "--deep", "--strict", app_path]', src)
+        self.assertIn('expected_prefixes = ("Contents/Frameworks/", "Contents/Resources/")', src)
         self.assertIn("expected_arch=expected_arch", src)
         self.assertIn('MACOS_VERSION_JSON_RELATIVE_PATH = "Contents/Resources/version.json"', src)
 

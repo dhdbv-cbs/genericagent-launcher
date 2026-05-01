@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import faulthandler
+import json
 import os
 import sys
 import threading
@@ -16,6 +17,58 @@ for _name in dir(_core):
     if _name.startswith("__"):
         continue
     globals()[_name] = getattr(_core, _name)
+
+
+def _packaged_import_smoke_payload() -> dict[str, object]:
+    if not bool(getattr(sys, "frozen", False)):
+        raise RuntimeError("GA_LAUNCHER_PACKAGED_IMPORT_SMOKE requires a packaged launcher runtime")
+
+    import bridge
+    import charset_normalizer
+    import cryptography
+    import simplejson
+    from PySide6 import QtCore, QtGui, QtSvg, QtWidgets
+    from launcher_app.app_icon import _icon_asset_candidates, launcher_icon_svg
+
+    svg = str(launcher_icon_svg() or "").strip()
+    if "<svg" not in svg:
+        raise RuntimeError("packaged import smoke failed to load launcher SVG asset")
+
+    asset_candidates = [os.path.abspath(path) for path in _icon_asset_candidates()]
+    if not any(os.path.isfile(path) for path in asset_candidates):
+        raise RuntimeError(f"packaged import smoke could not resolve launcher icon asset: {asset_candidates}")
+
+    modules = {
+        "bridge": str(getattr(bridge, "__file__", "") or "").strip(),
+        "charset_normalizer": str(getattr(charset_normalizer, "__file__", "") or "").strip(),
+        "cryptography": str(getattr(cryptography, "__file__", "") or "").strip(),
+        "qrcode": str(getattr(_core.qrcode, "__file__", "") or "").strip(),
+        "requests": str(getattr(_core.requests, "__file__", "") or "").strip(),
+        "simplejson": str(getattr(simplejson, "__file__", "") or "").strip(),
+        "PySide6.QtCore": str(getattr(QtCore, "__file__", "") or "").strip(),
+        "PySide6.QtGui": str(getattr(QtGui, "__file__", "") or "").strip(),
+        "PySide6.QtSvg": str(getattr(QtSvg, "__file__", "") or "").strip(),
+        "PySide6.QtWidgets": str(getattr(QtWidgets, "__file__", "") or "").strip(),
+    }
+    missing = sorted(name for name, location in modules.items() if not location)
+    if missing:
+        raise RuntimeError(f"packaged import smoke missing module origins: {missing}")
+
+    return {
+        "asset_candidates": asset_candidates,
+        "frozen": True,
+        "modules": modules,
+        "sys_executable": os.path.abspath(str(sys.executable or "")),
+    }
+
+
+def _maybe_run_packaged_import_smoke() -> int | None:
+    enabled = str(os.environ.get("GA_LAUNCHER_PACKAGED_IMPORT_SMOKE") or "").strip().lower()
+    if enabled not in {"1", "true", "yes", "on"}:
+        return None
+    payload = _packaged_import_smoke_payload()
+    print(f"PACKAGED_IMPORT_SMOKE_OK {json.dumps(payload, ensure_ascii=True, sort_keys=True)}")
+    return 0
 
 
 def run(agent_dir: str | None = None) -> int:
@@ -67,6 +120,10 @@ def run(agent_dir: str | None = None) -> int:
 
     if callable(prev_thread_hook):
         threading.excepthook = _thread_hook
+
+    packaged_smoke = _maybe_run_packaged_import_smoke()
+    if packaged_smoke is not None:
+        return packaged_smoke
 
     startup_acked = False
     try:

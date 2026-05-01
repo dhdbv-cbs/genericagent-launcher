@@ -5,6 +5,7 @@ import json
 import os
 import plistlib
 import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -44,8 +45,8 @@ class BuildMacOSReleaseTests(unittest.TestCase):
         self.assertIn("manual upgrades", text)
 
     def test_install_metadata_captures_install_contract(self):
-        with mock.patch.object(self.mod, "_current_build_arch", return_value="arm64"):
-            with mock.patch.dict(self.mod.os.environ, {"GA_MACOS_RUNNER_LABEL": "macos-15"}, clear=False):
+        with mock.patch.object(self.mod, "_current_build_arch", return_value="x86_64"):
+            with mock.patch.dict(self.mod.os.environ, {"GA_MACOS_RUNNER_LABEL": "macos-15-intel"}, clear=False):
                 payload = self.mod._install_metadata(
                     "1.2.3",
                     dmg_name="GenericAgentLauncher-macos-1.2.3.dmg",
@@ -62,8 +63,8 @@ class BuildMacOSReleaseTests(unittest.TestCase):
         self.assertEqual(payload["data_root"], "~/Library/Application Support/GenericAgentLauncher")
         self.assertFalse(payload["supports_internal_updater"])
         self.assertTrue(payload["requires_system_python"])
-        self.assertEqual(payload["build_arch"], "arm64")
-        self.assertEqual(payload["runner_label"], "macos-15")
+        self.assertEqual(payload["build_arch"], "x86_64")
+        self.assertEqual(payload["runner_label"], "macos-15-intel")
         self.assertFalse(payload["developer_id_signed"])
         self.assertFalse(payload["apple_developer_signed"])
         self.assertFalse(payload["notarized"])
@@ -197,3 +198,41 @@ class BuildMacOSReleaseTests(unittest.TestCase):
             self.assertEqual(calls["svg_path"], os.path.join(os.path.abspath(root), "assets", "launcher_app_icon.svg"))
             self.assertEqual(calls["icns_path"], os.path.join(os.path.abspath(root), "build", "macos-icon", "GenericAgentLauncher.icns"))
             self.assertEqual(out, os.path.join(os.path.abspath(root), "build", "macos-icon", "GenericAgentLauncher.icns"))
+
+    def test_main_routes_custom_dist_dir_into_pyinstaller(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = os.path.join(td, "repo")
+            custom_dist = os.path.join(td, "artifacts", "dist")
+            captured = {}
+
+            def fake_run(cmd, *, cwd=None):
+                captured["cmd"] = list(cmd)
+                captured["cwd"] = cwd
+                raise SystemExit("stop-after-pyinstaller")
+
+            args = types.SimpleNamespace(version="1.2.3", dist=custom_dist, out="release", commit="abc123")
+            with mock.patch.object(self.mod, "_repo_root", return_value=root), mock.patch.object(
+                self.mod, "_parse_args", return_value=args
+            ), mock.patch.object(
+                self.mod, "_prepare_macos_bundle_icon", return_value=os.path.join(root, "build", "GenericAgentLauncher.icns")
+            ), mock.patch.object(
+                self.mod, "_run", side_effect=fake_run
+            ), mock.patch.object(self.mod.sys, "platform", "darwin"):
+                with self.assertRaises(SystemExit) as ctx:
+                    self.mod.main()
+
+        self.assertEqual(str(ctx.exception), "stop-after-pyinstaller")
+        self.assertEqual(captured["cwd"], root)
+        self.assertEqual(
+            captured["cmd"],
+            [
+                self.mod.sys.executable,
+                "-m",
+                "PyInstaller",
+                "--clean",
+                "--noconfirm",
+                "--distpath",
+                os.path.abspath(custom_dist),
+                os.path.join(root, "GenericAgentLauncher.mac.spec"),
+            ],
+        )

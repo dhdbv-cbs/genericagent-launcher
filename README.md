@@ -38,7 +38,7 @@
 说明：
 
 - macOS 当前是 `未做 Apple Developer 签名`、`未 notarize` 的开源发布形态
-- 当前 GitHub Release 公开的 macOS 产物按 `macos-15 / arm64` 构建，面向 Apple Silicon；Intel Mac 不在当前公开发布合同内，具体以 `install-metadata.json` 的 `build_arch` / `runner_label` 为准
+- 当前 GitHub Release 公开的 macOS 产物按 `macos-15-intel / x86_64` 构建，面向 Intel / x86_64；具体以 `install-metadata.json` 的 `build_arch` / `runner_label` 为准
 - 首次安装时，打开 `.dmg` 后把 `GenericAgent Launcher.app` 拖到 `/Applications`
 - 如果你不想写入系统级 Applications，也可以改放到 `~/Applications`；关于页“安装状态”会把该位置视为有效安装
 - 如果 Gatekeeper 首次拦截，请先尝试启动一次，再到 `System Settings -> Privacy & Security -> Open Anyway` 放行
@@ -193,7 +193,7 @@ macOS 打包脚本需要在 macOS 上执行，会生成：
 
 当前 macOS 打包不做 Apple Developer 签名和 notarization，只产出 GitHub 分发的手动安装资产。PyInstaller 可能仍会为运行时兼容性附加 ad-hoc 签名，这不代表具备 Developer ID 签名或 notarization。
 
-当前仓库在 GitHub Actions 上公开发布的 macOS 构建合同是 `macos-15 / arm64`。如果你需要判断某一份产物的实际架构，请直接查看同目录里的 `install-metadata.json`。
+当前仓库在 GitHub Actions 上公开发布的 macOS 构建合同是 `macos-15-intel / x86_64`。如果你需要判断某一份产物的实际架构，请直接查看同目录里的 `install-metadata.json`。
 
 ## 为什么源码文件不多
 

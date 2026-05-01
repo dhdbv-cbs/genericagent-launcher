@@ -985,6 +985,7 @@ class OptionCard(QFrame):
     def __init__(self, icon: str, title: str, desc: str, command, parent=None):
         super().__init__(parent)
         self._command = command
+        self._pressed = False
         self.setObjectName("optionCard")
         self.setCursor(Qt.PointingHandCursor)
         self.setMinimumHeight(92)
@@ -996,26 +997,38 @@ class OptionCard(QFrame):
         icon_lbl.setObjectName("optionIcon")
         icon_lbl.setFixedWidth(34)
         icon_lbl.setAlignment(Qt.AlignCenter)
+        icon_lbl.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         row.addWidget(icon_lbl, 0)
 
         text_col = QVBoxLayout()
         text_col.setSpacing(4)
         title_lbl = QLabel(title)
         title_lbl.setObjectName("optionTitle")
+        title_lbl.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         desc_lbl = QLabel(desc)
         desc_lbl.setObjectName("optionDesc")
+        desc_lbl.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         text_col.addWidget(title_lbl)
         text_col.addWidget(desc_lbl)
         row.addLayout(text_col, 1)
 
         arrow = QLabel("›")
         arrow.setObjectName("optionArrow")
+        arrow.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         row.addWidget(arrow, 0)
 
     def mousePressEvent(self, event):
-        if callable(self._command):
-            self._command()
+        self._pressed = bool(event.button() == Qt.LeftButton)
         return super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        should_trigger = self._pressed and event.button() == Qt.LeftButton and self.rect().contains(event.position().toPoint())
+        self._pressed = False
+        if should_trigger and callable(self._command):
+            self._command()
+            event.accept()
+            return
+        return super().mouseReleaseEvent(event)
 
 
 set_md_css(_build_md_css())

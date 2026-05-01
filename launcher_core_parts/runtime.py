@@ -36,7 +36,6 @@ from .constants import (
     UPDATE_STAGING_DIR,
     UPDATER_EXE_NAME,
     UPDATES_DIR,
-    VERSIONS_DIR,
 )
 
 

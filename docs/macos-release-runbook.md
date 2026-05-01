@@ -71,8 +71,8 @@ Release 页面必须出现：
 - `user_install_target = ~/Applications/GenericAgent Launcher.app`
 - `supports_internal_updater = false`
 - `requires_system_python = true`
-- `build_arch = arm64`（当前 GitHub `macos-15` 发布合同）
-- `runner_label = macos-15`
+- `build_arch = x86_64`（当前 GitHub `macos-15-intel` 发布合同）
+- `runner_label = macos-15-intel`
 - `developer_id_signed = false`
 - `apple_developer_signed = false`
 - `notarized = false`

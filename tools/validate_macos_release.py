@@ -120,6 +120,10 @@ def _assert_install_metadata(payload: dict, *, version: str, expected_commit: st
         _die(f"metadata commit mismatch: expected {expected_commit}, got {payload.get('commit')}")
     if not str(payload.get("build_time") or "").strip():
         _die("missing build_time in install metadata")
+    if str(payload.get("app_name") or "").strip() != APP_NAME:
+        _die(f"app_name mismatch: {payload.get('app_name')}")
+    if str(payload.get("bundle_name") or "").strip() != APP_BUNDLE_NAME:
+        _die(f"bundle_name mismatch: {payload.get('bundle_name')}")
     if str(payload.get("bundle_identifier") or "").strip() != APP_BUNDLE_ID:
         _die(f"bundle identifier mismatch: {payload.get('bundle_identifier')}")
     if str(payload.get("install_mode") or "").strip() != "manual_dmg":
@@ -180,6 +184,22 @@ def _bundle_symlink_entries(app_path: str) -> list[str]:
     return sorted(found)
 
 
+def _assert_preserved_bundle_symlinks(app_path: str):
+    symlink_entries = _bundle_symlink_entries(app_path)
+    if not symlink_entries:
+        _die(f"app bundle is missing preserved internal symlinks: {app_path}")
+    expected_prefixes = ("Contents/Frameworks/", "Contents/Resources/")
+    if not any(entry.startswith(expected_prefixes) for entry in symlink_entries):
+        _die(
+            "app bundle is missing preserved Frameworks/Resources symlinks: "
+            f"{app_path} -> {symlink_entries}"
+        )
+
+
+def _assert_codesign_integrity(app_path: str):
+    _run(["codesign", "--verify", "--deep", "--strict", app_path])
+
+
 def _detect_binary_arch(exe_path: str) -> str:
     lipo = _run(["lipo", "-info", exe_path])
     output = (lipo.stdout or b"").decode("utf-8", "replace").strip()
@@ -210,9 +230,8 @@ def _assert_release_bundle(app_path: str, *, version: str, expected_commit: str 
     detected_arch = _detect_binary_arch(exe)
     if expected_arch and detected_arch != _normalized_arch(expected_arch):
         _die(f"packaged executable architecture mismatch: expected {_normalized_arch(expected_arch)}, got {detected_arch}")
-    symlink_entries = _bundle_symlink_entries(app_path)
-    if not symlink_entries:
-        _die(f"app bundle is missing preserved internal symlinks: {app_path}")
+    _assert_preserved_bundle_symlinks(app_path)
+    _assert_codesign_integrity(app_path)
 
 
 def _attach_dmg(dmg_path: str) -> str:

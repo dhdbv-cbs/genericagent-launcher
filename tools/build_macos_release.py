@@ -262,7 +262,19 @@ def main() -> int:
     sha_name = f"GenericAgentLauncher-macos-{version}.sha256"
     bundle_icon_path = _prepare_macos_bundle_icon(root)
 
-    _run([sys.executable, "-m", "PyInstaller", "--clean", "--noconfirm", spec_path], cwd=root)
+    _run(
+        [
+            sys.executable,
+            "-m",
+            "PyInstaller",
+            "--clean",
+            "--noconfirm",
+            "--distpath",
+            dist_dir,
+            spec_path,
+        ],
+        cwd=root,
+    )
 
     app_path = os.path.join(dist_dir, APP_BUNDLE_NAME)
     if not os.path.isdir(app_path):

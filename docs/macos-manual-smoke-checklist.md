@@ -10,7 +10,7 @@
 1. 从 Release 或 CI 产物获取 `GenericAgentLauncher-macos-<version>.dmg`
 2. 校对可选资产是否齐全：
    `GenericAgentLauncher-macos-<version>.sha256`、`README-macOS.txt`、`install-metadata.json`
-   并打开 `install-metadata.json`，确认当前公开发布合同仍是 `build_arch = arm64`、`runner_label = macos-15`
+   并打开 `install-metadata.json`，确认当前公开发布合同仍是 `build_arch = x86_64`、`runner_label = macos-15-intel`
 3. 打开 `.dmg`，确认窗口内包含：
    `GenericAgent Launcher.app`、`Applications` 别名、`README-macOS.txt`
 4. 把 app 拖到 `/Applications`（推荐）；如果只安装给当前用户，也可拖到 `~/Applications`

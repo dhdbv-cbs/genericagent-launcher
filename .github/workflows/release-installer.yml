@@ -123,13 +123,13 @@ jobs:
             --clobber
 
   build-macos:
-    runs-on: macos-15
+    runs-on: macos-15-intel
     permissions:
       contents: write
     env:
       PYTHONUTF8: "1"
-      GA_MACOS_RUNNER_LABEL: "macos-15"
-      GA_MACOS_EXPECTED_ARCH: "arm64"
+      GA_MACOS_RUNNER_LABEL: "macos-15-intel"
+      GA_MACOS_EXPECTED_ARCH: "x86_64"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -163,8 +163,13 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
-          python -m pip install pytest
+          python -m pip install pytest ruff
           python -m pip install pyinstaller==6.17.0
+
+      - name: Mac preflight quality gate
+        shell: bash
+        run: |
+          python tools/check_launcher_quality.py --scope macos-preflight
 
       - name: Run tests
         shell: bash
@@ -186,6 +191,28 @@ jobs:
             --version "${{ steps.ver.outputs.value }}" \
             --out release \
             --commit "${{ github.sha }}"
+
+      - name: Packaged app import smoke
+        shell: bash
+        env:
+          GA_LAUNCHER_PACKAGED_IMPORT_SMOKE: "1"
+        run: |
+          v="${{ steps.ver.outputs.value }}"
+          app="release/$v/macos/GenericAgent Launcher.app/Contents/MacOS/GenericAgentLauncher"
+          if [ ! -e "$app" ]; then
+            echo "Packaged app executable not found: $app" >&2
+            exit 1
+          fi
+          set +e
+          output="$("$app" 2>&1)"
+          status=$?
+          set -e
+          echo "$output"
+          if [ "$status" -ne 0 ]; then
+            echo "Packaged app import smoke exited with status $status" >&2
+            exit "$status"
+          fi
+          echo "$output" | grep -q "PACKAGED_IMPORT_SMOKE_OK"
 
       - name: Packaged app startup smoke
         shell: bash

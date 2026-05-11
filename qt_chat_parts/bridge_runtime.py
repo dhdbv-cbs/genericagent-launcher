@@ -39,6 +39,57 @@ _RUNTIME_REASONING_EFFORT_VALUES = {value for value, _label in _RUNTIME_REASONIN
 
 
 class BridgeRuntimeMixin:
+    def _local_slash_command_items(self):
+        return [
+            {"command": "/help", "insert_text": "/help", "description": "显示启动器支持的斜杠命令"},
+            {"command": "/stop", "insert_text": "/stop", "description": "停止当前回复任务"},
+            {"command": "/new", "insert_text": "/new", "description": "新建一个当前设备上下文会话"},
+            {
+                "command": "/llm",
+                "insert_text": "/llm",
+                "description": "显示当前模型列表",
+                "aliases": ["/llm"],
+            },
+            {
+                "command": "/llm N",
+                "insert_text": "/llm ",
+                "description": "切换到第 N 个模型编号",
+                "aliases": ["/llm", "/llm "],
+            },
+            {
+                "command": "/continue",
+                "insert_text": "/continue",
+                "description": "后台恢复最近一条历史会话",
+                "aliases": ["/continue"],
+            },
+            {
+                "command": "/continue N",
+                "insert_text": "/continue ",
+                "description": "后台恢复第 N 条历史会话",
+                "aliases": ["/continue", "/continue "],
+            },
+            {
+                "command": "/session.<attr>=<val>",
+                "insert_text": "/session.",
+                "description": "透传给上游 agant 的运行时参数覆盖",
+                "aliases": ["/session."],
+            },
+        ]
+
+    def _local_slash_command_suggestions(self, query_text="", *, editor=None):
+        query = str(query_text or "").strip().lower()
+        items = list(self._local_slash_command_items())
+        if not query or query == "/":
+            return items
+        matched = []
+        for item in items:
+            patterns = [str(item.get("command") or "").strip().lower(), str(item.get("insert_text") or "").strip().lower()]
+            patterns += [str(value or "").strip().lower() for value in (item.get("aliases") or [])]
+            patterns = [value for value in patterns if value]
+            if any(value.startswith(query) or query.startswith(value) for value in patterns):
+                matched.append(item)
+        return matched or items
+
     def _apply_bridge_widget_state(self, widget, enabled, *, enabled_tooltip="", disabled_tooltip=""):
         if widget is None:
             return
@@ -87,6 +138,50 @@ class BridgeRuntimeMixin:
             label = str(llm.get("name") or "(未命名)").strip() or "(未命名)"
             lines.append(f"{marker} [{int(llm.get('idx', pos) or pos)}] {label}")
         return "LLMs:\n" + "\n".join(lines)
+
+    def _show_local_slash_feedback(self, title: str, body: str = "", *, status_text: str = ""):
+        parts = [str(title or "").strip(), str(body or "").strip()]
+        text = "\n".join(part for part in parts if part)
+        if not text:
+            text = str(status_text or "").strip()
+        if text:
+            bucket = getattr(self, "_transient_chat_feedback", None)
+            if not isinstance(bucket, list):
+                bucket = []
+                self._transient_chat_feedback = bucket
+            key_resolver = getattr(self, "_transient_chat_feedback_key", None)
+            key = ""
+            if callable(key_resolver):
+                try:
+                    key = str(key_resolver(self.current_session if isinstance(getattr(self, "current_session", None), dict) else None) or "")
+                except Exception:
+                    key = ""
+            bucket.append({"key": key, "role": "assistant", "text": text})
+            if len(bucket) > 24:
+                del bucket[:-24]
+            renderer = getattr(self, "_render_session", None)
+            if callable(renderer):
+                try:
+                    renderer(self.current_session if isinstance(getattr(self, "current_session", None), dict) else None)
+                except Exception:
+                    pass
+            else:
+                adder = getattr(self, "_add_message_row", None)
+                if callable(adder):
+                    try:
+                        adder("assistant", text, finished=True, auto_scroll=True)
+                    except Exception:
+                        pass
+            refresher = getattr(self, "_refresh_floating_chat_window", None)
+            if callable(refresher):
+                try:
+                    refresher()
+                except Exception:
+                    pass
+        setter = getattr(self, "_set_status", None)
+        final_status = str(status_text or title or "").strip()
+        if callable(setter) and final_status:
+            setter(final_status)
 
     def _local_slash_clear_input(self, source_editor=None):
         editors = []
@@ -156,15 +251,16 @@ class BridgeRuntimeMixin:
     def _local_slash_restore_session(self, index: int):
         rows = self._local_slash_continue_rows()
         if not rows:
-            self._set_status("没有可恢复的历史会话。")
+            self._show_local_slash_feedback("没有可恢复的历史会话。", status_text="没有可恢复的历史会话。")
             return True
         target = int(index or 0)
         if target < 0 or target >= len(rows):
-            self._set_status(f"历史会话索引越界（有效范围 1-{len(rows)}）。")
+            detail = f"历史会话索引越界（有效范围 1-{len(rows)}）。"
+            self._show_local_slash_feedback("恢复失败", detail, status_text=detail)
             return True
         sid = str(rows[target].get("id") or "").strip()
         if not sid:
-            self._set_status("目标历史会话无效。")
+            self._show_local_slash_feedback("恢复失败", "目标历史会话无效。", status_text="目标历史会话无效。")
             return True
         self._load_session_by_id(sid)
         return True
@@ -179,12 +275,12 @@ class BridgeRuntimeMixin:
         op = str(parts[0] if parts else "").strip().lower()
         if op == "/help":
             self._local_slash_clear_input(source_editor=source_editor)
-            QMessageBox.information(self, "斜杠命令", self._local_slash_help_text())
-            self._set_status("已显示启动器支持的斜杠命令。")
+            self._show_local_slash_feedback("启动器斜杠命令", self._local_slash_help_text(), status_text="已显示启动器支持的斜杠命令。")
             return True
         if op == "/stop":
             self._local_slash_clear_input(source_editor=source_editor)
             self._abort()
+            self._show_local_slash_feedback("已请求中断当前任务。", status_text="已请求中断当前任务。")
             return True
         if op == "/new":
             self._local_slash_clear_input(source_editor=source_editor)
@@ -200,8 +296,7 @@ class BridgeRuntimeMixin:
         if op == "/llm":
             self._local_slash_clear_input(source_editor=source_editor)
             if len(parts) == 1:
-                QMessageBox.information(self, "模型列表", self._local_slash_llm_text())
-                self._set_status("已显示当前模型列表。")
+                self._show_local_slash_feedback("当前模型列表", self._local_slash_llm_text(), status_text="已显示当前模型列表。")
                 return True
             disabled_reason = ""
             channel_checker = getattr(self, "_is_channel_process_session", None)
@@ -211,10 +306,10 @@ class BridgeRuntimeMixin:
             except Exception:
                 disabled_reason = ""
             if disabled_reason:
-                QMessageBox.information(self, "当前会话只读", disabled_reason)
-                self._set_status(disabled_reason)
+                self._show_local_slash_feedback("当前会话只读", disabled_reason, status_text=disabled_reason)
                 return True
             if self._local_slash_switch_llm(parts[1]):
+                self._show_local_slash_feedback("已切换模型。", status_text="已切换模型。")
                 return True
             valid_ids = []
             for pos, llm in enumerate(self.llms):
@@ -223,7 +318,7 @@ class BridgeRuntimeMixin:
                 except Exception:
                     continue
             detail = f"有效编号: {', '.join(dict.fromkeys(valid_ids))}" if valid_ids else "当前没有可用的 LLM 配置。"
-            QMessageBox.warning(self, "切换失败", f"用法: /llm N\n{detail}")
+            self._show_local_slash_feedback("切换失败", f"用法: /llm N\n{detail}", status_text="斜杠命令 /llm 执行失败。")
             return True
         if op == "/continue":
             self._local_slash_clear_input(source_editor=source_editor)
@@ -232,7 +327,7 @@ class BridgeRuntimeMixin:
             try:
                 target_index = int(parts[1]) - 1
             except Exception:
-                self._set_status("用法: /continue 或 /continue N")
+                self._show_local_slash_feedback("恢复失败", "用法: /continue 或 /continue N", status_text="用法: /continue 或 /continue N")
                 return True
             return self._local_slash_restore_session(target_index)
         return False
@@ -313,7 +408,7 @@ class BridgeRuntimeMixin:
     def _resolve_bridge_python(self):
         cfg_py = str((getattr(self, "cfg", {}) or {}).get("python_exe") or "").strip()
         if cfg_py:
-            resolved = lz._resolve_config_path(cfg_py)
+            resolved = lz._resolve_configured_python_exe(cfg_py, agent_dir=self.agent_dir)
             if resolved and os.path.isfile(resolved):
                 return resolved, None
 
@@ -329,7 +424,7 @@ class BridgeRuntimeMixin:
         if not py:
             return
         try:
-            rel = lz._make_config_relative_path(py)
+            rel = lz._make_python_exe_config_path(py, agent_dir=self.agent_dir)
         except Exception:
             return
         if not rel:
@@ -746,6 +841,82 @@ class BridgeRuntimeMixin:
             return str(self.llm_combo.itemText(idx) or "").strip()
         return ""
 
+    def _current_api_card_info(self):
+        idx = 0
+        try:
+            idx = self._current_llm_index()
+        except Exception:
+            idx = 0
+        try:
+            configs = (lz.parse_mykey_py(os.path.join(self.agent_dir, "mykey.py")).get("configs") or [])
+        except Exception:
+            configs = []
+        cfg = configs[idx] if 0 <= int(idx or 0) < len(configs) else None
+        if isinstance(cfg, dict):
+            var = str(cfg.get("var") or "").strip()
+            data = cfg.get("data") if isinstance(cfg.get("data"), dict) else {}
+            label = str(data.get("name") or data.get("model") or var).strip() or var
+            return {"llm_idx": int(idx or 0), "api_card_var": var, "api_card_label": label}
+        return {"llm_idx": int(idx or 0), "api_card_var": "", "api_card_label": ""}
+
+    def _current_usage_target_info(self):
+        session = self.current_session if isinstance(getattr(self, "current_session", None), dict) else {}
+        scope = str(session.get("device_scope") or "local").strip().lower()
+        if scope not in ("local", "remote"):
+            scope = "local"
+        device_id = str(session.get("device_id") or "").strip() if scope == "remote" else "local"
+        if scope == "remote" and not device_id:
+            scope = "local"
+            device_id = "local"
+        return {"device_scope": scope, "device_id": device_id, "target_key": lz.usage_pricing_target_key(scope, device_id)}
+
+    def _build_usage_event(self, *, text="", model="", source="estimate"):
+        api_card = self._current_api_card_info()
+        target = self._current_usage_target_info()
+        input_tokens = lz._estimate_tokens(text)
+        event = {
+            "ts": time.time(),
+            "input_tokens": input_tokens,
+            "output_tokens": 0,
+            "total_tokens": input_tokens,
+            "channel_id": str((self.current_session or {}).get("channel_id") or "launcher").strip().lower(),
+            "model": str(model or self._current_llm_name() or "").strip(),
+            "usage_source": str(source or "estimate").strip().lower() or "estimate",
+            "billing_mode": "pending",
+            **api_card,
+            **target,
+        }
+        if not event.get("api_card_var"):
+            event.pop("api_card_var", None)
+            event.pop("api_card_label", None)
+        return event
+
+    def _finalize_usage_event_billing(self, event):
+        if not isinstance(event, dict):
+            return event
+        if lz.usage_event_is_priced(event):
+            return event
+        scope = str(event.get("device_scope") or (self.current_session or {}).get("device_scope") or "local").strip().lower()
+        device_id = str(event.get("device_id") or (self.current_session or {}).get("device_id") or "local").strip()
+        api_var = str(event.get("api_card_var") or "").strip()
+        if not api_var:
+            api_card = self._current_api_card_info()
+            api_var = str(api_card.get("api_card_var") or "").strip()
+            if api_var:
+                event["api_card_var"] = api_var
+                event["api_card_label"] = str(api_card.get("api_card_label") or api_var).strip() or api_var
+                event["llm_idx"] = int(api_card.get("llm_idx", event.get("llm_idx", 0)) or 0)
+        if not api_var:
+            event["billing_mode"] = "legacy_unpriced"
+            return event
+        pricing = lz.normalize_usage_pricing_config(getattr(self, "cfg", {}) or {})
+        rule = lz.usage_price_rule(getattr(self, "cfg", {}) or {}, scope, device_id, api_var)
+        snapshot = lz.usage_price_snapshot(rule, pricing.get("currency") or "USD")
+        if not snapshot:
+            event["billing_mode"] = "unpriced"
+            return event
+        return lz.apply_usage_price_snapshot(event, snapshot)
+
     def _mark_current_llm_index(self, combo_index: int):
         try:
             combo_pos = int(combo_index)
@@ -884,13 +1055,16 @@ class BridgeRuntimeMixin:
             floating_sync()
 
     def _current_llm_index(self) -> int:
-        for pos, llm in enumerate(self.llms):
+        for pos, llm in enumerate(getattr(self, "llms", None) or []):
             if llm.get("current"):
                 try:
                     return int(llm.get("idx", pos) or pos)
                 except Exception:
                     return pos
-        idx = self.llm_combo.currentIndex()
+        combo = getattr(self, "llm_combo", None)
+        if combo is None:
+            return 0
+        idx = combo.currentIndex()
         if idx >= 0:
             data = self.llm_combo.itemData(idx)
             try:
@@ -1388,15 +1562,7 @@ class BridgeRuntimeMixin:
         self._refresh_composer_enabled()
 
         usage = self.current_session.get("token_usage") or {}
-        event = {
-            "ts": time.time(),
-            "input_tokens": lz._estimate_tokens(clean_text),
-            "output_tokens": 0,
-            "total_tokens": lz._estimate_tokens(clean_text),
-            "channel_id": str(self.current_session.get("channel_id") or "launcher").strip().lower(),
-            "model": "remote",
-            "usage_source": "estimate",
-        }
+        event = self._build_usage_event(text=clean_text, model="remote", source="estimate")
         usage.setdefault("events", []).append(event)
         usage["last_model"] = "remote"
         self.current_session["token_usage"] = usage
@@ -1565,15 +1731,7 @@ class BridgeRuntimeMixin:
         self._refresh_composer_enabled()
 
         usage = self.current_session.get("token_usage") or {}
-        event = {
-            "ts": time.time(),
-            "input_tokens": lz._estimate_tokens(text),
-            "output_tokens": 0,
-            "total_tokens": lz._estimate_tokens(text),
-            "channel_id": str(self.current_session.get("channel_id") or "launcher").strip().lower(),
-            "model": self._current_llm_name(),
-            "usage_source": "estimate",
-        }
+        event = self._build_usage_event(text=text, model=self._current_llm_name(), source="estimate")
         usage.setdefault("events", []).append(event)
         usage["last_model"] = event["model"]
         self.current_session["token_usage"] = usage
@@ -1730,6 +1888,7 @@ class BridgeRuntimeMixin:
                 target["total_tokens"] = int(target.get("input_tokens", 0) or 0) + output_tokens
                 target["usage_source"] = str(target.get("usage_source") or "estimate")
             target["model"] = target.get("model") or self._current_llm_name()
+            self._finalize_usage_event_billing(target)
             usage["events"] = events
             usage["last_model"] = target.get("model") or ""
             self.current_session["token_usage"] = usage
@@ -1807,6 +1966,18 @@ class BridgeRuntimeMixin:
         et = ev.get("event")
         if et == "bridge_text":
             return
+        if et == "subagent_runtime_count":
+            target_key = str(ev.get("target_key") or "").strip()
+            if str(getattr(self, "_subagent_runtime_refresh_inflight_key", "") or "").strip() == target_key:
+                self._subagent_runtime_refresh_inflight_key = ""
+            applier = getattr(self, "_apply_subagent_runtime_count", None)
+            if callable(applier):
+                applier(
+                    ev.get("count"),
+                    target_key=target_key,
+                    scanned_at=ev.get("scanned_at"),
+                )
+            return
         if et == "remote_done":
             target_sid = str(ev.get("session_id") or "").strip()
             current_sid = str((self.current_session or {}).get("id") or "").strip()
@@ -1843,6 +2014,10 @@ class BridgeRuntimeMixin:
             )
             return
         if et == "remote_error":
+            target_sid = str(ev.get("session_id") or "").strip()
+            current_sid = str((self.current_session or {}).get("id") or "").strip()
+            if target_sid and current_sid and target_sid != current_sid:
+                return
             msg = str(ev.get("msg") or "远程执行失败。").strip() or "远程执行失败。"
             self._clear_active_turn_attachments()
             discard_stream = getattr(self, "_discard_stream_row", None)

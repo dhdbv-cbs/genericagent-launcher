@@ -194,7 +194,7 @@ def _call_with_retry(func, *, attempts=3, retry_if=None):
 
 
 def _http_json_with_fallback(path: str, *, custom_candidates=None, timeout=12, attempts_per_url=3):
-    last_errors = []
+    last_errors: list[str] = []
     for url in _build_github_api_urls(path, custom_candidates=custom_candidates):
         req = urllib.request.Request(
             url,
@@ -248,7 +248,7 @@ def _asset_by_name(release: dict, names):
 
 def _version_tuple(version_text: str):
     text = str(version_text or "").strip().lower().lstrip("v")
-    parts = []
+    parts: list[int | str] = []
     for chunk in re.split(r"[.+-]", text):
         if chunk.isdigit():
             parts.append(int(chunk))
@@ -419,20 +419,161 @@ def _save_job_state(job_file: str, job: dict, **patch):
     return payload
 
 
+_MALFORMED_UPDATE_LOCK_STALE_SECONDS = 2.0
+
+
+def _parse_update_lock_owner_pid(raw_text) -> int:
+    text = str(raw_text or "").strip()
+    if not text:
+        return 0
+    try:
+        return int(text)
+    except Exception:
+        pass
+    try:
+        payload = json.loads(text)
+    except Exception:
+        return 0
+    if not isinstance(payload, dict):
+        return 0
+    try:
+        return int(payload.get("pid") or 0)
+    except Exception:
+        return 0
+
+
+def _update_lock_owner_running(pid: int):
+    target = _int_or(pid, 0, minimum=0)
+    if target <= 0:
+        return False
+    if os.name != "nt":
+        try:
+            os.kill(target, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        except OSError:
+            return False
+        return True
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except Exception:
+        return None
+    kernel32 = getattr(ctypes, "windll", None)
+    kernel32 = getattr(kernel32, "kernel32", None)
+    if kernel32 is None:
+        return None
+    process_access = 0x1000 | 0x00100000
+    still_active = 259
+    error_access_denied = 5
+    error_invalid_parameter = 87
+    try:
+        ctypes.set_last_error(0)
+    except Exception:
+        pass
+    try:
+        handle = kernel32.OpenProcess(process_access, False, target)
+    except Exception:
+        return None
+    if not handle:
+        try:
+            err = int(ctypes.get_last_error() or 0)
+        except Exception:
+            err = 0
+        if err == error_access_denied:
+            return True
+        if err == error_invalid_parameter:
+            return False
+        return None
+    try:
+        exit_code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+            return None
+        return int(exit_code.value) == still_active
+    finally:
+        try:
+            kernel32.CloseHandle(handle)
+        except Exception:
+            pass
+
+
+def _classify_update_lock(lock_path: str):
+    try:
+        stat = os.stat(lock_path)
+    except FileNotFoundError:
+        return "missing", ""
+    except OSError as e:
+        return "uncertain", f"stat failed: {e}"
+    try:
+        with open(lock_path, "r", encoding="utf-8", errors="ignore") as f:
+            raw_text = f.read(256)
+    except FileNotFoundError:
+        return "missing", ""
+    except OSError as e:
+        return "uncertain", f"read failed: {e}"
+    owner_pid = _parse_update_lock_owner_pid(raw_text)
+    if owner_pid > 0:
+        running = _update_lock_owner_running(owner_pid)
+        if running is True:
+            return "active", f"pid={owner_pid}"
+        if running is False:
+            return "stale", f"pid={owner_pid} not running"
+        return "uncertain", f"pid={owner_pid} status unknown"
+    age_seconds = max(0.0, float(time.time()) - float(getattr(stat, "st_mtime", 0.0) or 0.0))
+    if age_seconds >= _MALFORMED_UPDATE_LOCK_STALE_SECONDS:
+        text = str(raw_text or "").strip()
+        if not text:
+            return "stale", "empty lock payload"
+        preview = text.replace("\r", " ").replace("\n", " ")[:80]
+        return "stale", f"invalid lock payload: {preview}"
+    return "uncertain", "lock payload not ready"
+
+
 @contextmanager
 def _update_lock(timeout_seconds=30):
     lock_path = launcher_data_path("updates", "update.lock")
     started = time.time()
+    last_wait_detail = ""
     while True:
         try:
             fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_RDWR)
         except FileExistsError:
+            state, detail = _classify_update_lock(lock_path)
+            last_wait_detail = f"{state}: {detail}" if detail else str(state or "existing")
+            if state == "missing":
+                last_wait_detail = "missing: lock disappeared before retry"
+                continue
+            if state == "stale":
+                try:
+                    os.remove(lock_path)
+                except FileNotFoundError:
+                    last_wait_detail = "missing: stale lock disappeared before cleanup"
+                    continue
+                except OSError as e:
+                    last_wait_detail = _trim_detail(
+                        f"stale cleanup failed ({detail or 'unknown stale lock'}): {e}",
+                        limit=240,
+                    )
+                else:
+                    updater_log(f"[lock] removed stale update.lock: {detail}")
+                    continue
             if time.time() - started > max(3, int(timeout_seconds or 30)):
-                raise UpdateError(ERR_LOCK_TIMEOUT, "更新锁等待超时", phase="prepare")
+                raise UpdateError(
+                    ERR_LOCK_TIMEOUT,
+                    "更新锁等待超时",
+                    phase="prepare",
+                    detail=last_wait_detail or "lock state unknown",
+                )
             time.sleep(0.25)
             continue
         try:
             os.write(fd, f"{os.getpid()}".encode("utf-8"))
+            try:
+                os.fsync(fd)
+            except Exception:
+                pass
             yield lock_path
         finally:
             try:

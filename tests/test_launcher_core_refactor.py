@@ -12,6 +12,8 @@ from unittest import mock
 
 import bridge
 import launcher_bootstrap
+from PySide6.QtCore import QRect
+from PySide6.QtTest import QTest
 from launcher_app import core as lz
 from launcher_app import window as launcher_window
 from launcher_core_parts import constants
@@ -19,9 +21,12 @@ from launcher_core_parts import model_api, runtime
 from qt_chat_parts import api_editor
 from qt_chat_parts import common as chat_common
 from qt_chat_parts import bridge_runtime
+from qt_chat_parts import dependency_runtime
 from qt_chat_parts.api_editor import ApiEditorMixin
 from qt_chat_parts.bridge_runtime import BridgeRuntimeMixin
+from qt_chat_parts.chat_view import ChatViewMixin
 from qt_chat_parts import channel_runtime
+from qt_chat_parts.dependency_runtime import DependencyRuntimeMixin
 from qt_chat_parts import personal_usage
 from qt_chat_parts import schedule_runtime
 from qt_chat_parts import settings_panel
@@ -59,6 +64,8 @@ class LauncherCoreFacadeTests(unittest.TestCase):
             "save_config",
             "_resolve_config_path",
             "_make_config_relative_path",
+            "_resolve_configured_python_exe",
+            "_make_python_exe_config_path",
             "_normalize_token_usage_inplace",
             "terminate_process_tree",
             "list_scheduled_tasks",
@@ -91,6 +98,93 @@ class LauncherCoreFacadeTests(unittest.TestCase):
             finally:
                 runtime.APP_DIR = original_app_dir
 
+    def test_runtime_python_exe_helpers_round_trip_project_relative_path(self):
+        with tempfile.TemporaryDirectory() as td:
+            original_app_dir = runtime.APP_DIR
+            original_data_root = runtime.DATA_ROOT
+            runtime.APP_DIR = os.path.join(td, "launcher")
+            runtime.DATA_ROOT = os.path.join(td, "data")
+            agent_dir = os.path.join(td, "agent")
+            python_exe = os.path.join(agent_dir, "venv", "bin", "python")
+            os.makedirs(os.path.dirname(python_exe), exist_ok=True)
+            with open(python_exe, "w", encoding="utf-8") as f:
+                f.write("#!/usr/bin/env python3\n")
+            try:
+                rel = runtime._make_python_exe_config_path(python_exe, agent_dir=agent_dir)
+                self.assertEqual(rel, os.path.join("venv", "bin", "python"))
+
+                resolved = runtime._resolve_configured_python_exe(rel, agent_dir=agent_dir)
+                self.assertEqual(os.path.normpath(resolved), os.path.normpath(python_exe))
+            finally:
+                runtime.APP_DIR = original_app_dir
+                runtime.DATA_ROOT = original_data_root
+
+    def test_runtime_python_exe_helpers_expand_user_home_path(self):
+        with tempfile.TemporaryDirectory() as td:
+            original_app_dir = runtime.APP_DIR
+            original_data_root = runtime.DATA_ROOT
+            runtime.APP_DIR = os.path.join(td, "launcher")
+            runtime.DATA_ROOT = os.path.join(td, "data")
+            agent_dir = os.path.join(td, "agent")
+            home_dir = os.path.join(td, "home")
+            python_exe = os.path.join(home_dir, "miniforge3", "bin", "python")
+            os.makedirs(os.path.dirname(python_exe), exist_ok=True)
+            with open(python_exe, "w", encoding="utf-8") as f:
+                f.write("#!/usr/bin/env python3\n")
+            try:
+                with mock.patch.object(
+                    runtime.os.path,
+                    "expanduser",
+                    side_effect=lambda value: value.replace("~", home_dir, 1) if str(value).startswith("~") else value,
+                ):
+                    resolved = runtime._resolve_configured_python_exe("~/miniforge3/bin/python", agent_dir=agent_dir)
+                    stored = runtime._make_python_exe_config_path("~/miniforge3/bin/python", agent_dir=agent_dir)
+            finally:
+                runtime.APP_DIR = original_app_dir
+                runtime.DATA_ROOT = original_data_root
+
+        self.assertEqual(os.path.normpath(resolved), os.path.normpath(python_exe))
+        self.assertEqual(os.path.normpath(stored), os.path.normpath(python_exe))
+
+    def test_runtime_python_exe_helpers_resolve_path_command_name(self):
+        with tempfile.TemporaryDirectory() as td:
+            original_app_dir = runtime.APP_DIR
+            original_data_root = runtime.DATA_ROOT
+            runtime.APP_DIR = os.path.join(td, "launcher")
+            runtime.DATA_ROOT = os.path.join(td, "data")
+            agent_dir = os.path.join(td, "agent")
+            python_exe = os.path.join(td, "homebrew", "bin", "python3")
+            os.makedirs(os.path.dirname(python_exe), exist_ok=True)
+            with open(python_exe, "w", encoding="utf-8") as f:
+                f.write("#!/usr/bin/env python3\n")
+            try:
+                with mock.patch.object(runtime.shutil, "which", return_value=python_exe):
+                    resolved = runtime._resolve_configured_python_exe("python3", agent_dir=agent_dir)
+                    stored = runtime._make_python_exe_config_path("python3", agent_dir=agent_dir)
+            finally:
+                runtime.APP_DIR = original_app_dir
+                runtime.DATA_ROOT = original_data_root
+
+        self.assertEqual(os.path.normpath(resolved), os.path.normpath(python_exe))
+        self.assertEqual(os.path.normpath(stored), os.path.normpath(python_exe))
+
+    def test_runtime_python_exe_helpers_ignore_non_python_command_name(self):
+        with tempfile.TemporaryDirectory() as td:
+            original_app_dir = runtime.APP_DIR
+            original_data_root = runtime.DATA_ROOT
+            runtime.APP_DIR = os.path.join(td, "launcher")
+            runtime.DATA_ROOT = os.path.join(td, "data")
+            agent_dir = os.path.join(td, "agent")
+            try:
+                with mock.patch.object(runtime.shutil, "which", return_value=os.path.join(td, "bin", "uv")) as which_mock:
+                    resolved = runtime._resolve_configured_python_exe("uv", agent_dir=agent_dir)
+            finally:
+                runtime.APP_DIR = original_app_dir
+                runtime.DATA_ROOT = original_data_root
+
+        self.assertEqual(os.path.normpath(resolved), os.path.normpath(os.path.join(agent_dir, "uv")))
+        which_mock.assert_not_called()
+
     def test_launcher_version_info_prefers_macos_resources_version_json(self):
         with tempfile.TemporaryDirectory() as td:
             app_dir = os.path.join(td, "GenericAgent Launcher.app", "Contents", "MacOS")
@@ -112,6 +206,143 @@ class LauncherCoreFacadeTests(unittest.TestCase):
 
         self.assertEqual(info["version"], "1.2.3")
         self.assertEqual(info["commit"], "new")
+
+    def test_check_runtime_dependencies_from_locate_syncs_python_input_before_check(self):
+        class DummyEdit:
+            def __init__(self, text=""):
+                self._text = str(text)
+
+            def text(self):
+                return self._text
+
+            def setText(self, value):
+                self._text = str(value)
+
+        class DummyCombo:
+            def currentData(self):
+                return "uv"
+
+        class DummyDependency(DependencyRuntimeMixin):
+            _check_runtime_dependencies_from_locate = DependencyRuntimeMixin._check_runtime_dependencies_from_locate
+
+            def __init__(self, agent_dir, python_text):
+                self.agent_dir = agent_dir
+                self.cfg = {}
+                self.locate_path_edit = DummyEdit(agent_dir)
+                self.locate_python_edit = DummyEdit(python_text)
+                self.locate_dependency_installer_combo = DummyCombo()
+                self.calls = []
+
+            def _set_agent_dir(self, value):
+                self.agent_dir = str(value)
+
+            def _check_runtime_dependencies(self, **kwargs):
+                self.calls.append(dict(kwargs))
+                return True
+
+        with tempfile.TemporaryDirectory() as td:
+            python_exe = os.path.join(td, "venv", "bin", "python")
+            os.makedirs(os.path.dirname(python_exe), exist_ok=True)
+            with open(python_exe, "w", encoding="utf-8") as f:
+                f.write("#!/usr/bin/env python3\n")
+
+            dummy = DummyDependency(td, os.path.join("venv", "bin", "python"))
+            saved = []
+            with mock.patch.object(lz, "save_config", side_effect=lambda cfg: saved.append(dict(cfg))), mock.patch.object(
+                lz, "is_valid_agent_dir", return_value=True
+            ), mock.patch.object(
+                dependency_runtime.QMessageBox, "warning"
+            ) as warning_box:
+                dummy._check_runtime_dependencies_from_locate()
+
+        self.assertEqual(dummy.cfg["dependency_installer"], "uv")
+        self.assertEqual(dummy.cfg["python_exe"], os.path.join("venv", "bin", "python"))
+        self.assertEqual(dummy.locate_python_edit.text(), os.path.join("venv", "bin", "python"))
+        self.assertTrue(saved)
+        self.assertEqual(len(dummy.calls), 1)
+        self.assertEqual(dummy.calls[0]["purpose"], "载入内核")
+        self.assertTrue(dummy.calls[0]["ignore_cache"])
+        warning_box.assert_not_called()
+
+    def test_check_runtime_dependencies_from_locate_accepts_python3_command_name(self):
+        class DummyEdit:
+            def __init__(self, text=""):
+                self._text = str(text)
+
+            def text(self):
+                return self._text
+
+            def setText(self, value):
+                self._text = str(value)
+
+        class DummyCombo:
+            def currentData(self):
+                return "auto"
+
+        class DummyDependency(DependencyRuntimeMixin):
+            _check_runtime_dependencies_from_locate = DependencyRuntimeMixin._check_runtime_dependencies_from_locate
+
+            def __init__(self, agent_dir, python_text):
+                self.agent_dir = agent_dir
+                self.cfg = {}
+                self.locate_path_edit = DummyEdit(agent_dir)
+                self.locate_python_edit = DummyEdit(python_text)
+                self.locate_dependency_installer_combo = DummyCombo()
+                self.calls = []
+
+            def _set_agent_dir(self, value):
+                self.agent_dir = str(value)
+
+            def _check_runtime_dependencies(self, **kwargs):
+                self.calls.append(dict(kwargs))
+                return True
+
+        with tempfile.TemporaryDirectory() as td:
+            python_exe = os.path.join(td, "homebrew", "bin", "python3")
+            os.makedirs(os.path.dirname(python_exe), exist_ok=True)
+            with open(python_exe, "w", encoding="utf-8") as f:
+                f.write("#!/usr/bin/env python3\n")
+
+            dummy = DummyDependency(td, "python3")
+            expected_cfg_path = os.path.join("homebrew", "bin", "python3")
+            saved = []
+            with mock.patch.object(runtime.shutil, "which", return_value=python_exe), mock.patch.object(
+                lz, "save_config", side_effect=lambda cfg: saved.append(dict(cfg))
+            ), mock.patch.object(
+                lz, "is_valid_agent_dir", return_value=True
+            ), mock.patch.object(
+                dependency_runtime.QMessageBox, "warning"
+            ) as warning_box:
+                dummy._check_runtime_dependencies_from_locate()
+
+        self.assertEqual(dummy.cfg["python_exe"], expected_cfg_path)
+        self.assertEqual(dummy.locate_python_edit.text(), expected_cfg_path)
+        self.assertTrue(saved)
+        self.assertEqual(saved[-1]["python_exe"], expected_cfg_path)
+        self.assertNotEqual(saved[-1]["python_exe"], "python3")
+        self.assertEqual(len(dummy.calls), 1)
+        warning_box.assert_not_called()
+
+    def test_resolve_bridge_python_supports_project_relative_python_exe(self):
+        class DummyBridge(BridgeRuntimeMixin):
+            _resolve_bridge_python = BridgeRuntimeMixin._resolve_bridge_python
+
+            def __init__(self, agent_dir):
+                self.agent_dir = agent_dir
+                self.cfg = {"python_exe": os.path.join("venv", "bin", "python")}
+                self._last_dependency_check = {}
+
+        with tempfile.TemporaryDirectory() as td:
+            python_exe = os.path.join(td, "venv", "bin", "python")
+            os.makedirs(os.path.dirname(python_exe), exist_ok=True)
+            with open(python_exe, "w", encoding="utf-8") as f:
+                f.write("#!/usr/bin/env python3\n")
+
+            dummy = DummyBridge(td)
+            py, detail = dummy._resolve_bridge_python()
+
+        self.assertEqual(os.path.normpath(py), os.path.normpath(python_exe))
+        self.assertIsNone(detail)
 
     def test_launcher_version_info_falls_back_to_legacy_macos_version_json(self):
         with tempfile.TemporaryDirectory() as td:
@@ -322,8 +553,8 @@ class LauncherCoreFacadeTests(unittest.TestCase):
             return_value=("/usr/local/bin/python3", "All Files (*)"),
         ) as picker, mock.patch.object(
             lz,
-            "_make_config_relative_path",
-            side_effect=lambda value: value,
+            "_make_python_exe_config_path",
+            side_effect=lambda value, **_kwargs: value,
         ):
             dummy._choose_python_executable()
 
@@ -1158,6 +1389,137 @@ class LauncherCoreFacadeTests(unittest.TestCase):
         self.assertEqual(dummy.new_session_calls, [(False, "local", "local", False)])
         info_box.assert_not_called()
 
+    def test_input_text_edit_keeps_focus_and_typing_when_slash_popup_visible(self):
+        app = launcher_window.QApplication.instance() or launcher_window.QApplication([])
+        editor = chat_common.InputTextEdit(lambda: None)
+
+        def provider(query, editor=None):
+            text = str(query or "").strip().lower()
+            if text.startswith("/h"):
+                return [{"command": "/help", "insert_text": "/help", "description": "显示帮助"}]
+            return [
+                {"command": "/help", "insert_text": "/help", "description": "显示帮助"},
+                {"command": "/history", "insert_text": "/history", "description": "查看历史"},
+            ]
+
+        host = chat_common.QWidget()
+        layout = chat_common.QVBoxLayout(host)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(editor)
+        host.resize(420, 120)
+        host.show()
+        try:
+            editor.resize(420, 96)
+            editor.set_slash_command_provider(provider)
+            editor.setFocus(chat_common.Qt.OtherFocusReason)
+            app.processEvents()
+
+            QTest.keyClicks(editor, "/")
+            app.processEvents()
+
+            popup = editor._ensure_slash_popup()
+            self.assertTrue(popup.isVisible())
+            self.assertIs(app.focusWidget(), editor)
+            self.assertEqual(popup.count(), 2)
+
+            QTest.keyClicks(editor, "h")
+            app.processEvents()
+
+            self.assertEqual(editor.toPlainText(), "/h")
+            self.assertIs(app.focusWidget(), editor)
+            self.assertTrue(popup.isVisible())
+            self.assertEqual(popup.count(), 1)
+        finally:
+            popup = getattr(editor, "_slash_popup", None)
+            if popup is not None:
+                popup.hide()
+                popup.deleteLater()
+            host.close()
+            host.deleteLater()
+            app.processEvents()
+
+    def test_input_text_edit_positions_slash_popup_above_editor_when_space_allows(self):
+        editor = chat_common.InputTextEdit(lambda: None)
+        editor.resize(420, 96)
+        popup = chat_common.QListWidget()
+
+        class DummyScreen:
+            def availableGeometry(self):
+                return QRect(0, 0, 1280, 720)
+
+        try:
+            with mock.patch.object(chat_common.QApplication, "screenAt", return_value=DummyScreen()), mock.patch.object(
+                editor, "mapToGlobal", return_value=chat_common.QPoint(100, 300)
+            ):
+                editor._position_slash_popup(popup, width=320, height=90)
+        finally:
+            popup.hide()
+            popup.deleteLater()
+
+        self.assertEqual(popup.x(), 100)
+        self.assertEqual(popup.y(), 206)
+
+    def test_input_text_edit_tab_accepts_slash_suggestion_and_enter_still_submits(self):
+        app = launcher_window.QApplication.instance() or launcher_window.QApplication([])
+        submitted = []
+
+        editor = chat_common.InputTextEdit(lambda: submitted.append("sent"))
+
+        def provider(query, editor=None):
+            text = str(query or "").strip().lower()
+            if text.startswith("/ll"):
+                return [{"command": "/llm N", "insert_text": "/llm ", "description": "切换到第 N 个模型"}]
+            return [
+                {"command": "/help", "insert_text": "/help", "description": "显示帮助"},
+                {"command": "/llm N", "insert_text": "/llm ", "description": "切换到第 N 个模型"},
+            ]
+
+        host = chat_common.QWidget()
+        layout = chat_common.QVBoxLayout(host)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(editor)
+        host.resize(420, 120)
+        host.show()
+        try:
+            editor.resize(420, 96)
+            editor.set_slash_command_provider(provider)
+            editor.setFocus(chat_common.Qt.OtherFocusReason)
+            app.processEvents()
+
+            QTest.keyClicks(editor, "/ll")
+            app.processEvents()
+
+            popup = editor._ensure_slash_popup()
+            self.assertTrue(popup.isVisible())
+            self.assertEqual(popup.count(), 1)
+            self.assertIs(app.focusWidget(), editor)
+
+            QTest.keyClick(editor, chat_common.Qt.Key_Tab)
+            app.processEvents()
+
+            self.assertEqual(editor.toPlainText(), "/llm ")
+            self.assertEqual(submitted, [])
+            self.assertIs(app.focusWidget(), editor)
+
+            editor.setPlainText("/")
+            editor.moveCursor(chat_common.QTextCursor.End)
+            editor.setFocus(chat_common.Qt.OtherFocusReason)
+            app.processEvents()
+            self.assertTrue(popup.isVisible())
+
+            QTest.keyClick(editor, chat_common.Qt.Key_Return)
+            app.processEvents()
+
+            self.assertEqual(submitted, ["sent"])
+        finally:
+            popup = getattr(editor, "_slash_popup", None)
+            if popup is not None:
+                popup.hide()
+                popup.deleteLater()
+            host.close()
+            host.deleteLater()
+            app.processEvents()
+
     def test_submit_user_message_sends_images_and_clears_input_attachment_display_state(self):
         class DummyEditor:
             def __init__(self, text="hello"):
@@ -1679,6 +2041,7 @@ class LauncherCoreFacadeTests(unittest.TestCase):
             _handle_local_slash_command = BridgeRuntimeMixin._handle_local_slash_command
             _local_slash_clear_input = BridgeRuntimeMixin._local_slash_clear_input
             _local_slash_switch_llm = BridgeRuntimeMixin._local_slash_switch_llm
+            _show_local_slash_feedback = BridgeRuntimeMixin._show_local_slash_feedback
 
             def __init__(self):
                 self.llms = [
@@ -1689,6 +2052,8 @@ class LauncherCoreFacadeTests(unittest.TestCase):
                 self._ignore_llm_change = False
                 self._pending_input_attachments_data = []
                 self.changed = []
+                self.rows = []
+                self.statuses = []
 
             def _refresh_input_attachment_bar(self):
                 return None
@@ -1702,6 +2067,13 @@ class LauncherCoreFacadeTests(unittest.TestCase):
             def _on_llm_changed(self, index):
                 self.changed.append(int(index))
 
+            def _add_message_row(self, role, text, *, finished, auto_scroll):
+                self.rows.append((str(role), str(text), bool(finished), bool(auto_scroll)))
+                return object()
+
+            def _set_status(self, text):
+                self.statuses.append(str(text))
+
         dummy = DummyBridge()
         editor = DummyEditor()
         consumed = dummy._handle_local_slash_command("/llm 7", source_editor=editor)
@@ -1710,6 +2082,114 @@ class LauncherCoreFacadeTests(unittest.TestCase):
         self.assertEqual(editor.cleared, 1)
         self.assertEqual(dummy.llm_combo.current_index, 1)
         self.assertEqual(dummy.changed, [1])
+        self.assertEqual(dummy.statuses, ["已切换模型。"])
+
+    def test_handle_local_slash_help_emits_chat_feedback_instead_of_dialog(self):
+        class DummyEditor:
+            def __init__(self):
+                self.cleared = 0
+
+            def clear(self):
+                self.cleared += 1
+
+        class DummyBridge(BridgeRuntimeMixin):
+            _handle_local_slash_command = BridgeRuntimeMixin._handle_local_slash_command
+            _local_slash_clear_input = BridgeRuntimeMixin._local_slash_clear_input
+            _show_local_slash_feedback = BridgeRuntimeMixin._show_local_slash_feedback
+            _local_slash_help_text = BridgeRuntimeMixin._local_slash_help_text
+
+            def __init__(self):
+                self._pending_input_attachments_data = []
+                self.rows = []
+                self.statuses = []
+
+            def _refresh_input_attachment_bar(self):
+                return None
+
+            def _sync_draft_to_floating(self, *, force=False):
+                return None
+
+            def _add_message_row(self, role, text, *, finished, auto_scroll):
+                self.rows.append((str(role), str(text), bool(finished), bool(auto_scroll)))
+                return object()
+
+            def _set_status(self, text):
+                self.statuses.append(str(text))
+
+        dummy = DummyBridge()
+        editor = DummyEditor()
+        with mock.patch.object(bridge_runtime.QMessageBox, "information") as info_box:
+            consumed = dummy._handle_local_slash_command("/help", source_editor=editor)
+
+        self.assertTrue(consumed)
+        self.assertEqual(editor.cleared, 1)
+        self.assertTrue(dummy.rows)
+        self.assertIn("/help - 显示帮助", dummy.rows[-1][1])
+        self.assertEqual(dummy.statuses, ["已显示启动器支持的斜杠命令。"])
+        info_box.assert_not_called()
+
+    def test_handle_local_slash_help_feedback_stays_transient_and_local_only(self):
+        class DummyEditor:
+            def __init__(self):
+                self.cleared = 0
+
+            def clear(self):
+                self.cleared += 1
+
+        class DummyBridge(ChatViewMixin, BridgeRuntimeMixin):
+            _handle_local_slash_command = BridgeRuntimeMixin._handle_local_slash_command
+            _local_slash_clear_input = BridgeRuntimeMixin._local_slash_clear_input
+            _show_local_slash_feedback = BridgeRuntimeMixin._show_local_slash_feedback
+            _local_slash_help_text = BridgeRuntimeMixin._local_slash_help_text
+            _transient_chat_feedback_key = ChatViewMixin._transient_chat_feedback_key
+            _transient_chat_feedback_rows = ChatViewMixin._transient_chat_feedback_rows
+            _display_session_bubbles = ChatViewMixin._display_session_bubbles
+
+            def __init__(self):
+                self.current_session = {"id": "sess-1", "bubbles": [], "channel_id": "launcher"}
+                self._pending_input_attachments_data = []
+                self._transient_chat_feedback = []
+                self.rows = []
+                self.statuses = []
+                self.persisted = []
+                self.sent = []
+
+            def _refresh_input_attachment_bar(self):
+                return None
+
+            def _sync_draft_to_floating(self, *, force=False):
+                return None
+
+            def _add_message_row(self, role, text, *, finished, auto_scroll):
+                self.rows.append((str(role), str(text), bool(finished), bool(auto_scroll)))
+                return object()
+
+            def _set_status(self, text):
+                self.statuses.append(str(text))
+
+            def _persist_session(self, session):
+                self.persisted.append(dict(session))
+
+            def _send_cmd(self, payload):
+                self.sent.append(dict(payload))
+
+        dummy = DummyBridge()
+        editor = DummyEditor()
+        with mock.patch.object(bridge_runtime.QMessageBox, "information") as info_box:
+            consumed = dummy._handle_local_slash_command("/help", source_editor=editor)
+
+        visible = dummy._display_session_bubbles(dummy.current_session)
+        self.assertTrue(consumed)
+        self.assertEqual(editor.cleared, 1)
+        self.assertEqual(dummy.current_session["bubbles"], [])
+        self.assertEqual(dummy.persisted, [])
+        self.assertEqual(dummy.sent, [])
+        self.assertEqual(len(dummy._transient_chat_feedback), 1)
+        self.assertEqual(dummy._transient_chat_feedback[0]["key"], "session:sess-1")
+        self.assertEqual(len(visible), 1)
+        self.assertIn("/help - 显示帮助", visible[0]["text"])
+        self.assertEqual(dummy.statuses, ["已显示启动器支持的斜杠命令。"])
+        info_box.assert_not_called()
 
     def test_handle_local_slash_llm_respects_channel_process_read_only(self):
         class DummyEditor:
@@ -1730,6 +2210,7 @@ class LauncherCoreFacadeTests(unittest.TestCase):
             _handle_local_slash_command = BridgeRuntimeMixin._handle_local_slash_command
             _local_slash_clear_input = BridgeRuntimeMixin._local_slash_clear_input
             _local_slash_switch_llm = BridgeRuntimeMixin._local_slash_switch_llm
+            _show_local_slash_feedback = BridgeRuntimeMixin._show_local_slash_feedback
 
             def __init__(self):
                 self.current_session = {"id": "snap-1", "session_kind": "channel_process"}
@@ -1741,6 +2222,7 @@ class LauncherCoreFacadeTests(unittest.TestCase):
                 self._ignore_llm_change = False
                 self._pending_input_attachments_data = []
                 self.changed = []
+                self.rows = []
                 self.statuses = []
 
             def _refresh_input_attachment_bar(self):
@@ -1758,6 +2240,10 @@ class LauncherCoreFacadeTests(unittest.TestCase):
             def _set_status(self, text):
                 self.statuses.append(str(text))
 
+            def _add_message_row(self, role, text, *, finished, auto_scroll):
+                self.rows.append((str(role), str(text), bool(finished), bool(auto_scroll)))
+                return object()
+
         dummy = DummyBridge()
         editor = DummyEditor()
         with mock.patch.object(bridge_runtime.QMessageBox, "information") as info_box:
@@ -1768,8 +2254,8 @@ class LauncherCoreFacadeTests(unittest.TestCase):
         self.assertEqual(dummy.llm_combo.current_index, -1)
         self.assertEqual(dummy.changed, [])
         self.assertEqual(dummy.statuses, ["渠道进程会话仅支持查看日志，不能切换模型。"])
-        info_box.assert_called_once()
-        self.assertIn("不能切换模型", info_box.call_args.args[2])
+        self.assertIn("不能切换模型", dummy.rows[-1][1])
+        info_box.assert_not_called()
 
     def test_handle_local_slash_llm_invalid_index_reports_actual_valid_ids(self):
         class DummyEditor:
@@ -1783,6 +2269,7 @@ class LauncherCoreFacadeTests(unittest.TestCase):
             _handle_local_slash_command = BridgeRuntimeMixin._handle_local_slash_command
             _local_slash_clear_input = BridgeRuntimeMixin._local_slash_clear_input
             _local_slash_switch_llm = BridgeRuntimeMixin._local_slash_switch_llm
+            _show_local_slash_feedback = BridgeRuntimeMixin._show_local_slash_feedback
 
             def __init__(self):
                 self.llms = [
@@ -1791,12 +2278,21 @@ class LauncherCoreFacadeTests(unittest.TestCase):
                 ]
                 self.llm_combo = None
                 self._pending_input_attachments_data = []
+                self.rows = []
+                self.statuses = []
 
             def _refresh_input_attachment_bar(self):
                 return None
 
             def _sync_draft_to_floating(self, *, force=False):
                 return None
+
+            def _add_message_row(self, role, text, *, finished, auto_scroll):
+                self.rows.append((str(role), str(text), bool(finished), bool(auto_scroll)))
+                return object()
+
+            def _set_status(self, text):
+                self.statuses.append(str(text))
 
         dummy = DummyBridge()
         editor = DummyEditor()
@@ -1805,8 +2301,9 @@ class LauncherCoreFacadeTests(unittest.TestCase):
 
         self.assertTrue(consumed)
         self.assertEqual(editor.cleared, 1)
-        warning_box.assert_called_once()
-        self.assertIn("有效编号: 0, 7", warning_box.call_args.args[2])
+        self.assertIn("有效编号: 0, 7", dummy.rows[-1][1])
+        self.assertEqual(dummy.statuses, ["斜杠命令 /llm 执行失败。"])
+        warning_box.assert_not_called()
 
     def test_set_agent_dir_stops_lan_interface_when_switching_agent(self):
         class DummyList:
@@ -3258,6 +3755,63 @@ class LauncherCoreFacadeTests(unittest.TestCase):
         self.assertTrue(kwargs.get("start_new_session"))
         self.assertIn("env", kwargs)
 
+    def test_launch_visible_terminal_script_uses_new_console_on_windows(self):
+        popen_mock = mock.Mock(return_value=object())
+        with mock.patch.object(runtime.os, "name", "nt"), mock.patch.object(
+            runtime.subprocess, "Popen", popen_mock
+        ), mock.patch.object(runtime, "_external_subprocess_env", return_value={"PYTHONUTF8": "1"}), mock.patch.object(
+            runtime.tempfile, "mkstemp", return_value=(123, r"C:\temp\ga_tui_launch_test.cmd")
+        ), mock.patch.object(
+            runtime.os, "close", return_value=None
+        ), mock.patch(
+            "builtins.open", mock.mock_open()
+        ) as open_mock:
+            self.assertTrue(
+                runtime.launch_visible_terminal_script(
+                    "C:\\Python\\python.exe",
+                    "C:\\agent\\frontends\\tuiapp.py",
+                    cwd="C:\\agent",
+                    env={"KEEP": "1"},
+                    title="终端 TUI",
+                )
+            )
+
+        _args, kwargs = popen_mock.call_args
+        self.assertEqual(_args[0][0:3], ["cmd.exe", "/d", "/k"])
+        self.assertEqual(_args[0][3], r"C:\temp\ga_tui_launch_test.cmd")
+        self.assertEqual(kwargs["cwd"], "C:\\agent")
+        self.assertEqual(kwargs["env"], {"PYTHONUTF8": "1"})
+        self.assertEqual(kwargs["creationflags"], getattr(runtime.subprocess, "CREATE_NEW_CONSOLE", 0))
+        handle = open_mock()
+        written = "".join(call.args[0] for call in handle.write.call_args_list)
+        self.assertIn("@echo off", written)
+        self.assertIn("title 终端 TUI", written)
+        self.assertIn('cd /d "C:\\agent"', written)
+        self.assertIn('"C:\\Python\\python.exe" "frontends\\tuiapp.py"', written)
+
+    def test_launch_visible_terminal_script_uses_osascript_on_macos(self):
+        run_mock = mock.Mock(return_value=mock.Mock(returncode=0, stdout="", stderr=""))
+        with mock.patch.object(runtime.os, "name", "posix"), mock.patch.object(runtime, "IS_MACOS", True), mock.patch.object(
+            runtime.subprocess, "run", run_mock
+        ), mock.patch.object(runtime, "_external_subprocess_env", return_value={"PYTHONUTF8": "1"}):
+            self.assertTrue(
+                runtime.launch_visible_terminal_script(
+                    "/opt/homebrew/bin/python3",
+                    "/Users/tester/agent/frontends/tuiapp.py",
+                    cwd="/Users/tester/agent",
+                    env={"KEEP": "1"},
+                    title="终端 TUI",
+                )
+            )
+
+        _args, kwargs = run_mock.call_args
+        self.assertEqual(_args[0][0], "osascript")
+        self.assertEqual(_args[0][1], "-e")
+        applescript = _args[0][2]
+        self.assertIn('tell application "Terminal"', applescript)
+        self.assertIn("do script", applescript)
+        self.assertIn("tuiapp.py", applescript)
+
     def test_terminate_process_tree_uses_process_group_on_posix(self):
         state = {"alive": True}
 
@@ -4049,6 +4603,105 @@ class LauncherCoreFacadeTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(dummy.qr_calls, 0)
 
+    def test_start_channel_process_terminal_channel_uses_visible_terminal_launcher_and_skips_process_tracking(self):
+        class DummyChannel(ChannelRuntimeMixin):
+            _start_channel_process = ChannelRuntimeMixin._start_channel_process
+
+            def __init__(self):
+                self.agent_dir = "C:\\demo"
+                self.cfg = {}
+                self._runtime_context_generation = 1
+                self._channel_procs = {}
+                self._qt_channel_py_path = "C:\\demo\\channels\\mykey.py"
+                self._qt_channel_parse_error = ""
+                self._qt_channel_configs = []
+                self._qt_channel_passthrough = []
+                self._qt_channel_extras = {}
+                self.statuses = []
+                self.calls = []
+
+            def _channel_target_context(self):
+                return False, None, {"is_remote": False}
+
+            def _qt_channels_save(self, silent=False, apply_running=True):
+                self.calls.append(("save", bool(silent), bool(apply_running)))
+                return True
+
+            def _channel_proc_alive(self, channel_id):
+                return False
+
+            def _channel_conflict_message(self, channel_id):
+                return ""
+
+            def _check_runtime_dependencies(self, **kwargs):
+                self.calls.append(("deps", dict(kwargs)))
+                return True
+
+            def _channel_missing_required(self, channel_id, values):
+                return []
+
+            def _channel_log_path(self, channel_id):
+                raise AssertionError("terminal launch should not create a managed log file")
+
+            def _create_channel_process_session(self, channel_id, proc, log_path):
+                raise AssertionError("terminal launch should not create a managed session")
+
+            def _sync_channel_process_session(self, channel_id, final=False, exit_code=None):
+                raise AssertionError("terminal launch should not sync a managed session")
+
+            def _reload_channels_editor_state(self):
+                self.calls.append("reload")
+
+            def _refresh_sessions(self):
+                self.calls.append("refresh_sessions")
+
+            def _set_status(self, text):
+                self.statuses.append(str(text))
+
+        dummy = DummyChannel()
+        terminal_spec = {
+            "id": "tui",
+            "label": "终端 TUI",
+            "script": "tuiapp.py",
+            "pip": "textual",
+            "fields": [],
+            "launch_mode": "terminal",
+        }
+        with mock.patch.object(
+            channel_runtime.lz, "COMM_CHANNEL_INDEX", {"tui": terminal_spec}
+        ), mock.patch.object(
+            channel_runtime.lz, "is_valid_agent_dir", return_value=True
+        ), mock.patch.object(
+            channel_runtime.os.path, "isfile", return_value=True
+        ), mock.patch.object(
+            channel_runtime.lz, "_resolve_configured_python_exe", return_value="python"
+        ), mock.patch.object(
+            channel_runtime.lz, "_find_system_python", return_value="python"
+        ), mock.patch.object(
+            channel_runtime.lz, "_external_subprocess_env", return_value={}
+        ), mock.patch.object(
+            channel_runtime.lz, "launch_visible_terminal_script", return_value=True
+        ) as launcher, mock.patch.object(
+            channel_runtime.QTimer, "singleShot", side_effect=lambda *_args, **_kwargs: None
+        ), mock.patch(
+            "builtins.open", mock.mock_open()
+        ) as open_mock:
+            ok = dummy._start_channel_process("tui", show_errors=False)
+
+        self.assertTrue(ok)
+        launcher.assert_called_once_with(
+            "python",
+            "C:\\demo\\frontends\\tuiapp.py",
+            cwd="C:\\demo",
+            env={},
+            title="终端 TUI",
+        )
+        self.assertEqual(dummy._channel_procs, {})
+        self.assertNotIn("reload", dummy.calls)
+        self.assertNotIn("refresh_sessions", dummy.calls)
+        open_mock.assert_not_called()
+        self.assertTrue(any("新终端" in status for status in dummy.statuses))
+
     def test_start_channel_process_restarts_managed_local_channel_instead_of_reusing_proc(self):
         class DummyProc:
             def __init__(self, pid):
@@ -4200,6 +4853,48 @@ class LauncherCoreFacadeTests(unittest.TestCase):
         self.assertEqual(dummy._qt_channel_extras.get("tg_allowed_users"), [1001, 1002])
         self.assertIn("tg_bot_token = 'old_token'", dummy.saved_text)
         self.assertIn("tg_allowed_users = [1001, 1002]", dummy.saved_text)
+
+    def test_qt_channels_save_blocks_invalid_api_references_before_write(self):
+        class DummyChannel(ChannelRuntimeMixin):
+            _qt_channels_save = ChannelRuntimeMixin._qt_channels_save
+
+            def __init__(self):
+                self.agent_dir = "C:\\demo"
+                self.cfg = {}
+                self._qt_channel_py_path = "C:\\demo\\mykey.py"
+                self._qt_channel_configs = [
+                    {
+                        "var": "mixin_config",
+                        "kind": "mixin",
+                        "data": {"llm_nos": ["gpt-native"], "max_retries": 3},
+                    },
+                    {
+                        "var": "native_oai_config",
+                        "kind": "native_oai",
+                        "data": {"name": "mimo", "apikey": "sk-demo", "apibase": "https://api.example/v1", "model": "demo"},
+                    },
+                ]
+                self._qt_channel_passthrough = []
+                self._qt_channel_extras = {}
+                self._qt_channel_states = {}
+                self.calls = []
+
+            def _settings_target_context(self):
+                return {"is_remote": False}
+
+            def _settings_target_write_mykey_text(self, _text):
+                raise AssertionError("invalid channel API references must block before write")
+
+            def _channel_critical(self, title, text, detail=""):
+                self.calls.append(("critical", str(title), str(text), str(detail)))
+
+        dummy = DummyChannel()
+        ok = dummy._qt_channels_save(silent=False, apply_running=False)
+
+        self.assertFalse(ok)
+        self.assertEqual(dummy.calls[0][0], "critical")
+        self.assertEqual(dummy.calls[0][1], "保存失败")
+        self.assertIn("gpt-native", dummy.calls[0][2])
 
     def test_open_wechat_qr_dialog_drops_stale_local_status_callback(self):
         class DummySignal:
@@ -4540,8 +5235,60 @@ class LauncherCoreFacadeTests(unittest.TestCase):
         text, _color = dummy._channel_status("wechat", {})
         self.assertEqual(text, "外部运行中")
 
+    def test_create_local_channel_process_session_does_not_reuse_remote_cached_session(self):
+        class DummyProc:
+            pid = 2468
+
+        class DummyChannel(ChannelRuntimeMixin):
+            _find_reusable_channel_process_session = ChannelRuntimeMixin._find_reusable_channel_process_session
+            _create_channel_process_session = ChannelRuntimeMixin._create_channel_process_session
+
+            def __init__(self):
+                self.agent_dir = "C:\\demo"
+
+            def _channel_session_title(self, channel_id, started_at):
+                return f"{channel_id}-{int(started_at)}"
+
+            def _ensure_session_usage_metadata(self, session):
+                return session
+
+        dummy = DummyChannel()
+        saved = []
+
+        class DummyUuid:
+            hex = "1234567890abcdef1234567890abcdef"
+
+        with mock.patch.object(channel_runtime.lz, "is_valid_agent_dir", return_value=True), mock.patch.object(
+            channel_runtime.lz,
+            "list_sessions",
+            return_value=[
+                {
+                    "id": "rdev_box-1_telegram_proc",
+                    "session_kind": "channel_process",
+                    "channel_id": "telegram",
+                    "device_scope": "remote",
+                    "device_id": "box-1",
+                    "updated_at": 999.0,
+                }
+            ],
+        ), mock.patch.object(channel_runtime.lz, "load_session", return_value={}), mock.patch.object(
+            channel_runtime.lz, "save_session", side_effect=lambda root, payload, touch=False: saved.append(dict(payload))
+        ), mock.patch.object(channel_runtime.uuid, "uuid4", return_value=DummyUuid()), mock.patch.object(
+            channel_runtime.time, "time", return_value=1234.0
+        ):
+            session_id = dummy._create_channel_process_session("telegram", DummyProc(), "C:\\demo\\telegram.log")
+
+        self.assertEqual(session_id, "1234567890ab")
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(saved[0]["id"], "1234567890ab")
+        self.assertEqual(saved[0]["device_scope"], "local")
+        self.assertEqual(saved[0]["device_id"], "local")
+        self.assertEqual(saved[0]["channel_id"], "telegram")
+
     def test_autostart_channels_skips_channels_marked_external_running(self):
         class DummyChannel(ChannelRuntimeMixin):
+            _start_autostart_channels = ChannelRuntimeMixin._start_autostart_channels
+
             def __init__(self):
                 self.agent_dir = "C:\\demo"
                 self.cfg = {}
@@ -4560,9 +5307,9 @@ class LauncherCoreFacadeTests(unittest.TestCase):
             def _channel_external_running(self, channel_id):
                 return str(channel_id) == "wechat"
 
-            def _refresh_local_channel_external_running(self, *, persist=False):
-                self.calls.append("refresh_local")
-                return {"wechat": [321]}
+            def _request_local_channel_external_running_refresh(self, **kwargs):
+                self.calls.append(("request_refresh", bool(kwargs.get("force", False))))
+                return False
 
             def _refresh_channels_runtime_status_labels(self):
                 return None
@@ -4574,7 +5321,67 @@ class LauncherCoreFacadeTests(unittest.TestCase):
         ):
             dummy._start_autostart_channels()
 
-        self.assertIn("refresh_local", dummy.calls)
+        self.assertEqual(dummy.calls, [("request_refresh", False)])
+        self.assertEqual(dummy._autostart_channel_pending_ids, set())
+        self.assertEqual(dummy._autostart_channel_current, "")
+
+    def test_autostart_channels_waits_for_async_external_probe_before_building_queue(self):
+        class DummyChannel(ChannelRuntimeMixin):
+            _start_autostart_channels = ChannelRuntimeMixin._start_autostart_channels
+
+            def __init__(self):
+                self.agent_dir = "C:\\demo"
+                self.cfg = {}
+                self._channel_procs = {}
+                self._autostart_channels_running = False
+                self._autostart_channel_pending_ids = set()
+                self._autostart_channel_current = ""
+                self.external_running = False
+                self.started = []
+                self.calls = []
+                self.pending_callback = None
+
+            def _channel_is_auto_start(self, channel_id):
+                return str(channel_id) == "wechat"
+
+            def _channel_proc_alive(self, _channel_id):
+                return False
+
+            def _channel_external_running(self, channel_id):
+                return bool(self.external_running) if str(channel_id) == "wechat" else False
+
+            def _request_local_channel_external_running_refresh(self, **kwargs):
+                self.calls.append(("request_refresh", bool(kwargs.get("force", False))))
+                callback = kwargs.get("after")
+                if self.pending_callback is None:
+                    self.pending_callback = callback
+                    return True
+                return False
+
+            def _refresh_channels_runtime_status_labels(self):
+                self.calls.append("refresh_labels")
+
+            def _channel_post_ui(self, fn, action_name=""):
+                fn()
+
+            def _start_channel_process_autostart(self, channel_id, done=None):
+                self.started.append(str(channel_id))
+                if callable(done):
+                    done(True)
+
+        dummy = DummyChannel()
+        specs = [{"id": "wechat"}]
+        with mock.patch.object(channel_runtime.lz, "is_valid_agent_dir", return_value=True), mock.patch.object(
+            channel_runtime.lz, "COMM_CHANNEL_SPECS", specs
+        ):
+            dummy._start_autostart_channels()
+            self.assertEqual(dummy.started, [])
+            self.assertTrue(callable(dummy.pending_callback))
+            dummy.external_running = True
+            dummy.pending_callback({})
+
+        self.assertEqual(dummy.calls[0], ("request_refresh", False))
+        self.assertEqual(dummy.started, [])
         self.assertEqual(dummy._autostart_channel_pending_ids, set())
         self.assertEqual(dummy._autostart_channel_current, "")
 
@@ -4630,8 +5437,8 @@ class LauncherCoreFacadeTests(unittest.TestCase):
             def _channel_external_running(self, _channel_id):
                 return False
 
-            def _refresh_local_channel_external_running(self, *, persist=False):
-                return {}
+            def _request_local_channel_external_running_refresh(self, **kwargs):
+                return False
 
             def _refresh_channels_runtime_status_labels(self):
                 self.status_refreshes += 1
@@ -5014,6 +5821,54 @@ class LauncherCoreFacadeTests(unittest.TestCase):
         self.assertEqual(dummy.calls[:2], [("deps", "telegram", ("python-telegram-bot",)), ("start", "telegram")])
         self.assertEqual(dummy.statuses[-1], "已启动远端 Telegram / 纸飞机 渠道（PID 987）；如无新消息可再查看远端日志。")
 
+    def test_remote_channel_start_blocks_invalid_api_references_before_launch(self):
+        class DummyChannel(ChannelRuntimeMixin):
+            _start_remote_channel_process = ChannelRuntimeMixin._start_remote_channel_process
+            _remote_channel_label_text = ChannelRuntimeMixin._remote_channel_label_text
+
+            def __init__(self):
+                self.agent_dir = "C:\\demo"
+                self._runtime_context_generation = 1
+                self._settings_target_change_token = 2
+                self._qt_channel_extras = {}
+                self._qt_channel_configs = [
+                    {
+                        "var": "mixin_config",
+                        "kind": "mixin",
+                        "data": {"llm_nos": ["gpt-native"], "max_retries": 3},
+                    },
+                    {
+                        "var": "native_oai_config",
+                        "kind": "native_oai",
+                        "data": {"name": "mimo", "apikey": "sk-demo", "apibase": "https://api.example/v1", "model": "demo"},
+                    },
+                ]
+                self.calls = []
+                self.statuses = []
+
+            def _settings_target_generation(self):
+                return self._settings_target_change_token
+
+            def _channel_target_context(self):
+                return True, {"id": "box-1"}, {"is_remote": True, "device_id": "box-1"}
+
+            def _qt_channels_save(self, silent=True, apply_running=False):
+                raise AssertionError("invalid API references must block before save")
+
+            def _set_status(self, text):
+                self.statuses.append(str(text))
+
+            def _channel_warning(self, title, text, detail=""):
+                self.calls.append(("warning", str(title), str(text), str(detail)))
+
+        dummy = DummyChannel()
+
+        self.assertFalse(dummy._start_remote_channel_process("telegram", show_errors=True))
+        self.assertEqual(dummy.statuses, ["当前 API 配置引用无效，请先到 API 页面修复后再启动渠道。"])
+        self.assertEqual(dummy.calls[0][0], "warning")
+        self.assertEqual(dummy.calls[0][1], "API 配置无效")
+        self.assertIn("gpt-native", dummy.calls[0][3])
+
     def test_remote_channel_start_stops_on_dependency_install_failure(self):
         class ImmediateThread:
             def __init__(self, target=None, name=None, daemon=None):
@@ -5170,6 +6025,58 @@ class LauncherCoreFacadeTests(unittest.TestCase):
             ],
         )
         self.assertIn(("info", "重启成功", "远端 微信 已重启；如无响应可继续查看远端日志。"), dummy.calls)
+
+    def test_start_channel_process_blocks_invalid_api_references_before_launch(self):
+        class DummyChannel(ChannelRuntimeMixin):
+            _start_channel_process = ChannelRuntimeMixin._start_channel_process
+
+            def __init__(self):
+                self.agent_dir = "C:\\demo"
+                self.cfg = {}
+                self._qt_channel_py_path = "C:\\demo\\mykey.py"
+                self._qt_channel_configs = [
+                    {
+                        "var": "mixin_config",
+                        "kind": "mixin",
+                        "data": {"llm_nos": ["gpt-native"], "max_retries": 3},
+                    },
+                    {
+                        "var": "native_oai_config",
+                        "kind": "native_oai",
+                        "data": {"name": "mimo", "apikey": "sk-demo", "apibase": "https://api.example/v1", "model": "demo"},
+                    },
+                ]
+                self._qt_channel_passthrough = []
+                self._qt_channel_extras = {}
+                self.calls = []
+                self.statuses = []
+
+            def _channel_target_context(self):
+                return False, {}, {"is_remote": False}
+
+            def _qt_channels_save(self, silent=True, apply_running=False):
+                raise AssertionError("invalid API references must block before save")
+
+            def _channel_proc_alive(self, _channel_id):
+                return False
+
+            def _channel_conflict_message(self, _channel_id):
+                return ""
+
+            def _set_status(self, text):
+                self.statuses.append(str(text))
+
+            def _channel_warning(self, title, text, detail=""):
+                self.calls.append(("warning", str(title), str(text), str(detail)))
+
+        dummy = DummyChannel()
+        with mock.patch.object(channel_runtime.lz, "COMM_CHANNEL_INDEX", {"telegram": {"id": "telegram", "label": "Telegram", "script": "tgapp.py", "fields": []}}):
+            self.assertFalse(dummy._start_channel_process("telegram", show_errors=True))
+
+        self.assertEqual(dummy.statuses, ["当前 API 配置引用无效，请先到 API 页面修复后再启动渠道。"])
+        self.assertEqual(dummy.calls[0][0], "warning")
+        self.assertEqual(dummy.calls[0][1], "API 配置无效")
+        self.assertIn("gpt-native", dummy.calls[0][3])
 
     def test_remote_start_channel_process_blocking_uses_shared_matcher_for_wechat_probe(self):
         class DummyChannel(ChannelRuntimeMixin):
@@ -6304,7 +7211,7 @@ class LauncherCoreFacadeTests(unittest.TestCase):
         self.assertTrue(dummy.started)
         self.assertFalse(dummy._remote_channel_sync_running)
 
-    def test_request_channel_status_refresh_scans_local_external_before_sync(self):
+    def test_request_channel_status_refresh_requests_async_local_external_before_sync(self):
         class DummyChannel(ChannelRuntimeMixin):
             _request_channel_status_refresh = ChannelRuntimeMixin._request_channel_status_refresh
 
@@ -6315,9 +7222,12 @@ class LauncherCoreFacadeTests(unittest.TestCase):
             def _settings_target_context(self):
                 return {"is_remote": False}
 
-            def _refresh_local_channel_external_running(self, *, persist=False):
-                self.calls.append(("local_external", bool(persist)))
-                return {"wechat": [321]}
+            def _request_local_channel_external_running_refresh(self, **kwargs):
+                self.calls.append(("request_refresh", bool(kwargs.get("persist", False)), bool(kwargs.get("force", False))))
+                callback = kwargs.get("after")
+                if callable(callback):
+                    callback({"wechat": [321]})
+                return True
 
             def _sync_all_channel_process_sessions(self):
                 self.calls.append("local_sync")
@@ -6327,7 +7237,7 @@ class LauncherCoreFacadeTests(unittest.TestCase):
 
         dummy = DummyChannel()
         dummy._request_channel_status_refresh()
-        self.assertEqual(dummy.calls, [("local_external", True), "local_sync", ("refresh_labels", True)])
+        self.assertEqual(dummy.calls, [("request_refresh", True, True), "local_sync", ("refresh_labels", True)])
 
     def test_refresh_channel_runtime_status_notice_uses_cached_result_wording_after_failures(self):
         class DummyLabel:
@@ -6525,6 +7435,51 @@ class LauncherCoreFacadeTests(unittest.TestCase):
         notice_text = dummy.settings_api_notice.setText.call_args[0][0]
         self.assertIn("/remote/mykey.py", notice_text)
         self.assertIn("当前读取失败：SSH 连接失败", notice_text)
+
+    def test_qt_api_save_blocks_invalid_mixin_llm_reference_before_write(self):
+        class DummyApi(ApiEditorMixin):
+            _qt_api_save = ApiEditorMixin._qt_api_save
+
+            def __init__(self):
+                self._qt_api_py_path = "C:\\demo\\mykey.py"
+                self._qt_api_extras = {}
+                self._qt_api_passthrough = []
+                self._reload_api_editor_state_calls = 0
+                self._reload_channels_editor_state_calls = 0
+
+            def _api_build_save_configs(self):
+                return [
+                    {
+                        "var": "native_oai_config",
+                        "kind": "native_oai",
+                        "data": {"name": "mimo", "apikey": "sk", "apibase": "https://api.openai.com/v1", "model": "gpt-5.4"},
+                    },
+                    {
+                        "var": "mixin_config",
+                        "kind": "mixin",
+                        "data": {"llm_nos": ["gpt-native"], "max_retries": 3},
+                    },
+                ]
+
+            def _reload_api_editor_state(self):
+                self._reload_api_editor_state_calls += 1
+
+            def _reload_channels_editor_state(self):
+                self._reload_channels_editor_state_calls += 1
+
+        dummy = DummyApi()
+        with mock.patch.object(api_editor.QMessageBox, "critical") as critical_box, mock.patch.object(
+            api_editor.lz, "serialize_mykey_py"
+        ) as serializer, mock.patch("builtins.open", mock.mock_open()) as open_mock:
+            dummy._qt_api_save(restart=False)
+
+        serializer.assert_not_called()
+        open_mock.assert_not_called()
+        critical_box.assert_called_once()
+        self.assertEqual(critical_box.call_args.args[1], "保存失败")
+        self.assertIn("gpt-native", critical_box.call_args.args[2])
+        self.assertEqual(dummy._reload_api_editor_state_calls, 0)
+        self.assertEqual(dummy._reload_channels_editor_state_calls, 0)
 
     def test_apply_loaded_api_source_restores_auto_generated_names_to_blank_fields(self):
         class DummyApi(ApiEditorMixin):
@@ -6837,7 +7792,7 @@ native_oai_config2 = {
         self.assertEqual(configs[0]["data"]["name"], "api.second.example-2")
         self.assertEqual(configs[1]["data"]["name"], "api.second.example")
 
-    def test_api_reorder_keeps_loaded_auto_generated_names_stable_for_hidden_mixin_refs(self):
+    def test_api_reorder_keeps_mixin_refs_stable_when_visible_mixin_card_moves(self):
         class DummyLabel:
             def __init__(self):
                 self.text = ""
@@ -6925,11 +7880,91 @@ native_oai_config2 = {
 
         self.assertEqual(
             [cfg["var"] for cfg in configs],
-            ["native_oai_config2", "mixin_config", "native_oai_config"],
+            ["mixin_config", "native_oai_config", "native_oai_config2"],
         )
-        self.assertEqual(configs[0]["data"]["name"], "api.openai.com-2")
-        self.assertEqual(configs[1]["data"]["llm_nos"], ["api.openai.com-2"])
-        self.assertEqual(configs[2]["data"]["name"], "api.openai.com")
+        self.assertEqual(configs[0]["data"]["llm_nos"], ["api.openai.com-2"])
+        self.assertEqual(configs[1]["data"]["name"], "api.openai.com")
+        self.assertEqual(configs[2]["data"]["name"], "api.openai.com-2")
+
+    def test_qt_api_add_channel_supports_mixin_cards(self):
+        class DummyApi(ApiEditorMixin):
+            _qt_api_add_channel = ApiEditorMixin._qt_api_add_channel
+            _api_format_meta = ApiEditorMixin._api_format_meta
+
+            def __init__(self):
+                self._qt_api_state = []
+                self._qt_api_hidden_configs = []
+                self.render_calls = 0
+
+            def _render_api_cards(self):
+                self.render_calls += 1
+
+        dummy = DummyApi()
+        dummy._qt_api_add_channel("mixin", render=False)
+
+        self.assertEqual(dummy.render_calls, 0)
+        self.assertEqual(len(dummy._qt_api_state), 1)
+        self.assertEqual(dummy._qt_api_state[0]["var"], "mixin_config")
+        self.assertEqual(dummy._qt_api_state[0]["format"], "mixin")
+        self.assertEqual(dummy._qt_api_state[0]["tpl_key"], "mixin")
+        self.assertEqual(dummy._qt_api_state[0]["llm_nos"], [])
+
+    def test_bind_api_add_button_menu_exposes_mixin_action(self):
+        class DummySignal:
+            def __init__(self):
+                self._callbacks = []
+
+            def connect(self, callback):
+                self._callbacks.append(callback)
+
+            def emit(self):
+                for callback in list(self._callbacks):
+                    callback()
+
+        class DummyAction:
+            def __init__(self, text):
+                self.text = str(text)
+                self.triggered = DummySignal()
+
+        class DummyMenu:
+            def __init__(self, parent=None):
+                self.parent = parent
+                self.actions = []
+
+            def addAction(self, text):
+                action = DummyAction(text)
+                self.actions.append(action)
+                return action
+
+        class DummyButton:
+            def __init__(self):
+                self.menu = None
+
+            def setMenu(self, menu):
+                self.menu = menu
+
+        class DummySettings(SettingsPanelMixin):
+            _api_add_menu_specs = SettingsPanelMixin._api_add_menu_specs
+            _bind_api_add_button_menu = SettingsPanelMixin._bind_api_add_button_menu
+
+            def __init__(self):
+                self.add_calls = []
+
+            def _qt_api_add_channel(self, format_key, *, render=True):
+                self.add_calls.append((str(format_key), bool(render)))
+
+        dummy = DummySettings()
+        button = DummyButton()
+        with mock.patch.object(settings_panel, "QMenu", DummyMenu):
+            menu = dummy._bind_api_add_button_menu(button)
+
+        self.assertIs(button.menu, menu)
+        self.assertEqual(
+            [action.text for action in menu.actions],
+            ["添加 Claude 原生", "添加 Chat Completions", "添加 Responses", "添加 Mixin 故障转移"],
+        )
+        menu.actions[-1].triggered.emit()
+        self.assertEqual(dummy.add_calls, [("mixin", True)])
 
     def test_qt_api_move_ignores_edge_and_single_card_requests(self):
         class DummyApi(ApiEditorMixin):
@@ -7110,7 +8145,7 @@ native_oai_config2 = {
         self.assertEqual(dummy.state["model_status"], "正在拉取模型列表…")
         self.assertTrue(dummy.state["model_fetching"])
 
-    def test_apply_loaded_channels_source_refreshes_local_channel_external_state_before_render(self):
+    def test_apply_loaded_channels_source_renders_before_async_local_channel_external_refresh(self):
         class DummyChannel(ChannelRuntimeMixin):
             def __init__(self):
                 self.agent_dir = "C:\\demo"
@@ -7118,13 +8153,6 @@ native_oai_config2 = {
                 self._channel_procs = {}
                 self.settings_channels_notice = mock.Mock()
                 self.calls = []
-
-            def _settings_target_context(self):
-                return {"is_remote": False}
-
-            def _refresh_local_channel_external_running(self, *, persist=False):
-                self.calls.append("refresh_local")
-                return {"wechat": [321]}
 
             def _render_channel_cards(self):
                 self.calls.append("render_cards")
@@ -7134,7 +8162,7 @@ native_oai_config2 = {
 
         dummy = DummyChannel()
         dummy._apply_loaded_channels_source("C:\\demo\\mykey.py", {"error": "", "configs": [], "passthrough": [], "extras": {}})
-        self.assertEqual(dummy.calls, ["refresh_local", "render_cards", "refresh_runtime_labels"])
+        self.assertEqual(dummy.calls, ["render_cards", "refresh_runtime_labels"])
 
     def test_apply_loaded_channels_source_keeps_page_read_only_when_mykey_read_failed(self):
         class DummyChannel(ChannelRuntimeMixin):
@@ -8186,6 +9214,102 @@ native_oai_config2 = {
         self.assertEqual(payload["dep_install_mode"], "mirror")
         self.assertEqual(payload["repo_url"], "https://example.com/repo.git")
 
+    def test_save_vps_deploy_preferences_falls_back_to_form_when_no_profile_exists(self):
+        class DummyLineEdit:
+            def __init__(self, text=""):
+                self._text = str(text)
+
+            def text(self):
+                return self._text
+
+        class BrokenCombo:
+            def __init__(self, index, items):
+                self._index = int(index)
+                self._items = dict(items)
+
+            def currentData(self):
+                return None
+
+            def currentIndex(self):
+                return self._index
+
+            def itemData(self, index):
+                return self._items.get(int(index))
+
+        class DummySettings(SettingsPanelMixin):
+            _normalize_vps_deploy_cfg = SettingsPanelMixin._normalize_vps_deploy_cfg
+            _collect_vps_deploy_form_data = SettingsPanelMixin._collect_vps_deploy_form_data
+            _combo_current_data_value = SettingsPanelMixin._combo_current_data_value
+            _save_vps_deploy_preferences = SettingsPanelMixin._save_vps_deploy_preferences
+
+            def __init__(self):
+                self.settings_vps_deploy_source_combo = BrokenCombo(1, {0: "upload", 1: "git"})
+                self.settings_vps_dep_install_mode_combo = BrokenCombo(1, {0: "offline", 1: "global"})
+                self.settings_vps_local_agent_dir_edit = DummyLineEdit("")
+                self.settings_vps_repo_url_edit = DummyLineEdit("https://example.com/repo.git")
+                self.settings_vps_remote_dir_edit = DummyLineEdit("/srv/genericagent")
+                self.settings_vps_pip_mirror_edit = DummyLineEdit("")
+                self.settings_vps_upload_excludes_edit = DummyLineEdit("")
+                self.settings_vps_username_edit = DummyLineEdit("root")
+
+            def _persist_current_vps_profile_from_form(self, *, validate_pair=False, silent=True):
+                return None
+
+            def _current_vps_profile(self):
+                return None
+
+        dummy = DummySettings()
+        payload = dummy._save_vps_deploy_preferences()
+        self.assertEqual(payload["source"], "git")
+        self.assertEqual(payload["repo_url"], "https://example.com/repo.git")
+        self.assertEqual(payload["remote_dir"], "/srv/genericagent")
+
+    def test_theme_target_size_prefers_screen_available_geometry_over_window_size(self):
+        class DummyRect:
+            def width(self):
+                return 1920
+
+            def height(self):
+                return 1080
+
+        class DummyScreen:
+            def availableGeometry(self):
+                return DummyRect()
+
+        class DummySettings(SettingsPanelMixin):
+            _theme_target_size = SettingsPanelMixin._theme_target_size
+
+            def width(self):
+                return 1200
+
+            def height(self):
+                return 700
+
+            def screen(self):
+                return DummyScreen()
+
+        dummy = DummySettings()
+        size = dummy._theme_target_size()
+        self.assertEqual((size.width(), size.height()), (1920, 1080))
+
+    def test_theme_target_size_falls_back_to_window_size_without_screen(self):
+        class DummySettings(SettingsPanelMixin):
+            _theme_target_size = SettingsPanelMixin._theme_target_size
+
+            def width(self):
+                return 1280
+
+            def height(self):
+                return 760
+
+            def screen(self):
+                return None
+
+        dummy = DummySettings()
+        with mock.patch.object(launcher_window.QApplication, "instance", return_value=None):
+            size = dummy._theme_target_size()
+        self.assertEqual((size.width(), size.height()), (1280, 760))
+
     def test_on_vps_deploy_source_changed_refreshes_buttons_and_honors_item_data_fallback(self):
         class DummyWidget:
             def __init__(self):
@@ -8477,6 +9601,163 @@ native_oai_config2 = {
         self.assertEqual(local_idle_dummy.llm_combo.tooltip, "当前还没有可用的 LLM 配置。")
         self.assertFalse(local_idle_dummy.reasoning_effort_combo.enabled)
         self.assertEqual(local_idle_dummy.reasoning_effort_combo.tooltip, "当前还没有可用的 LLM 配置。")
+
+    def test_session_info_tooltip_includes_running_subagent_count(self):
+        class DummyLabel:
+            def __init__(self, text=""):
+                self._text = str(text)
+
+            def text(self):
+                return self._text
+
+        class DummySession(SessionShellMixin):
+            _info_tooltip_text = SessionShellMixin._info_tooltip_text
+            _refresh_subagent_runtime_state = SessionShellMixin._refresh_subagent_runtime_state
+            _count_running_subagents = SessionShellMixin._count_running_subagents
+            _iter_local_subagent_processes = SessionShellMixin._iter_local_subagent_processes
+            _subagent_runtime_summary_text = SessionShellMixin._subagent_runtime_summary_text
+
+            def __init__(self):
+                self.agent_dir = r"E:\\GenericAgent"
+                self.session_mode_label = DummyLabel("当前会话：本地")
+                self.status_label = DummyLabel("状态：空闲")
+                self.session_token_tree_label = DummyLabel("Tokens：12 / 34")
+                self._subagent_runtime_count = 0
+                self._subagent_runtime_scan_ts = 0.0
+                self.tooltip_refresh_calls = 0
+                self.icon_refresh_calls = 0
+
+            def _iter_local_channel_processes(self):
+                return [
+                    {"pid": 1001, "cmdline": r'"python" "E:\\GenericAgent\\agentmain.py" --task child-1', "cwd": r"E:\\GenericAgent", "cwd_real": ""},
+                    {"pid": 1004, "cmdline": r'"python" "E:\\GenericAgent\\agentmain.py" --task=child-2 --verbose --nobg', "cwd": r"E:\\GenericAgent", "cwd_real": ""},
+                    {"pid": 1002, "cmdline": r'"python" "E:\\GenericAgent\\agentmain.py" --serve', "cwd": r"E:\\GenericAgent", "cwd_real": ""},
+                    {"pid": 1003, "cmdline": r'"python" "E:\\Elsewhere\\agentmain.py" --task child-2', "cwd": r"E:\\Elsewhere", "cwd_real": ""},
+                ]
+
+            def _refresh_info_tooltip(self):
+                self.tooltip_refresh_calls += 1
+
+            def _refresh_info_button_icon(self):
+                self.icon_refresh_calls += 1
+
+        dummy = DummySession()
+        with mock.patch.object(chat_common, "process_cmdline_matches_agent_script", autospec=True) as matcher:
+            matcher.side_effect = (
+                lambda cmdline, *, agent_dir, script_rel, cwd="", agent_dir_real="", cwd_real="": "GenericAgent" in str(cmdline)
+            )
+            with mock.patch("qt_chat_parts.session_shell.process_cmdline_matches_agent_script", side_effect=matcher.side_effect), mock.patch(
+                "qt_chat_parts.session_shell.os.getpid", return_value=9999
+            ):
+                dummy._refresh_subagent_runtime_state()
+
+        self.assertEqual(dummy._subagent_runtime_count, 2)
+        self.assertEqual(dummy.tooltip_refresh_calls, 2)
+        self.assertEqual(dummy.icon_refresh_calls, 2)
+        self.assertIn("后台子代理：2", dummy._info_tooltip_text())
+
+    def test_remote_subagent_count_uses_current_device_agent_dir(self):
+        class DummyClient:
+            def close(self):
+                return None
+
+        class DummySession(SessionShellMixin):
+            _count_remote_running_subagents = SessionShellMixin._count_remote_running_subagents
+            _parse_subagent_process_rows = SessionShellMixin._parse_subagent_process_rows
+
+            def __init__(self):
+                self.current_session = {"device_scope": "remote", "device_id": "box-1"}
+                self.commands = []
+
+            def _remote_device_payload(self, _session):
+                return (
+                    {
+                        "id": "box-1",
+                        "username": "root",
+                        "agent_mode": "host",
+                        "agent_dir": "/srv/agant",
+                    },
+                    {"host": "10.0.0.8", "username": "root", "port": 22},
+                )
+
+            def _open_vps_ssh_client(self, _payload, timeout=8):
+                self.commands.append(("open", int(timeout)))
+                return DummyClient(), "", "", False
+
+            def _vps_exec_remote(self, _client, cmd, timeout=20):
+                self.commands.append((str(cmd), int(timeout)))
+                return (
+                    0,
+                    "\n".join(
+                        [
+                            "101\t/srv/agant\tpython agentmain.py --task child-a --nobg",
+                            "102\t/elsewhere\tpython agentmain.py --task child-b",
+                            "103\t/srv/agant\tpython agentmain.py --serve",
+                            "104\t/srv/agant\tpython agentmain.py --task=child-c --verbose",
+                        ]
+                    ),
+                    "",
+                )
+
+        dummy = DummySession()
+        count = dummy._count_remote_running_subagents()
+        self.assertEqual(count, 2)
+        self.assertEqual(dummy.commands[0], ("open", 8))
+        self.assertIn("ps -eo pid=,args=", dummy.commands[1][0])
+
+    def test_subagent_runtime_event_ignores_stale_device_target(self):
+        class DummyBridge(BridgeRuntimeMixin):
+            _handle_event = BridgeRuntimeMixin._handle_event
+
+            def __init__(self):
+                self._subagent_runtime_refresh_inflight_key = "remote:box-1"
+                self.applied = []
+
+            def _apply_subagent_runtime_count(self, count, *, target_key="", scanned_at=None):
+                current_key = self._subagent_runtime_target_key()
+                if target_key and current_key and target_key != current_key:
+                    return
+                self.applied.append((int(count or 0), str(target_key), float(scanned_at or 0.0)))
+
+            def _subagent_runtime_target_key(self):
+                return "remote:box-2"
+
+        dummy = DummyBridge()
+        dummy._handle_event({"event": "subagent_runtime_count", "target_key": "remote:box-1", "count": 3, "scanned_at": 12.5})
+        self.assertEqual(dummy.applied, [])
+        self.assertEqual(dummy._subagent_runtime_refresh_inflight_key, "")
+
+        dummy._subagent_runtime_refresh_inflight_key = "remote:box-2"
+        dummy._handle_event({"event": "subagent_runtime_count", "target_key": "remote:box-2", "count": 4, "scanned_at": 18.0})
+        self.assertEqual(dummy.applied, [(4, "remote:box-2", 18.0)])
+        self.assertEqual(dummy._subagent_runtime_refresh_inflight_key, "")
+
+    def test_info_button_icon_switches_to_spinner_when_subagents_are_running(self):
+        class DummyButton:
+            def __init__(self):
+                self.icon = None
+                self.icon_size = None
+
+            def setIcon(self, icon):
+                self.icon = icon
+
+            def setIconSize(self, size):
+                self.icon_size = size
+
+        dummy = types.SimpleNamespace(info_btn=DummyButton(), _subagent_runtime_count=2, _subagent_spinner_phase=3)
+        with mock.patch.object(launcher_window, "_rotated_svg_icon", return_value="spinner"), mock.patch.object(
+            launcher_window, "_svg_icon", return_value="info"
+        ):
+            launcher_window.QtChatWindow._refresh_info_button_icon(dummy)
+        self.assertEqual(dummy.info_btn.icon, "spinner")
+        self.assertEqual(dummy.info_btn.icon_size, launcher_window.QSize(14, 14))
+
+        dummy._subagent_runtime_count = 0
+        with mock.patch.object(launcher_window, "_rotated_svg_icon", return_value="spinner"), mock.patch.object(
+            launcher_window, "_svg_icon", return_value="info"
+        ):
+            launcher_window.QtChatWindow._refresh_info_button_icon(dummy)
+        self.assertEqual(dummy.info_btn.icon, "info")
 
     def test_sync_draft_to_floating_force_uses_main_editor_as_source_of_truth(self):
         class DummyEditor:
@@ -10686,6 +11967,115 @@ native_oai_config2 = {
         self.assertEqual(dummy.composer_refreshes, 1)
         self.assertEqual(dummy._remote_session_refresh_inflight, set())
 
+    def test_refresh_remote_session_cache_skips_stale_remote_overwrite_when_local_state_is_newer(self):
+        class DummySidebar(SidebarSessionsMixin):
+            _refresh_remote_session_cache = SidebarSessionsMixin._refresh_remote_session_cache
+            _remote_session_has_newer_local_state = SidebarSessionsMixin._remote_session_has_newer_local_state
+
+            def __init__(self):
+                self.agent_dir = "C:\\demo"
+
+            def _session_device_scope_id(self, session):
+                return ("remote", "box-1")
+
+            def _is_channel_process_session(self, session):
+                return False
+
+            def _remote_device_by_id(self, device_id):
+                return {"id": "box-1", "name": "远程设备"}
+
+            def _remote_source_session_id(self, data):
+                return "remote-1"
+
+            def _fetch_remote_session_payload(self, device, remote_session_id):
+                return (
+                    {
+                        "id": "remote-1",
+                        "title": "Remote Older",
+                        "updated_at": 10.0,
+                        "channel_id": "launcher",
+                        "bubbles": [{"role": "assistant", "text": "old"}],
+                    },
+                    "",
+                )
+
+        session = {
+            "id": "rchat_box-1_remote-1",
+            "remote_session_id": "remote-1",
+            "title": "Local Pending",
+            "updated_at": 20.0,
+            "remote_updated_at": 10.0,
+            "device_scope": "remote",
+            "device_id": "box-1",
+            "channel_id": "launcher",
+            "bubbles": [{"role": "user", "text": "new"}],
+        }
+        dummy = DummySidebar()
+        with mock.patch.object(sidebar_sessions, "runtime_context_matches", return_value=True), mock.patch.object(
+            lz, "save_session"
+        ) as save_session:
+            fresh, err = dummy._refresh_remote_session_cache(session, agent_dir="C:\\demo", runtime_context={"agent_dir": "C:\\demo"})
+
+        self.assertEqual(err, "")
+        self.assertEqual(fresh["title"], "Local Pending")
+        self.assertEqual(fresh["bubbles"], [{"role": "user", "text": "new"}])
+        save_session.assert_not_called()
+
+    def test_refresh_remote_session_cache_async_does_not_rerender_busy_current_session(self):
+        class ImmediateThread:
+            def __init__(self, target=None, name=None, daemon=None):
+                self._target = target
+
+            def start(self):
+                if callable(self._target):
+                    self._target()
+
+        class DummySidebar(SidebarSessionsMixin):
+            _refresh_remote_session_cache_async = SidebarSessionsMixin._refresh_remote_session_cache_async
+
+            def __init__(self):
+                self.agent_dir = "C:\\demo"
+                self._runtime_context_generation = 2
+                self.current_session = {"id": "sess-1", "title": "Sending", "device_scope": "remote", "device_id": "box-1"}
+                self._busy = True
+                self._remote_session_refresh_inflight = set()
+                self._last_session_list_signature = "cached"
+                self.render_calls = 0
+                self.refresh_calls = 0
+                self.statuses = []
+
+            def _session_device_scope_id(self, session):
+                return ("remote", "box-1")
+
+            def _refresh_remote_session_cache(self, session, *, agent_dir="", runtime_context=None):
+                return {"id": "sess-1", "title": "Fresh", "device_scope": "remote", "device_id": "box-1"}, ""
+
+            def _sidebar_post_ui(self, callback):
+                if callable(callback):
+                    callback()
+
+            def _render_session(self, session):
+                self.render_calls += 1
+
+            def _refresh_composer_enabled(self):
+                return None
+
+            def _refresh_sessions(self):
+                self.refresh_calls += 1
+
+            def _set_status(self, text):
+                self.statuses.append(str(text))
+
+        dummy = DummySidebar()
+        with mock.patch.object(sidebar_sessions.threading, "Thread", ImmediateThread):
+            dummy._refresh_remote_session_cache_async({"id": "sess-1", "device_scope": "remote", "device_id": "box-1"})
+
+        self.assertEqual(dummy.current_session["title"], "Sending")
+        self.assertEqual(dummy.render_calls, 0)
+        self.assertEqual(dummy.refresh_calls, 1)
+        self.assertEqual(dummy.statuses, [])
+        self.assertEqual(dummy._remote_session_refresh_inflight, set())
+
     def test_refresh_remote_session_cache_async_updates_status_when_sync_fails(self):
         class ImmediateThread:
             def __init__(self, target=None, name=None, daemon=None):
@@ -10724,6 +12114,55 @@ native_oai_config2 = {
 
         self.assertEqual(dummy.statuses, ["远端同步失败，当前仍使用本地缓存：SSH 超时；可稍后重试或先检查 SSH。"])
         self.assertEqual(dummy._remote_session_refresh_inflight, set())
+
+    def test_handle_remote_error_ignores_stale_session_id(self):
+        class DummyBridge(BridgeRuntimeMixin):
+            _handle_event = BridgeRuntimeMixin._handle_event
+
+            def __init__(self):
+                self.current_session = {"id": "sess-current"}
+                self._stream_row = object()
+                self._busy = True
+                self._abort_requested = False
+                self._current_stream_text = "partial"
+                self._pending_stream_text = "partial"
+                self._active_token_event_ts = 1.0
+                self.statuses = []
+                self.send_btn = types.SimpleNamespace(setEnabled=lambda *_args, **_kwargs: None)
+                self.stop_btn = types.SimpleNamespace(setEnabled=lambda *_args, **_kwargs: None)
+
+            def _clear_active_turn_attachments(self):
+                self.attachments_cleared = True
+
+            def _discard_stream_row(self, row=None):
+                self.discard_called = True
+
+            def _set_follow_latest_user(self, value):
+                self.follow_latest = bool(value)
+
+            def _clear_current_turn_user_row(self, row=None):
+                self.anchor_cleared = True
+
+            def _set_status(self, text):
+                self.statuses.append(str(text))
+
+            def _refresh_composer_enabled(self):
+                self.composer_refreshed = True
+
+            def _refresh_token_label(self):
+                self.tokens_refreshed = True
+
+            def _refresh_floating_chat_window(self):
+                self.floating_refreshed = True
+
+        dummy = DummyBridge()
+        with mock.patch.object(bridge_runtime.QMessageBox, "warning") as warning_box:
+            dummy._handle_event({"event": "remote_error", "session_id": "sess-old", "msg": "stale error"})
+
+        self.assertEqual(dummy.statuses, [])
+        self.assertTrue(dummy._busy)
+        self.assertFalse(getattr(dummy, "discard_called", False))
+        warning_box.assert_not_called()
 
     def test_save_remote_session_source_async_reports_local_cache_preserved_on_failure(self):
         class ImmediateThread:
@@ -10922,6 +12361,85 @@ native_oai_config2 = {
         self.assertEqual(dummy.trigger_calls, [("box-1", True, True)])
         self.assertEqual(dummy.statuses, ["已同步 Mac Mini 的远端使用日志、会话与渠道快照；当前页面已刷新。"])
         self.assertEqual(dummy._settings_usage_remote_synced_key, "usage:box-1")
+
+    def test_clear_usage_logs_for_target_marks_sessions_cleared_and_skips_remote_resync(self):
+        class DummyUsage(PersonalUsageMixin):
+            _clear_usage_logs_for_target = PersonalUsageMixin._clear_usage_logs_for_target
+            _settings_session_matches_target = PersonalUsageMixin._settings_session_matches_target
+
+            def __init__(self):
+                self.agent_dir = "C:\\demo"
+                self.cfg = {}
+                self.current_session = {
+                    "id": "sess-1",
+                    "device_scope": "remote",
+                    "device_id": "box-1",
+                    "channel_id": "launcher",
+                    "token_usage": {"events": [{"input_tokens": 10, "output_tokens": 20}]},
+                }
+                self._settings_usage_remote_sync_running = True
+                self._settings_usage_remote_sync_key = "stale"
+                self._settings_usage_remote_synced_key = ""
+                self.reload_calls = 0
+                self.token_refreshes = 0
+                self.statuses = []
+
+            def _settings_remote_sync_key(self, target, *, kind="usage"):
+                return f"{kind}:{target['device_id']}"
+
+            def _reload_usage_panel(self):
+                self.reload_calls += 1
+
+            def _refresh_token_label(self):
+                self.token_refreshes += 1
+
+            def _set_status(self, text):
+                self.statuses.append(str(text))
+
+        stats = {"activity": {"session_count": 1, "event_count": 3}}
+        target = {"is_remote": True, "scope": "remote", "device_id": "box-1", "label": "Mac Mini"}
+        payload = {
+            "id": "sess-1",
+            "device_scope": "remote",
+            "device_id": "box-1",
+            "channel_id": "launcher",
+            "bubbles": [{"role": "user", "text": "hello"}],
+            "token_usage": {"events": [{"input_tokens": 10, "output_tokens": 20}], "last_model": "gpt-5.4"},
+        }
+        saved = []
+
+        def save_session(_agent_dir, session, *, touch=True):
+            saved.append((dict(session), bool(touch)))
+
+        dummy = DummyUsage()
+        with mock.patch.object(lz, "is_valid_agent_dir", return_value=True), mock.patch.object(
+            lz, "list_sessions", return_value=[{"id": "sess-1", "device_scope": "remote", "device_id": "box-1"}]
+        ), mock.patch.object(
+            lz, "load_session", return_value=dict(payload)
+        ), mock.patch.object(
+            lz, "save_session", side_effect=save_session
+        ), mock.patch.object(
+            personal_usage.QMessageBox, "question", return_value=personal_usage.QMessageBox.Yes
+        ), mock.patch.object(
+            personal_usage.QMessageBox, "information"
+        ) as info_box:
+            ok = dummy._clear_usage_logs_for_target(stats, target)
+
+        self.assertTrue(ok)
+        self.assertEqual(len(saved), 1)
+        self.assertFalse(saved[0][1])
+        saved_usage = saved[0][0]["token_usage"]
+        self.assertEqual(saved_usage.get("events"), [])
+        self.assertTrue(saved_usage.get("launcher_usage_cleared"))
+        self.assertEqual(dummy.current_session["token_usage"].get("events"), [])
+        self.assertTrue(dummy.current_session["token_usage"].get("launcher_usage_cleared"))
+        self.assertEqual(dummy._settings_usage_remote_synced_key, "usage:box-1")
+        self.assertEqual(dummy._settings_usage_remote_sync_key, "")
+        self.assertFalse(dummy._settings_usage_remote_sync_running)
+        self.assertEqual(dummy.reload_calls, 1)
+        self.assertEqual(dummy.token_refreshes, 1)
+        self.assertIn("Mac Mini", dummy.statuses[0])
+        info_box.assert_called_once()
 
     def test_remote_launcher_sync_blocking_drops_stale_context_before_local_cache_write(self):
         class DummySidebar(SidebarSessionsMixin):
@@ -12104,6 +13622,22 @@ native_oai_config2 = {
         self.assertEqual(usage["turns"], 1)
         self.assertEqual(len(usage["events"]), 1)
         self.assertGreater(usage["total_tokens"], 0)
+
+    def test_normalize_token_usage_preserves_manual_clear_without_fallback_rebuild(self):
+        session = {
+            "id": "s1",
+            "channel_id": "launcher",
+            "bubbles": [
+                {"role": "user", "text": "hello"},
+                {"role": "assistant", "text": "world"},
+            ],
+            "token_usage": {"events": [], "launcher_usage_cleared": True},
+        }
+        lz._normalize_token_usage_inplace(session)
+        usage = session["token_usage"]
+        self.assertEqual(usage["events"], [])
+        self.assertEqual(usage["total_tokens"], 0)
+        self.assertTrue(usage.get("launcher_usage_cleared"))
 
     def test_fold_turns_returns_fold_section(self):
         text = (

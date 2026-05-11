@@ -947,7 +947,7 @@ class DownloadMixin:
             python_exe = str(ev.get("python_exe") or "").strip()
             private_python = bool(ev.get("private_python"))
             if python_exe:
-                self.cfg["python_exe"] = lz._make_config_relative_path(python_exe)
+                self.cfg["python_exe"] = lz._make_python_exe_config_path(python_exe, agent_dir=target)
                 lz.save_config(self.cfg)
             if target:
                 self._set_agent_dir(target)

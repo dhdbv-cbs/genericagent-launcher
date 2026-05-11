@@ -9,6 +9,49 @@ from .common import MessageRow, _session_source_label
 
 
 class ChatViewMixin:
+    def _transient_chat_feedback_key(self, session=None):
+        data = session if isinstance(session, dict) else None
+        if data is None and isinstance(getattr(self, "current_session", None), dict):
+            data = self.current_session
+        sid = str((data or {}).get("id") or "").strip()
+        if sid:
+            return f"session:{sid}"
+        scope, did = "local", "local"
+        resolver = getattr(self, "_current_device_context", None)
+        if callable(resolver):
+            try:
+                scope, did = resolver()
+            except Exception:
+                scope, did = "local", "local"
+        return f"draft:{str(scope or 'local').strip().lower()}:{str(did or 'local').strip() or 'local'}"
+
+    def _transient_chat_feedback_rows(self, session=None):
+        items = list(getattr(self, "_transient_chat_feedback", None) or [])
+        if not items:
+            return []
+        target_key = self._transient_chat_feedback_key(session)
+        rows = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("key") or "").strip() != target_key:
+                continue
+            text = str(item.get("text") or "").strip()
+            if not text:
+                continue
+            rows.append(
+                {
+                    "role": str(item.get("role") or "assistant").strip().lower() or "assistant",
+                    "text": text,
+                }
+            )
+        return rows
+
+    def _display_session_bubbles(self, session=None):
+        data = session if isinstance(session, dict) else {}
+        bubbles = list(data.get("bubbles") or [])
+        return bubbles + self._transient_chat_feedback_rows(session)
+
     def _sync_message_layout_alignment(self):
         layout = getattr(self, "msg_layout", None)
         if layout is None:
@@ -120,9 +163,24 @@ class ChatViewMixin:
     def _render_session(self, session):
         self._clear_messages()
         if not session:
+            feedback = self._transient_chat_feedback_rows(None)
+            if feedback:
+                for bubble in feedback:
+                    role = bubble.get("role", "assistant")
+                    self._add_message_row(role, bubble.get("text", ""), finished=True, auto_scroll=False)
+                self._update_header_labels()
+                self._refresh_token_label()
+                syncer = getattr(self, "_sync_current_turn_view", None)
+                if callable(syncer):
+                    syncer(force=True)
+                self._refresh_jump_latest_button()
+                refresher = getattr(self, "_refresh_floating_chat_window", None)
+                if callable(refresher):
+                    refresher()
+                return
             self._reset_chat_area("选择一个会话，或新建会话开始聊天。")
             return
-        bubbles = list(session.get("bubbles") or [])
+        bubbles = self._display_session_bubbles(session)
         if not bubbles:
             self._reset_chat_area("当前会话还没有消息。")
             return
@@ -311,10 +369,27 @@ class ChatViewMixin:
         if row is None:
             return
 
-        def apply():
+        def apply(retry: bool = False):
             try:
+                layout = getattr(self, "msg_layout", None)
+                if layout is not None:
+                    try:
+                        layout.activate()
+                    except Exception:
+                        pass
+                root = getattr(self, "msg_root", None)
+                if root is not None:
+                    try:
+                        root.updateGeometry()
+                    except Exception:
+                        pass
                 bar = self.scroll.verticalScrollBar()
                 target_y = max(0, row.y() - int(top_margin or 0))
+                rows = getattr(self, "_rendered_message_rows", None) or []
+                is_first_row = bool(rows) and rows[0] is row
+                if not retry and target_y == 0 and not is_first_row and bar.maximum() > 0:
+                    QTimer.singleShot(30, lambda: apply(retry=True))
+                    return
                 bar.setValue(min(target_y, bar.maximum()))
                 if preserve_scroll_state:
                     self._user_scrolled_up = False

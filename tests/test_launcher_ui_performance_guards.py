@@ -380,6 +380,69 @@ class LauncherUiPerformanceGuardTests(unittest.TestCase):
         self.assertEqual(dummy.scroll.verticalScrollBar().value_set, 162)
         self.assertEqual(dummy.jump_refreshes, 1)
 
+    def test_scroll_row_to_top_retries_when_nonfirst_row_geometry_is_not_ready(self):
+        class DummyBar:
+            def __init__(self):
+                self.value_set = None
+
+            def maximum(self):
+                return 400
+
+            def setValue(self, value):
+                self.value_set = int(value)
+
+        class DummyScroll:
+            def __init__(self, bar):
+                self._bar = bar
+
+            def verticalScrollBar(self):
+                return self._bar
+
+        class DummyLayout:
+            def activate(self):
+                return True
+
+        class DummyRoot:
+            def updateGeometry(self):
+                return None
+
+        class DummyRow:
+            def __init__(self):
+                self.calls = 0
+
+            def y(self):
+                self.calls += 1
+                return 0 if self.calls == 1 else 240
+
+        class DummyView:
+            _scroll_row_to_top = chat_view_mod.ChatViewMixin._scroll_row_to_top
+
+            def __init__(self, row):
+                self.scroll = DummyScroll(DummyBar())
+                self.msg_layout = DummyLayout()
+                self.msg_root = DummyRoot()
+                self._user_scrolled_up = False
+                self._rendered_message_rows = [object(), row]
+                self.jump_refreshes = 0
+
+            def _refresh_jump_latest_button(self):
+                self.jump_refreshes += 1
+
+        row = DummyRow()
+        dummy = DummyView(row)
+        timer_calls = []
+
+        def run_timer(_ms, fn):
+            timer_calls.append(True)
+            fn()
+
+        with mock.patch.object(chat_view_mod.QTimer, "singleShot", side_effect=run_timer):
+            dummy._scroll_row_to_top(row, preserve_scroll_state=True)
+
+        self.assertEqual(timer_calls, [True, True])
+        self.assertEqual(dummy.scroll.verticalScrollBar().value_set, 222)
+        self.assertEqual(dummy.jump_refreshes, 2)
+
     def test_sync_current_turn_view_prefers_tracked_current_turn_user_row(self):
         class DummyRow:
             def __init__(self, label):
@@ -1068,6 +1131,14 @@ class LauncherUiPerformanceGuardTests(unittest.TestCase):
 
         self.assertEqual(dummy.calls, [("visible_check", "channels")])
         self.assertEqual(dummy._qt_channel_states["wechat"]["status_label"].text, "")
+
+    def test_channel_runtime_uses_async_local_probe_path_for_channels_status_refresh(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        path = os.path.join(root, "qt_chat_parts", "channel_runtime.py")
+        with open(path, "r", encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("def _request_local_channel_external_running_refresh", src)
+        self.assertIn('action_name="本地渠道状态刷新"', src)
 
     def test_queued_session_refresh_coalesces_background_rebuilds(self):
         class DummySidebar(SidebarSessionsMixin):

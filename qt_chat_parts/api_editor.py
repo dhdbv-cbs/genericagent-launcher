@@ -65,6 +65,16 @@ _API_ADVANCED_FIELD_META = {
         "kind": "int",
         "placeholder": "整数；留空则跟随模板默认",
     },
+    "base_delay": {
+        "label": "base_delay",
+        "kind": "float",
+        "placeholder": "浮点秒数；留空则跟随模板默认",
+    },
+    "spring_back": {
+        "label": "spring_back",
+        "kind": "bool",
+        "checkbox_label": "启用 spring_back",
+    },
     "connect_timeout": {
         "label": "connect_timeout",
         "kind": "int",
@@ -111,6 +121,11 @@ _API_KIND_ADVANCED_FIELDS = {
         "connect_timeout",
         "read_timeout",
         "context_win",
+    ],
+    "mixin": [
+        "max_retries",
+        "base_delay",
+        "spring_back",
     ],
 }
 
@@ -171,7 +186,7 @@ class ApiEditorMixin:
         )
 
     def _api_format_options(self):
-        return [lz.SIMPLE_FORMAT_LABEL[k] for k in ("claude_native", "oai_chat", "oai_responses")]
+        return [lz.SIMPLE_FORMAT_LABEL[k] for k in ("claude_native", "oai_chat", "oai_responses", "mixin")]
 
     def _api_format_from_label(self, label):
         for format_key, txt in lz.SIMPLE_FORMAT_LABEL.items():
@@ -209,13 +224,19 @@ class ApiEditorMixin:
                 best_score = score
         if best_key:
             return best_key
-        return "custom-claude" if kind == "native_claude" else "custom-oai"
+        if kind == "native_claude":
+            return "custom-claude"
+        if kind == "mixin":
+            return "mixin"
+        return "custom-oai"
 
     def _api_infer_format_key(self, kind, data):
         if kind == "native_claude":
             return "claude_native"
         if kind == "native_oai":
             return "oai_responses" if data.get("api_mode") == "responses" else "oai_chat"
+        if kind == "mixin":
+            return "mixin"
         return "oai_chat"
 
     def _api_prune_managed_extra(self, raw_extra, *, drop_template=False, drop_format=False):
@@ -235,20 +256,25 @@ class ApiEditorMixin:
         stored_name = str(data.get("name") or "").strip()
         valid_tpl_keys = {k for k, _ in self._api_template_choices(format_key)}
         if tpl_key not in valid_tpl_keys:
-            tpl_key = "custom-claude" if kind == "native_claude" else "custom-oai"
+            if kind == "native_claude":
+                tpl_key = "custom-claude"
+            elif kind == "mixin":
+                tpl_key = "mixin"
+            else:
+                tpl_key = "custom-oai"
         advanced_values = {}
         for key in self._api_known_advanced_keys_for_kind(kind):
             if key in data:
                 advanced_values[key] = data.get(key)
         raw_extra = dict(data)
-        for key in ("name", "apikey", "apibase", "model", "user_agent"):
+        for key in ("name", "apikey", "apibase", "model", "user_agent", "llm_nos"):
             raw_extra.pop(key, None)
         for key in _API_ADVANCED_FIELD_META:
             raw_extra.pop(key, None)
         for key in lz.TEMPLATE_INDEX.get(tpl_key, {}).get("defaults", {}):
             raw_extra.pop(key, None)
         raw_extra.pop("api_mode", None)
-        return {
+        state = {
             "var": cfg["var"],
             "name": stored_name,
             "persisted_name": stored_name,
@@ -265,6 +291,9 @@ class ApiEditorMixin:
             "model_status": "",
             "model_fetching": False,
         }
+        if kind == "mixin":
+            state["llm_nos"] = list(data.get("llm_nos") or [])
+        return state
 
     def _api_default_model_for_state(self, state):
         tpl_key = state.get("tpl_key")
@@ -347,6 +376,48 @@ class ApiEditorMixin:
         fmt = self._api_format_meta((state or {}).get("format"))
         return fmt.get("kind") == "native_claude"
 
+    def _api_is_mixin_state(self, state):
+        return self._api_state_kind(state) == "mixin"
+
+    def _api_preview_visible_names(self):
+        used_names = {
+            str(((cfg.get("data") or {}).get("name")) or "").strip()
+            for cfg in (getattr(self, "_qt_api_hidden_configs", []) or [])
+            if str(((cfg.get("data") or {}).get("name")) or "").strip()
+        }
+        preview = []
+        for idx, state in enumerate(getattr(self, "_qt_api_state", []) or []):
+            preview_name = self._api_persisted_name(state, idx, used_names)
+            used_names.add(preview_name)
+            preview.append(preview_name)
+        return preview
+
+    def _api_available_mixin_target_names(self):
+        names = []
+        for state, preview_name in zip(getattr(self, "_qt_api_state", []) or [], self._api_preview_visible_names()):
+            if self._api_is_mixin_state(state):
+                continue
+            name = str(preview_name or "").strip()
+            if name:
+                names.append(name)
+        return names
+
+    def _api_mixin_refs_text(self, state):
+        refs = list((state or {}).get("llm_nos") or [])
+        return ", ".join(str(item).strip() for item in refs if str(item).strip())
+
+    def _api_parse_mixin_refs(self, text):
+        refs = []
+        for raw in str(text or "").replace("\n", ",").replace("，", ",").split(","):
+            token = str(raw or "").strip()
+            if not token:
+                continue
+            if token.isdigit():
+                refs.append(int(token))
+            else:
+                refs.append(token)
+        return refs
+
     def _api_apply_template_model(self, state, previous_default=""):
         new_default = self._api_default_model_for_state(state)
         current = (state.get("model") or "").strip()
@@ -415,21 +486,34 @@ class ApiEditorMixin:
                 data["api_mode"] = api_mode
             else:
                 data.pop("api_mode", None)
-            apibase = (state.get("apibase") or "").strip()
-            apikey = (state.get("apikey") or "").strip()
-            model = (state.get("model") or "").strip()
-            if apibase:
-                data["apibase"] = apibase
-            elif not data.get("apibase"):
-                data.pop("apibase", None)
-            if apikey:
-                data["apikey"] = apikey
+            if kind == "mixin":
+                refs = []
+                for target in list(state.get("llm_nos") or []):
+                    if isinstance(target, int):
+                        refs.append(int(target))
+                        continue
+                    target_text = str(target or "").strip()
+                    if target_text:
+                        refs.append(target_text)
+                data["llm_nos"] = refs
+                for key in ("apikey", "apibase", "model", "user_agent"):
+                    data.pop(key, None)
             else:
-                data.pop("apikey", None)
-            if model:
-                data["model"] = model
-            else:
-                data.pop("model", None)
+                apibase = (state.get("apibase") or "").strip()
+                apikey = (state.get("apikey") or "").strip()
+                model = (state.get("model") or "").strip()
+                if apibase:
+                    data["apibase"] = apibase
+                elif not data.get("apibase"):
+                    data.pop("apibase", None)
+                if apikey:
+                    data["apikey"] = apikey
+                else:
+                    data.pop("apikey", None)
+                if model:
+                    data["model"] = model
+                else:
+                    data.pop("model", None)
             for key in self._api_advanced_field_keys(state):
                 values = dict(state.get("advanced_values") or {})
                 if key not in values:
@@ -607,7 +691,7 @@ class ApiEditorMixin:
         self._qt_api_order_slots = []
         for config in list(parsed.get("configs") or []):
             kind = str(config.get("kind") or "").strip()
-            if kind in ("native_claude", "native_oai"):
+            if kind in ("native_claude", "native_oai", "mixin"):
                 self._qt_api_state.append(self._api_make_simple_state(config))
                 self._qt_api_order_slots.append("visible")
                 continue
@@ -761,7 +845,7 @@ class ApiEditorMixin:
             row1.addWidget(QLabel("协议"), 0)
             format_box = QComboBox()
             format_box.addItems(self._api_format_options())
-            format_box.setCurrentText(lz.SIMPLE_FORMAT_LABEL.get(state.get("format"), "Chat Completions"))
+            format_box.setCurrentText(lz.SIMPLE_FORMAT_LABEL.get(state.get("format"), lz.SIMPLE_FORMAT_LABEL["oai_chat"]))
             format_box.setStyleSheet(self._api_combo_style())
             row1.addWidget(format_box, 1)
             row1.addWidget(QLabel("模板"), 0)
@@ -774,80 +858,97 @@ class ApiEditorMixin:
             row1.addWidget(tpl_box, 1)
             body.addLayout(row1)
 
-            row2 = QHBoxLayout()
-            row2.setSpacing(10)
-            row2.addWidget(QLabel("URL"), 0)
-            url_edit = QLineEdit()
-            url_edit.setPlaceholderText("例如 https://api.openai.com/v1")
-            url_edit.setText(str(state.get("apibase") or ""))
-            row2.addWidget(url_edit, 1)
-            body.addLayout(row2)
+            if self._api_is_mixin_state(state):
+                row2 = QHBoxLayout()
+                row2.setSpacing(10)
+                row2.addWidget(QLabel("故障转移链"), 0)
+                refs_edit = QLineEdit()
+                refs_edit.setPlaceholderText("按顺序填写非 mixin API 卡片名，逗号分隔；兼容旧索引写法")
+                refs_edit.setText(self._api_mixin_refs_text(state))
+                row2.addWidget(refs_edit, 1)
+                body.addLayout(row2)
+                status = QLabel("")
+                status.setWordWrap(True)
+                status.setObjectName("mutedText")
+                body.addWidget(status)
+                model_box = None
+                ua_edit = None
+                ua_row_widgets = ()
+            else:
+                row2 = QHBoxLayout()
+                row2.setSpacing(10)
+                row2.addWidget(QLabel("URL"), 0)
+                url_edit = QLineEdit()
+                url_edit.setPlaceholderText("例如 https://api.openai.com/v1")
+                url_edit.setText(str(state.get("apibase") or ""))
+                row2.addWidget(url_edit, 1)
+                body.addLayout(row2)
 
-            row3 = QHBoxLayout()
-            row3.setSpacing(10)
-            row3.addWidget(QLabel("模型"), 0)
-            model_box = QComboBox()
-            model_box.setEditable(True)
-            model_box.setStyleSheet(self._api_combo_style())
-            model_choices = list(state.get("model_choices") or [])
-            current_model = (state.get("model") or self._api_default_model_for_state(state) or "").strip()
-            if current_model and current_model not in model_choices:
-                model_choices.insert(0, current_model)
-            if not model_choices:
-                model_choices = [current_model] if current_model else [""]
-            model_box.addItems(model_choices)
-            model_box.setCurrentText(current_model)
-            row3.addWidget(model_box, 1)
-            fetch_btn = QPushButton("拉取模型")
-            fetch_btn.setStyleSheet(self._action_button_style())
-            fetch_btn.clicked.connect(lambda _=False, s=state: self._qt_api_fetch_models(s))
-            fetch_disabled_reason = self._api_model_fetch_disabled_reason(state)
-            self._apply_api_button_state(
-                fetch_btn,
-                not bool(fetch_disabled_reason),
-                enabled_tooltip="从当前 API 地址拉取可用模型列表。",
-                disabled_tooltip=fetch_disabled_reason,
-            )
-            row3.addWidget(fetch_btn, 0)
-            body.addLayout(row3)
+                row3 = QHBoxLayout()
+                row3.setSpacing(10)
+                row3.addWidget(QLabel("模型"), 0)
+                model_box = QComboBox()
+                model_box.setEditable(True)
+                model_box.setStyleSheet(self._api_combo_style())
+                model_choices = list(state.get("model_choices") or [])
+                current_model = (state.get("model") or self._api_default_model_for_state(state) or "").strip()
+                if current_model and current_model not in model_choices:
+                    model_choices.insert(0, current_model)
+                if not model_choices:
+                    model_choices = [current_model] if current_model else [""]
+                model_box.addItems(model_choices)
+                model_box.setCurrentText(current_model)
+                row3.addWidget(model_box, 1)
+                fetch_btn = QPushButton("拉取模型")
+                fetch_btn.setStyleSheet(self._action_button_style())
+                fetch_btn.clicked.connect(lambda _=False, s=state: self._qt_api_fetch_models(s))
+                fetch_disabled_reason = self._api_model_fetch_disabled_reason(state)
+                self._apply_api_button_state(
+                    fetch_btn,
+                    not bool(fetch_disabled_reason),
+                    enabled_tooltip="从当前 API 地址拉取可用模型列表。",
+                    disabled_tooltip=fetch_disabled_reason,
+                )
+                row3.addWidget(fetch_btn, 0)
+                body.addLayout(row3)
 
-            row4 = QHBoxLayout()
-            row4.setSpacing(10)
-            row4.addWidget(QLabel("Key"), 0)
-            key_edit = QLineEdit()
-            key_edit.setEchoMode(QLineEdit.Password)
-            key_edit.setPlaceholderText("API Key")
-            key_edit.setText(str(state.get("apikey") or ""))
-            row4.addWidget(key_edit, 1)
-            show_btn = QPushButton("显示")
-            show_btn.setCheckable(True)
-            show_btn.setStyleSheet(self._action_button_style())
+                row4 = QHBoxLayout()
+                row4.setSpacing(10)
+                row4.addWidget(QLabel("Key"), 0)
+                key_edit = QLineEdit()
+                key_edit.setEchoMode(QLineEdit.Password)
+                key_edit.setPlaceholderText("API Key")
+                key_edit.setText(str(state.get("apikey") or ""))
+                row4.addWidget(key_edit, 1)
+                show_btn = QPushButton("显示")
+                show_btn.setCheckable(True)
+                show_btn.setStyleSheet(self._action_button_style())
 
-            def toggle_key(checked, edit=key_edit, btn=show_btn):
-                edit.setEchoMode(QLineEdit.Normal if checked else QLineEdit.Password)
-                btn.setText("隐藏" if checked else "显示")
+                def toggle_key(checked, edit=key_edit, btn=show_btn):
+                    edit.setEchoMode(QLineEdit.Normal if checked else QLineEdit.Password)
+                    btn.setText("隐藏" if checked else "显示")
 
-            show_btn.toggled.connect(toggle_key)
-            row4.addWidget(show_btn, 0)
-            body.addLayout(row4)
+                show_btn.toggled.connect(toggle_key)
+                row4.addWidget(show_btn, 0)
+                body.addLayout(row4)
 
-            row5 = QHBoxLayout()
-            row5.setSpacing(10)
-            row5.addWidget(QLabel("UA"), 0)
-            ua_edit = QLineEdit()
-            ua_edit.setPlaceholderText("可选：自定义 user_agent，例如 claude-cli/2.1.113 (external, cli)")
-            ua_edit.setText(str(state.get("user_agent") or ""))
-            row5.addWidget(ua_edit, 1)
-            body.addLayout(row5)
-            ua_row_widgets = (ua_edit, row5.itemAt(0).widget())
-            for widget in ua_row_widgets:
-                if widget is not None:
-                    widget.setVisible(self._api_supports_user_agent(state))
+                row5 = QHBoxLayout()
+                row5.setSpacing(10)
+                row5.addWidget(QLabel("UA"), 0)
+                ua_edit = QLineEdit()
+                ua_edit.setPlaceholderText("可选：自定义 user_agent，例如 claude-cli/2.1.113 (external, cli)")
+                ua_edit.setText(str(state.get("user_agent") or ""))
+                row5.addWidget(ua_edit, 1)
+                body.addLayout(row5)
+                ua_row_widgets = (ua_edit, row5.itemAt(0).widget())
+                for widget in ua_row_widgets:
+                    if widget is not None:
+                        widget.setVisible(self._api_supports_user_agent(state))
 
-            status = QLabel(state.get("model_status") or "")
-            status.setWordWrap(True)
-            status.setObjectName("mutedText")
-            body.addWidget(status)
+                status = QLabel(state.get("model_status") or "")
+                status.setWordWrap(True)
+                status.setObjectName("mutedText")
+                body.addWidget(status)
 
             summary = QLabel("")
             summary.setWordWrap(True)
@@ -855,13 +956,23 @@ class ApiEditorMixin:
             body.addWidget(summary)
 
             def sync_summary(s=state, label=summary, state_idx=idx):
-                fmt = self._api_format_meta(s.get("format"))
-                defaults = dict(lz.TEMPLATE_INDEX.get(s.get("tpl_key"), {}).get("defaults") or {})
-                model = (s.get("model") or defaults.get("model") or "请手动填写模型名").strip()
                 card_name = self._api_effective_name(s, state_idx)
                 name_note = f"当前卡片名：{card_name}"
                 if not str(s.get("name") or "").strip():
                     name_note += "（留空时自动生成）"
+                if self._api_is_mixin_state(s):
+                    refs = [str(item).strip() for item in list(s.get("llm_nos") or []) if str(item).strip()]
+                    available = self._api_available_mixin_target_names()
+                    ref_note = " -> ".join(refs) if refs else "（尚未填写）"
+                    available_note = "、".join(available) if available else "（当前还没有可引用的非 mixin API 卡片）"
+                    label.setText(
+                        f"{name_note}；当前故障转移顺序：{ref_note}；可引用 API 会话名：{available_note}；保存时会校验引用是否存在。"
+                    )
+                    status.setText(f"当前可引用的 API 会话名：{available_note}")
+                    return
+                fmt = self._api_format_meta(s.get("format"))
+                defaults = dict(lz.TEMPLATE_INDEX.get(s.get("tpl_key"), {}).get("defaults") or {})
+                model = (s.get("model") or defaults.get("model") or "请手动填写模型名").strip()
                 notes = []
                 if defaults.get("fake_cc_system_prompt"):
                     notes.append("自动带 Claude Code 兼容参数")
@@ -877,6 +988,7 @@ class ApiEditorMixin:
                     f"{name_note}；{fmt.get('hint', '')} 模板默认模型：{model}；"
                     f"{'，'.join(notes) if notes else '自动写入模板里的默认参数'}。"
                 )
+                status.setText(str(s.get("model_status") or ""))
 
             advanced_toggle = QPushButton()
             advanced_toggle.setCheckable(True)
@@ -946,6 +1058,7 @@ class ApiEditorMixin:
 
             def on_format_change(choice, s=state, tpl_widget=tpl_box, model_widget=model_box, status_label=status):
                 format_key = self._api_format_from_label(choice)
+                was_mixin = self._api_is_mixin_state(s)
                 previous_default = self._api_default_model_for_state(s)
                 s["format"] = format_key
                 self._api_sync_state_var_kind(s)
@@ -963,7 +1076,10 @@ class ApiEditorMixin:
                 tpl_widget.addItems([lbl for _, lbl in new_choices])
                 tpl_widget.setCurrentText(new_map.get(current_key, ""))
                 tpl_widget.blockSignals(False)
-                model_widget.setCurrentText(s.get("model") or "")
+                if model_widget is not None:
+                    model_widget.setCurrentText(s.get("model") or "")
+                if self._api_is_mixin_state(s):
+                    s["llm_nos"] = list(s.get("llm_nos") or [])
                 render_advanced_fields()
                 sync_advanced_fold()
                 for widget in ua_row_widgets:
@@ -971,6 +1087,8 @@ class ApiEditorMixin:
                         widget.setVisible(self._api_supports_user_agent(s))
                 status_label.setText("")
                 sync_summary()
+                if was_mixin != self._api_is_mixin_state(s):
+                    self._render_api_cards()
 
             def on_tpl_change(choice, s=state, status_label=status, model_widget=model_box):
                 rev = {lbl: key for key, lbl in self._api_template_choices(s.get("format"))}
@@ -979,7 +1097,8 @@ class ApiEditorMixin:
                 s["model_status"] = ""
                 s["raw_extra"] = self._api_prune_managed_extra(s.get("raw_extra"), drop_template=True, drop_format=False)
                 self._api_apply_template_model(s, previous_default)
-                model_widget.setCurrentText(s.get("model") or "")
+                if model_widget is not None:
+                    model_widget.setCurrentText(s.get("model") or "")
                 status_label.setText("")
                 render_advanced_fields()
                 sync_advanced_fold()
@@ -988,13 +1107,19 @@ class ApiEditorMixin:
             format_box.currentTextChanged.connect(on_format_change)
             tpl_box.currentTextChanged.connect(on_tpl_change)
             name_edit.textChanged.connect(lambda text, s=state: (s.__setitem__("name", text.strip()), sync_summary()))
-            url_edit.textChanged.connect(lambda text, s=state: (s.__setitem__("apibase", text), sync_summary()))
-            key_edit.textChanged.connect(lambda text, s=state: s.__setitem__("apikey", text))
-            model_box.currentTextChanged.connect(lambda text, s=state: s.__setitem__("model", text.strip()))
+            if self._api_is_mixin_state(state):
+                refs_edit.textChanged.connect(
+                    lambda text, s=state: (s.__setitem__("llm_nos", self._api_parse_mixin_refs(text)), sync_summary())
+                )
+            else:
+                url_edit.textChanged.connect(lambda text, s=state: (s.__setitem__("apibase", text), sync_summary()))
+                key_edit.textChanged.connect(lambda text, s=state: s.__setitem__("apikey", text))
+                model_box.currentTextChanged.connect(lambda text, s=state: s.__setitem__("model", text.strip()))
             advanced_toggle.toggled.connect(sync_advanced_fold)
             render_advanced_fields()
             sync_advanced_fold()
-            ua_edit.textChanged.connect(lambda text, s=state: s.__setitem__("user_agent", text.strip()))
+            if ua_edit is not None:
+                ua_edit.textChanged.connect(lambda text, s=state: s.__setitem__("user_agent", text.strip()))
             sync_summary()
             self.settings_api_list_layout.addWidget(card)
         self.settings_api_list_layout.addStretch(1)
@@ -1002,7 +1127,7 @@ class ApiEditorMixin:
     def _qt_api_add_channel(self, format_key, *, render=True):
         fmt = self._api_format_meta(format_key)
         kind = fmt.get("kind")
-        if kind not in ("native_claude", "native_oai"):
+        if kind not in ("native_claude", "native_oai", "mixin"):
             return
         existing = {s["var"] for s in self._qt_api_state}
         existing.update({c["var"] for c in self._qt_api_hidden_configs})
@@ -1025,6 +1150,7 @@ class ApiEditorMixin:
                 "model_choices": [],
                 "model_status": "",
                 "model_fetching": False,
+                "llm_nos": list(defaults.get("llm_nos") or []),
             }
         )
         if render:
@@ -1092,8 +1218,12 @@ class ApiEditorMixin:
             QMessageBox.warning(self, "无法保存", "还没有可用的 mykey.py。")
             return
         try:
+            configs = self._api_build_save_configs()
+            ref_errors = list(lz.validate_api_config_references(configs))
+            if ref_errors:
+                raise RuntimeError("API 配置引用无效：\n" + "\n".join(ref_errors))
             txt = lz.serialize_mykey_py(
-                configs=self._api_build_save_configs(),
+                configs=configs,
                 extras=self._qt_api_extras,
                 passthrough=self._qt_api_passthrough,
             )

@@ -74,6 +74,7 @@ from qt_chat_parts.common import (
     _SVG_BOT,
     _SVG_CHEVRON_DOWN,
     _SVG_INFO,
+    _SVG_REFRESH,
     _SVG_SEND,
     _SVG_STOP,
     InputTextEdit,
@@ -110,6 +111,26 @@ def _qt_message_handler(mode, context, message):
     if "QFont::setPointSizeF: Point size <= 0" in text:
         return
     sys.stderr.write(text + "\n")
+
+
+def _rotated_svg_icon(cache_key: str, svg: str, *, color: str, size: int, angle: float) -> QIcon:
+    base_icon = _svg_icon(cache_key, svg, color=color, size=size)
+    base_pixmap = base_icon.pixmap(size, size)
+    if base_pixmap.isNull():
+        return base_icon
+    canvas = QPixmap(size, size)
+    canvas.fill(Qt.transparent)
+    painter = QPainter(canvas)
+    try:
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        painter.translate(size / 2.0, size / 2.0)
+        painter.rotate(float(angle or 0.0))
+        painter.translate(-size / 2.0, -size / 2.0)
+        painter.drawPixmap(0, 0, base_pixmap)
+    finally:
+        painter.end()
+    return QIcon(canvas)
 
 
 qInstallMessageHandler(_qt_message_handler)
@@ -264,6 +285,9 @@ class FloatingOrbWindow(QWidget):
         self.input_box = InputTextEdit(self._handle_send, image_cb=host._handle_input_image_attachments)
         self.input_box.setMinimumHeight(30)
         self.input_box.setMaximumHeight(75)
+        setup_input = getattr(host, "_configure_chat_input_editor", None)
+        if callable(setup_input):
+            setup_input(self.input_box)
         composer_layout.addWidget(self.input_box)
         self.input_attachment_host = QFrame()
         self.input_attachment_host.setObjectName("cardInset")
@@ -1121,6 +1145,9 @@ class FloatingChatWindow(QWidget):
         self.input_box = InputTextEdit(self._handle_send)
         self.input_box.setMinimumHeight(82)
         self.input_box.setMaximumHeight(180)
+        setup_input = getattr(host, "_configure_chat_input_editor", None)
+        if callable(setup_input):
+            setup_input(self.input_box)
         composer_layout.addWidget(self.input_box)
         action_row = QHBoxLayout()
         action_row.setContentsMargins(0, 0, 0, 0)
@@ -1242,6 +1269,9 @@ class QtChatWindow(ApiEditorMixin, ChannelRuntimeMixin, DependencyRuntimeMixin, 
         self._server_status_timer = QTimer(self)
         self._server_status_timer.timeout.connect(self._request_server_connection_probe)
         self._server_status_timer.start(15000)
+        self._subagent_status_timer = QTimer(self)
+        self._subagent_status_timer.timeout.connect(self._tick_subagent_status)
+        self._subagent_status_timer.start(250)
 
         self._stream_flush_timer = QTimer(self)
         self._stream_flush_timer.setSingleShot(True)
@@ -1267,12 +1297,18 @@ class QtChatWindow(ApiEditorMixin, ChannelRuntimeMixin, DependencyRuntimeMixin, 
         self._reply_done_popups = []
         self._state_request_seq = 0
         self._active_token_event_ts = None
+        self._subagent_runtime_count = 0
+        self._subagent_runtime_scan_ts = 0.0
+        self._subagent_spinner_phase = 0
+        self._subagent_runtime_bound_key = ""
+        self._subagent_runtime_refresh_inflight_key = ""
         self._current_stream_text = ""
         self._pending_stream_text = None
         self._stream_row = None
         self._rendered_message_rows = []
         self._pending_input_attachments_data = []
         self._active_turn_attachments_data = []
+        self._transient_chat_feedback = []
         self.pages = None
         self._welcome_page = None
         self._locate_page = None
@@ -1461,7 +1497,7 @@ class QtChatWindow(ApiEditorMixin, ChannelRuntimeMixin, DependencyRuntimeMixin, 
         self._start_shutdown_cleanup()
 
     def _stop_background_activity_for_shutdown(self):
-        for attr in ("_drain_timer", "_channel_snapshot_timer", "_server_status_timer", "_stream_flush_timer"):
+        for attr in ("_drain_timer", "_channel_snapshot_timer", "_server_status_timer", "_subagent_status_timer", "_stream_flush_timer"):
             timer = getattr(self, attr, None)
             if timer is None:
                 continue
@@ -1816,6 +1852,7 @@ class QtChatWindow(ApiEditorMixin, ChannelRuntimeMixin, DependencyRuntimeMixin, 
         )
         self.input_box.setMinimumHeight(44)
         self.input_box.setMaximumHeight(110)
+        self._configure_chat_input_editor(self.input_box)
         composer_layout.addWidget(self.input_box)
 
         self.input_attachment_host = QFrame()
@@ -1900,6 +1937,7 @@ class QtChatWindow(ApiEditorMixin, ChannelRuntimeMixin, DependencyRuntimeMixin, 
 
         self.token_label = self.session_token_tree_label
         self._refresh_info_tooltip()
+        self._refresh_subagent_runtime_state()
         footer_layout.addWidget(composer)
         main_layout.addWidget(footer)
 
@@ -1924,6 +1962,49 @@ class QtChatWindow(ApiEditorMixin, ChannelRuntimeMixin, DependencyRuntimeMixin, 
             output_tokens,
             live=bool(live and summary.get("live_output_tokens", 0)),
         )
+
+    def _refresh_info_button_icon(self):
+        btn = getattr(self, "info_btn", None)
+        if btn is None:
+            return
+        active_count = int(getattr(self, "_subagent_runtime_count", 0) or 0)
+        if active_count > 0:
+            angle = (int(getattr(self, "_subagent_spinner_phase", 0) or 0) % 8) * 45.0
+            icon = _rotated_svg_icon(
+                "info_btn_spinner_base",
+                _SVG_REFRESH,
+                color=C["accent"],
+                size=14,
+                angle=angle,
+            )
+        else:
+            icon = _svg_icon("info_btn", _SVG_INFO, color=C["muted"], size=14)
+        btn.setIcon(icon)
+        btn.setIconSize(QSize(14, 14))
+
+    def _tick_subagent_status(self):
+        now = float(time.time())
+        current_key = ""
+        target_getter = getattr(self, "_subagent_runtime_target_key", None)
+        if callable(target_getter):
+            try:
+                current_key = str(target_getter() or "").strip()
+            except Exception:
+                current_key = ""
+        if current_key and current_key != str(getattr(self, "_subagent_runtime_bound_key", "") or "").strip():
+            self._refresh_subagent_runtime_state()
+        active_count = int(getattr(self, "_subagent_runtime_count", 0) or 0)
+        interval = 0.8 if active_count > 0 else 2.5
+        last_scan = float(getattr(self, "_subagent_runtime_scan_ts", 0.0) or 0.0)
+        if (now - last_scan) >= interval:
+            self._refresh_subagent_runtime_state()
+            active_count = int(getattr(self, "_subagent_runtime_count", 0) or 0)
+        if active_count > 0:
+            self._subagent_spinner_phase = (int(getattr(self, "_subagent_spinner_phase", 0) or 0) + 1) % 8
+            self._refresh_info_button_icon()
+        elif int(getattr(self, "_subagent_spinner_phase", 0) or 0) != 0:
+            self._subagent_spinner_phase = 0
+            self._refresh_info_button_icon()
 
     def _close_reply_done_popups(self):
         popups = list(getattr(self, "_reply_done_popups", None) or [])
@@ -2232,6 +2313,19 @@ class QtChatWindow(ApiEditorMixin, ChannelRuntimeMixin, DependencyRuntimeMixin, 
         if floating_text != main_text:
             target.setPlainText(floating_text)
 
+    def _configure_chat_input_editor(self, editor):
+        if editor is None:
+            return
+        if bool(getattr(editor, "_launcher_slash_ready", False)):
+            return
+        try:
+            editor._launcher_slash_ready = True
+        except Exception:
+            pass
+        setter = getattr(editor, "set_slash_command_provider", None)
+        if callable(setter):
+            setter(self._local_slash_command_suggestions)
+
     def _floating_recent_session_rows(self):
         if not lz.is_valid_agent_dir(self.agent_dir):
             return []
@@ -2426,8 +2520,17 @@ class QtChatWindow(ApiEditorMixin, ChannelRuntimeMixin, DependencyRuntimeMixin, 
 
     def _floating_chat_transcript(self):
         session = self.current_session or {}
-        bubbles = list(session.get("bubbles") or [])
+        bubbles = self._display_session_bubbles(session)
         if not bubbles and not self._busy:
+            feedback = self._transient_chat_feedback_rows(session if session else None)
+            if feedback:
+                rows = []
+                for bubble in feedback:
+                    role = str(bubble.get("role") or "assistant").strip().lower()
+                    label = "我" if role == "user" else "启动器"
+                    text = str(bubble.get("text") or "").strip() or "…"
+                    rows.append(f"{label}\n{text}")
+                return "\n\n".join(rows)
             if self._is_channel_process_session(session):
                 return "当前是渠道进程快照，会话只读。"
             return "当前还没有消息。\n\n直接在这里输入内容，发送后会自动创建新会话。"
@@ -2462,7 +2565,7 @@ class QtChatWindow(ApiEditorMixin, ChannelRuntimeMixin, DependencyRuntimeMixin, 
         can_abort = (not disabled) and self._busy and (not self._abort_requested)
         if isinstance(win, FloatingOrbWindow):
             session = self.current_session or {}
-            bubbles = list(session.get("bubbles") or [])
+            bubbles = self._display_session_bubbles(session)
             stream_text = str(self._pending_stream_text or self._current_stream_text or "")
             win.sync_view(
                 title=self._floating_chat_title(),

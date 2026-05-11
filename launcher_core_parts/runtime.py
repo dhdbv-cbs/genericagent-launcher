@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import signal
 import shutil
 import subprocess
@@ -157,6 +158,87 @@ def _popen_external_subprocess(args, **kwargs):
         kwargs["start_new_session"] = True
     with _external_subprocess_runtime():
         return subprocess.Popen(args, **kwargs)
+
+
+def launch_visible_terminal_script(python_exe, script_path, *, cwd="", env=None, title=""):
+    py = str(python_exe or "").strip()
+    script = str(script_path or "").strip()
+    if not py or not script:
+        raise ValueError("python_exe and script_path are required")
+    cwd_text = str(cwd or "").strip()
+    launch_env = _external_subprocess_env(env)
+
+    if os.name == "nt":
+        script_cmd = script
+        if cwd_text:
+            try:
+                rel_script = os.path.relpath(script, cwd_text)
+            except Exception:
+                rel_script = ""
+            if rel_script and rel_script != "." and not rel_script.startswith(".."):
+                script_cmd = rel_script
+        fd, cmd_path = tempfile.mkstemp(suffix=".cmd", prefix="ga_tui_launch_")
+        os.close(fd)
+        with open(cmd_path, "w", encoding="utf-8", newline="\r\n") as f:
+            f.write("@echo off\r\n")
+            if str(title or "").strip():
+                f.write(f"title {str(title).strip()}\r\n")
+            if cwd_text:
+                f.write(f'cd /d "{cwd_text}"\r\n')
+            f.write(f'"{py}" "{script_cmd}"\r\n')
+        cmd = ["cmd.exe", "/d", "/k", cmd_path]
+        kwargs = {"env": launch_env}
+        if cwd_text:
+            kwargs["cwd"] = cwd_text
+        if hasattr(subprocess, "CREATE_NEW_CONSOLE"):
+            kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE
+        with _external_subprocess_runtime():
+            subprocess.Popen(cmd, **kwargs)
+        return True
+
+    shell_cwd = cwd_text or os.getcwd()
+    shell_cmd = f"cd {shlex.quote(shell_cwd)} && exec {shlex.quote(py)} {shlex.quote(script)}"
+    if str(title or "").strip():
+        shell_cmd = f"printf '\\033]0;%s\\007' {shlex.quote(str(title).strip())} ; {shell_cmd}"
+
+    if IS_MACOS:
+        applescript = (
+            'tell application "Terminal"\n'
+            "    activate\n"
+            f"    do script {json.dumps(shell_cmd, ensure_ascii=False)}\n"
+            "end tell"
+        )
+        try:
+            result = subprocess.run(
+                ["osascript", "-e", applescript],
+                env=launch_env,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+        except Exception as e:
+            raise RuntimeError(f"macOS terminal launch failed: {e}") from e
+        if result.returncode != 0:
+            detail = str(result.stderr or result.stdout or "").strip()
+            raise RuntimeError(detail or f"osascript exit {result.returncode}")
+        return True
+
+    terminal_candidates = [
+        ("x-terminal-emulator", ["-e", "bash", "-lc", shell_cmd]),
+        ("gnome-terminal", ["--", "bash", "-lc", shell_cmd]),
+        ("konsole", ["-e", "bash", "-lc", shell_cmd]),
+        ("xterm", ["-e", "bash", "-lc", shell_cmd]),
+    ]
+    for terminal_name, terminal_args in terminal_candidates:
+        terminal = shutil.which(terminal_name)
+        if not terminal:
+            continue
+        with _external_subprocess_runtime():
+            subprocess.Popen([terminal, *terminal_args], env=launch_env, cwd=shell_cwd if shell_cwd else None)
+        return True
+    raise RuntimeError("未找到可用的可见终端程序")
 
 
 def _close_process_stream(stream):
@@ -478,6 +560,56 @@ def _resolve_config_path(path):
     return candidates[0] if candidates else os.path.normpath(raw)
 
 
+def _should_resolve_python_exe_from_path(raw):
+    text = str(raw or "").strip()
+    if not text or text in (".", ".."):
+        return False
+    if any(ch.isspace() for ch in text):
+        return False
+    if os.sep in text:
+        return False
+    if os.altsep and os.altsep in text:
+        return False
+    return text.lower() in ("python", "python3")
+
+
+def _resolve_configured_python_exe(path, agent_dir=""):
+    raw = str(path or "").strip()
+    if not raw:
+        return ""
+    expanded = os.path.expanduser(raw)
+    if expanded and expanded != raw:
+        raw = expanded
+    if os.path.isabs(raw):
+        return os.path.normpath(raw)
+    if _should_resolve_python_exe_from_path(raw):
+        resolved_cmd = shutil.which(raw)
+        if resolved_cmd:
+            return os.path.normpath(resolved_cmd)
+    candidates = []
+    seen = set()
+
+    def add_candidate(value):
+        text = str(value or "").strip()
+        if not text:
+            return
+        norm = os.path.normcase(os.path.normpath(text))
+        if norm in seen:
+            return
+        seen.add(norm)
+        candidates.append(os.path.normpath(text))
+
+    root = str(agent_dir or "").strip()
+    if root:
+        add_candidate(os.path.join(os.path.abspath(root), raw))
+    for base in _config_relative_roots():
+        add_candidate(os.path.join(base, raw))
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            return candidate
+    return candidates[0] if candidates else os.path.normpath(raw)
+
+
 def _make_config_relative_path(path):
     raw = str(path or "").strip()
     if not raw:
@@ -491,6 +623,29 @@ def _make_config_relative_path(path):
         if not rel.startswith(".."):
             return rel
     return abs_path
+
+
+def _make_python_exe_config_path(path, *, agent_dir=""):
+    raw = str(path or "").strip()
+    if not raw:
+        return ""
+    expanded = os.path.expanduser(raw)
+    if expanded and expanded != raw:
+        raw = expanded
+    if _should_resolve_python_exe_from_path(raw):
+        resolved_cmd = shutil.which(raw)
+        if resolved_cmd:
+            raw = resolved_cmd
+    abs_path = os.path.abspath(raw)
+    root = str(agent_dir or "").strip()
+    if root:
+        try:
+            rel = os.path.relpath(abs_path, os.path.abspath(root))
+        except Exception:
+            rel = ""
+        if rel and rel != "." and not rel.startswith(".."):
+            return os.path.normpath(rel)
+    return _make_config_relative_path(abs_path)
 
 
 def launcher_data_path(*parts):

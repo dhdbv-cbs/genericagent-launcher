@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import posixpath
 import re
-import subprocess
 import sys
 import time
 
@@ -13,15 +11,13 @@ from .runtime import (
     _bridge_script_path,
     _external_subprocess_env,
     _python_creationflags,
-    _python_utf8_subprocess_env,
-    _resolve_config_path,
+    _resolve_configured_python_exe,
     _run_external_subprocess,
     load_config,
 )
 from .upstream_dependencies import (
     LAUNCHER_BOOTSTRAP_DEPENDENCIES,
-    UPSTREAM_DEPENDENCY_SOURCES,
-    UPSTREAM_FRONTEND_DEPENDENCY_GROUPS,
+    resolve_upstream_dependency_manifest,
 )
 
 _AUTO_BOOTSTRAP_PACKAGES = ("requests", "simplejson", "charset-normalizer")
@@ -30,9 +26,11 @@ _UV_CMD_CACHE = None
 _PACKAGE_IMPORT_NAME_MAP = {
     "pycryptodome": "Crypto",
     "python-telegram-bot": "telegram",
+    "discord.py": "discord",
     "qq-botpy": "botpy",
     "lark-oapi": "lark_oapi",
     "dingtalk-stream": "dingtalk_stream",
+    "pillow": "PIL",
 }
 
 
@@ -67,8 +65,7 @@ def _macos_python_absolute_commands():
         out.append([raw])
     return out
 
-
-def _system_python_commands():
+def _system_python_commands(agent_dir=""):
     candidates = []
     cfg_py = None
     try:
@@ -78,7 +75,7 @@ def _system_python_commands():
     except Exception:
         pass
     if cfg_py:
-        resolved = _resolve_config_path(cfg_py)
+        resolved = _resolve_configured_python_exe(cfg_py, agent_dir=agent_dir)
         if resolved:
             candidates.append([resolved])
     if os.name == "nt":
@@ -115,10 +112,10 @@ def _probe_python_command(cmd):
     return None
 
 
-def _system_python_candidates():
+def _system_python_candidates(agent_dir=""):
     items = []
     seen = set()
-    for cmd in _system_python_commands():
+    for cmd in _system_python_commands(agent_dir=agent_dir):
         info = _probe_python_command(cmd)
         if not info:
             continue
@@ -130,8 +127,8 @@ def _system_python_candidates():
     return items
 
 
-def _find_system_python():
-    items = _system_python_candidates()
+def _find_system_python(agent_dir=""):
+    items = _system_python_candidates(agent_dir=agent_dir)
     return items[0]["path"] if items else None
 
 
@@ -202,20 +199,15 @@ def _save_dependency_state(agent_dir, data):
 
 
 def _dependency_signature(agent_dir, extra_packages=None):
+    manifest = resolve_upstream_dependency_manifest(agent_dir)
     payload = {
         "bootstrap": list(_AUTO_BOOTSTRAP_PACKAGES),
         "extra_packages": sorted(str(item or "").strip() for item in (extra_packages or []) if str(item or "").strip()),
-        "requirements_path": "",
-        "requirements_hash": "",
+        "sync_mode": str(manifest.get("sync_mode") or "").strip(),
+        "sync_path": str(manifest.get("sync_path") or "").strip(),
+        "sync_hash": str(manifest.get("sync_hash") or "").strip(),
+        "pyproject_used": bool(manifest.get("pyproject_used")),
     }
-    req_path = _agent_requirements_path(agent_dir)
-    if req_path:
-        payload["requirements_path"] = req_path
-        try:
-            with open(req_path, "rb") as f:
-                payload["requirements_hash"] = hashlib.sha256(f.read()).hexdigest()
-        except Exception:
-            payload["requirements_hash"] = "read_error"
     return payload
 
 
@@ -356,12 +348,12 @@ def _missing_dependency_specs(py, specs, *, strict_version=False):
     return missing
 
 
-def _should_sync_runtime_dependencies(*, state_matches, extra_packages=None, requirements_path="", force_sync=False):
+def _should_sync_runtime_dependencies(*, state_matches, extra_packages=None, sync_mode="", force_sync=False):
     if force_sync:
         return True
     if not state_matches:
         return True
-    if str(requirements_path or "").strip():
+    if str(sync_mode or "").strip().lower() == "requirements":
         return False
     return bool([str(item or "").strip() for item in (extra_packages or []) if str(item or "").strip()])
 
@@ -705,20 +697,32 @@ def _prepare_python_runtime_candidate(info, agent_dir, *, extra_packages=None, p
     py = info["path"]
     label = _format_python_candidate_label(info)
     extra_packages = [str(item or "").strip() for item in (extra_packages or []) if str(item or "").strip()]
-    req_path = _agent_requirements_path(agent_dir)
+    manifest = resolve_upstream_dependency_manifest(agent_dir)
+    sync_mode = str(manifest.get("sync_mode") or "").strip().lower()
+    sync_path = str(manifest.get("sync_path") or "").strip()
+    sync_specs = [str(item or "").strip() for item in (manifest.get("sync_specs") or []) if str(item or "").strip()]
+    sync_label = str(manifest.get("sync_label") or "").strip() or "上游依赖声明"
     state_matches = _dependency_state_matches(agent_dir, py, extra_packages=extra_packages)
     core_ready = _core_runtime_packages_ready(py)
     core_import_ready = _core_runtime_packages_import_ready(py)
 
     _emit_dependency_progress(progress, "candidate", f"检查解释器：{label}")
     ok, detail = _probe_python_agent_compat(py, agent_dir)
-    meta = {"python": py, "label": label, "bootstrapped": False, "requirements_synced": False, "extra_synced": False}
+    meta = {
+        "python": py,
+        "label": label,
+        "bootstrapped": False,
+        "runtime_synced": False,
+        "extra_synced": False,
+        "sync_mode": sync_mode,
+        "sync_label": sync_label,
+    }
 
     need_bootstrap = (not ok) and _should_bootstrap_python_runtime(detail)
     need_sync = _should_sync_runtime_dependencies(
         state_matches=state_matches,
         extra_packages=extra_packages,
-        requirements_path=req_path,
+        sync_mode=sync_mode,
         force_sync=force_sync,
     )
     missing_extra = _missing_dependency_specs(py, extra_packages, strict_version=False)
@@ -728,7 +732,7 @@ def _prepare_python_runtime_candidate(info, agent_dir, *, extra_packages=None, p
         need_sync = True
     if missing_extra:
         need_sync = True
-    if (not ok) and req_path:
+    if (not ok) and (sync_path or sync_specs):
         need_sync = True
 
     if need_bootstrap:
@@ -743,11 +747,16 @@ def _prepare_python_runtime_candidate(info, agent_dir, *, extra_packages=None, p
         if not boot_ok:
             return False, f"依赖安装失败：基础依赖准备失败：{boot_detail}", meta
         meta["bootstrapped"] = True
-        if req_path:
-            req_ok, req_detail = _install_python_requirements(py, req_path, progress=progress)
+        if sync_mode == "requirements" and sync_path:
+            req_ok, req_detail = _install_python_requirements(py, sync_path, progress=progress)
             if not req_ok:
                 return False, f"依赖安装失败：同步 GenericAgent requirements.txt 失败：{req_detail}", meta
-            meta["requirements_synced"] = True
+            meta["runtime_synced"] = True
+        elif sync_specs:
+            sync_ok, sync_detail = _install_python_packages(py, sync_specs, progress=progress, label=f"同步 {sync_label}")
+            if not sync_ok:
+                return False, f"依赖安装失败：同步 {sync_label} 失败：{sync_detail}", meta
+            meta["runtime_synced"] = True
         if missing_extra:
             extra_ok, extra_detail = _install_python_packages(py, missing_extra, progress=progress, label="安装渠道依赖")
             if not extra_ok:
@@ -788,11 +797,12 @@ def _configured_channel_ids(parsed_mykey):
     return configured
 
 
-def _frontend_dependency_group_sections(py):
+def _frontend_dependency_group_sections(agent_dir, py):
     if not py:
         return []
+    groups = list(resolve_upstream_dependency_manifest(agent_dir).get("frontend_groups") or [])
     sections = []
-    for group in UPSTREAM_FRONTEND_DEPENDENCY_GROUPS:
+    for group in groups:
         group_label = str(group.get("label") or group.get("id") or "").strip()
         group_desc = str(group.get("description") or "").strip()
         items = []
@@ -836,16 +846,18 @@ def _api_config_item_report(config):
 
 def _build_dependency_report(agent_dir, py, *, candidate_meta=None, failures=None, extra_packages=None, error=""):
     try:
-        from .channels import COMM_CHANNEL_SPECS, parse_mykey_py
+        from .channels import COMM_CHANNEL_SPECS, parse_mykey_py, validate_api_config_references
     except Exception:
         COMM_CHANNEL_SPECS = []
         parse_mykey_py = None
+        validate_api_config_references = lambda _configs: []
 
     sections = []
     now = time.time()
     candidate_meta = dict(candidate_meta or {})
     failures = list(failures or [])
     extra_packages = [str(item or "").strip() for item in (extra_packages or []) if str(item or "").strip()]
+    manifest = resolve_upstream_dependency_manifest(agent_dir)
 
     system_items = []
     git_item = _probe_command_version(["git", "--version"], "Git")
@@ -898,9 +910,25 @@ def _build_dependency_report(agent_dir, py, *, candidate_meta=None, failures=Non
     ]
     for label, path in expected_files:
         project_items.append(_make_report_item(label, "ok" if os.path.isfile(path) else "error", path))
+    pyproject_path = str(manifest.get("pyproject_path") or "").strip()
+    if pyproject_path:
+        pyproject_status = "ok" if manifest.get("pyproject_used") else ("warn" if manifest.get("pyproject_found") else "info")
+        pyproject_detail = pyproject_path
+        if manifest.get("pyproject_error"):
+            pyproject_detail = f"{pyproject_path}；{manifest.get('pyproject_error')}"
+        project_items.append(_make_report_item("pyproject.toml", pyproject_status, pyproject_detail, optional=not manifest.get("pyproject_used")))
     req_path = _agent_requirements_path(agent_dir)
     if req_path:
         project_items.append(_make_report_item("requirements.txt", "ok", req_path))
+    elif manifest.get("pyproject_used"):
+        project_items.append(
+            _make_report_item(
+                "requirements.txt",
+                "info",
+                "上游未提供 requirements.txt；当前优先改用 pyproject.toml 依赖声明",
+                optional=True,
+            )
+        )
     else:
         project_items.append(
             _make_report_item(
@@ -919,7 +947,7 @@ def _build_dependency_report(agent_dir, py, *, candidate_meta=None, failures=Non
     sections.append({"title": "项目文件", "items": project_items})
 
     source_items = []
-    for source in UPSTREAM_DEPENDENCY_SOURCES:
+    for source in manifest.get("dependency_sources") or []:
         source_items.append(
             _make_report_item(
                 str(source.get("source") or "").strip(),
@@ -966,7 +994,7 @@ def _build_dependency_report(agent_dir, py, *, candidate_meta=None, failures=Non
             ok, detail = _probe_python_compile(py, path)
             frontend_items.append(_make_report_item(filename, "ok" if ok else "error", detail, optional=filename.startswith("desktop_pet")))
     sections.append({"title": "前端脚本", "items": frontend_items})
-    sections.extend(_frontend_dependency_group_sections(py))
+    sections.extend(_frontend_dependency_group_sections(agent_dir, py))
 
     parsed = {"configs": [], "extras": {}, "passthrough": [], "error": "未解析"}
     if parse_mykey_py and os.path.isfile(mykey_py):
@@ -978,8 +1006,11 @@ def _build_dependency_report(agent_dir, py, *, candidate_meta=None, failures=Non
         api_items.append(_make_report_item("解析 mykey.py", "ok", f"检测到 {len(parsed.get('configs') or [])} 个 API 配置"))
     else:
         api_items.append(_make_report_item("解析 mykey.py", "warn", "当前没有 mykey.py", optional=True))
-    for config in parsed.get("configs") or []:
+    config_rows = list(parsed.get("configs") or [])
+    for config in config_rows:
         api_items.append(_api_config_item_report(config))
+    for err in validate_api_config_references(config_rows):
+        api_items.append(_make_report_item("API 配置引用", "error", err))
     sections.append({"title": "API 配置", "items": api_items})
 
     configured_channel_items = []
@@ -1013,8 +1044,8 @@ def _build_dependency_report(agent_dir, py, *, candidate_meta=None, failures=Non
         actions = []
         if candidate_meta.get("bootstrapped"):
             actions.append("升级 requests/simplejson")
-        if candidate_meta.get("requirements_synced"):
-            actions.append("同步 requirements.txt")
+        if candidate_meta.get("runtime_synced") or candidate_meta.get("requirements_synced"):
+            actions.append(f"同步 {str(candidate_meta.get('sync_label') or '上游依赖声明').strip()}")
         if candidate_meta.get("extra_synced"):
             actions.append("同步额外渠道依赖")
         candidate_items.append(_make_report_item("当前解释器处理", "ok" if py else "error", "；".join(actions) if actions else "未触发自动修复", fixed=bool(actions)))
@@ -1061,7 +1092,7 @@ def _build_dependency_report(agent_dir, py, *, candidate_meta=None, failures=Non
 
 
 def _ensure_runtime_dependencies(agent_dir, *, extra_packages=None, progress=None, force_sync=False):
-    candidates = _system_python_candidates()
+    candidates = _system_python_candidates(agent_dir=agent_dir)
     if not candidates:
         if os.name == "nt":
             error_text = "系统 Python 检测失败：未找到系统 Python。请先安装 Python 并加入 PATH，或在 launcher_config.json 中设置 python_exe。"

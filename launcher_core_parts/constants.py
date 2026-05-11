@@ -81,7 +81,7 @@ UPDATE_SIGNING_PUBLIC_KEY_PEM = _load_update_public_key()
 WX_BOT_API = "https://ilinkai.weixin.qq.com"
 WX_TOKEN_PATH = os.path.join(os.path.expanduser("~"), ".wxbot", "token.json")
 TOKEN_ESTIMATE_DIVISOR = 2.5
-TOKEN_USAGE_VERSION = 1
+TOKEN_USAGE_VERSION = 2
 
 COLOR_ACCENT = "#4f8cff"
 COLOR_ACCENT_HOVER = "#3a75e0"

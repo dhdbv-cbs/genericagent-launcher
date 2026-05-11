@@ -5,13 +5,16 @@ import math
 import os
 import re
 
-from PySide6.QtCore import QByteArray, QSize, QTimer, Qt
-from PySide6.QtGui import QCursor, QIcon, QImage, QKeyEvent, QPainter, QPixmap
+from PySide6.QtCore import QByteArray, QPoint, QSize, QTimer, Qt
+from PySide6.QtGui import QCursor, QIcon, QImage, QKeyEvent, QPainter, QPixmap, QTextCursor
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QFrame,
     QHBoxLayout,
     QLabel,
+    QListWidget,
+    QListWidgetItem,
     QPushButton,
     QSizePolicy,
     QTextBrowser,
@@ -726,7 +729,207 @@ class InputTextEdit(QTextEdit):
         super().__init__(parent)
         self._submit_cb = submit_cb
         self._image_cb = image_cb
+        self._slash_command_provider = None
+        self._slash_popup = None
+        self._slash_popup_signature = ()
+        self._slash_popup_refresh_timer = QTimer(self)
+        self._slash_popup_refresh_timer.setSingleShot(True)
+        self._slash_popup_refresh_timer.timeout.connect(self._refresh_slash_command_popup)
         self.setAcceptDrops(True)
+        self.textChanged.connect(self._schedule_slash_command_popup_refresh)
+
+    def set_slash_command_provider(self, provider):
+        self._slash_command_provider = provider
+        self._refresh_slash_command_popup()
+
+    def _schedule_slash_command_popup_refresh(self):
+        timer = getattr(self, "_slash_popup_refresh_timer", None)
+        if timer is None:
+            self._refresh_slash_command_popup()
+            return
+        if timer.isActive():
+            return
+        timer.start(0)
+
+    def _ensure_slash_popup(self):
+        popup = getattr(self, "_slash_popup", None)
+        if popup is not None:
+            return popup
+        hover_bg = C.get("hover") or C.get("field_bg") or C.get("surface") or "#eef4ff"
+        host = self.window() if isinstance(self.window(), QWidget) else self
+        popup = QListWidget(host)
+        popup.setWindowFlags(Qt.FramelessWindowHint)
+        popup.setFocusPolicy(Qt.NoFocus)
+        popup.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        popup.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        popup.setSelectionMode(QAbstractItemView.SingleSelection)
+        popup.setSelectionBehavior(QAbstractItemView.SelectRows)
+        popup.setUniformItemSizes(True)
+        popup.setMouseTracking(True)
+        popup.setStyleSheet(
+            f"QListWidget {{ background: {C['panel']}; color: {C['text']}; border: 1px solid {C['stroke_default']}; "
+            f"border-radius: {F['radius_md']}px; padding: 6px; outline: none; }}"
+            f"QListWidget::item {{ padding: 8px 10px; border-radius: {max(4, int(F['radius_sm']))}px; }}"
+            f"QListWidget::item:selected {{ background: {hover_bg}; color: {C['text']}; }}"
+            f"QListWidget::item:hover {{ background: {hover_bg}; }}"
+        )
+        popup.itemClicked.connect(self._accept_slash_popup_item)
+        self._slash_popup = popup
+        return popup
+
+    def _slash_query_text(self) -> str:
+        if bool(getattr(self, "isReadOnly", lambda: False)()):
+            return ""
+        text = str(self.toPlainText() or "")
+        if "\n" in text or "\r" in text:
+            return ""
+        query = text.lstrip()
+        return query if query.startswith("/") else ""
+
+    def _slash_popup_items(self):
+        provider = getattr(self, "_slash_command_provider", None)
+        if not callable(provider):
+            return []
+        query = self._slash_query_text()
+        if not query:
+            return []
+        try:
+            rows = provider(query, editor=self)
+        except TypeError:
+            rows = provider(query)
+        except Exception:
+            return []
+        out = []
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            command = str(row.get("command") or "").strip()
+            if not command:
+                continue
+            item = dict(row)
+            item["command"] = command
+            insert_text = row.get("insert_text")
+            if insert_text is None or insert_text == "":
+                insert_text = command
+            item["insert_text"] = str(insert_text or command)
+            out.append(item)
+        return out
+
+    def _hide_slash_command_popup(self):
+        popup = getattr(self, "_slash_popup", None)
+        if popup is not None:
+            popup.hide()
+
+    def _slash_popup_signature_for_rows(self, rows) -> tuple:
+        signature = []
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            signature.append(
+                (
+                    str(row.get("command") or ""),
+                    str(row.get("insert_text") or ""),
+                    str(row.get("description") or ""),
+                )
+            )
+        return tuple(signature)
+
+    def _position_slash_popup(self, popup, *, width: int, height: int):
+        top_left = self.mapToGlobal(QPoint(0, 0))
+        x = int(top_left.x())
+        y = int(top_left.y()) - int(height) - 4
+        screen = None
+        try:
+            screen = QApplication.screenAt(top_left)
+        except Exception:
+            screen = None
+        if screen is None:
+            try:
+                screen = self.screen()
+            except Exception:
+                screen = None
+        if screen is not None:
+            area = screen.availableGeometry()
+            x = max(int(area.left()) + 4, min(x, int(area.right()) - int(width) - 4))
+            if y < int(area.top()) + 4:
+                y = int(top_left.y()) + int(self.height()) + 4
+        popup.resize(width, height)
+        host = popup.parentWidget()
+        if host is not None:
+            popup.move(host.mapFromGlobal(QPoint(x, y)))
+            return
+        popup.move(x, y)
+
+    def _refresh_slash_command_popup(self):
+        rows = self._slash_popup_items()
+        if not rows:
+            self._slash_popup_signature = ()
+            self._hide_slash_command_popup()
+            return
+        popup = self._ensure_slash_popup()
+        signature = self._slash_popup_signature_for_rows(rows)
+        if signature != getattr(self, "_slash_popup_signature", ()):
+            popup.setUpdatesEnabled(False)
+            try:
+                popup.blockSignals(True)
+                popup.clear()
+                for row in rows:
+                    command = str(row.get("command") or "").strip()
+                    desc = str(row.get("description") or "").strip()
+                    label = command if not desc else f"{command}    {desc}"
+                    item = QListWidgetItem(label)
+                    item.setData(Qt.UserRole, row)
+                    popup.addItem(item)
+                self._slash_popup_signature = signature
+            finally:
+                popup.blockSignals(False)
+                popup.setUpdatesEnabled(True)
+        if popup.count() <= 0:
+            popup.hide()
+            return
+        if popup.currentRow() < 0:
+            popup.setCurrentRow(0)
+        row_height = max(24, popup.sizeHintForRow(0))
+        visible_rows = min(7, popup.count())
+        height = max(40, row_height * visible_rows + 14)
+        width = min(560, max(self.width(), 320))
+        self._position_slash_popup(popup, width=width, height=height)
+        popup.show()
+        try:
+            popup.raise_()
+        except Exception:
+            pass
+
+    def _apply_slash_popup_row(self, row: dict):
+        raw = (row or {}).get("insert_text")
+        if raw is None or raw == "":
+            raw = (row or {}).get("command") or ""
+        text = str(raw or "")
+        if not text.strip():
+            return
+        self.setPlainText(text)
+        self.moveCursor(QTextCursor.End)
+        self.setFocus(Qt.OtherFocusReason)
+        self._hide_slash_command_popup()
+
+    def _accept_slash_popup_item(self, item):
+        if item is None:
+            return
+        row = item.data(Qt.UserRole)
+        if isinstance(row, dict):
+            self._apply_slash_popup_row(row)
+
+    def _accept_current_slash_popup_item(self):
+        popup = getattr(self, "_slash_popup", None)
+        if popup is None or not popup.isVisible():
+            return False
+        item = popup.currentItem()
+        if item is None and popup.count() > 0:
+            item = popup.item(0)
+        if item is None:
+            return False
+        self._accept_slash_popup_item(item)
+        return True
 
     def _image_extensions(self):
         return {
@@ -793,6 +996,26 @@ class InputTextEdit(QTextEdit):
         return True
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
+        popup = getattr(self, "_slash_popup", None)
+        if popup is not None and popup.isVisible():
+            key = event.key()
+            if key in (Qt.Key_Down, Qt.Key_Up):
+                step = 1 if key == Qt.Key_Down else -1
+                count = popup.count()
+                if count > 0:
+                    current = popup.currentRow()
+                    if current < 0:
+                        current = 0 if step > 0 else count - 1
+                    else:
+                        current = (current + step) % count
+                    popup.setCurrentRow(current)
+                return
+            if key in (Qt.Key_Tab, Qt.Key_Backtab):
+                if self._accept_current_slash_popup_item():
+                    return
+            if key == Qt.Key_Escape:
+                popup.hide()
+                return
         if (
             event.key() in (Qt.Key_Return, Qt.Key_Enter)
             and not (event.modifiers() & Qt.ShiftModifier)
@@ -800,6 +1023,16 @@ class InputTextEdit(QTextEdit):
             self._submit_cb()
             return
         super().keyPressEvent(event)
+
+    def hideEvent(self, event) -> None:
+        self._hide_slash_command_popup()
+        super().hideEvent(event)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        popup = getattr(self, "_slash_popup", None)
+        if popup is not None and popup.isVisible():
+            self._refresh_slash_command_popup()
 
     def canInsertFromMimeData(self, source) -> bool:
         if self._mime_to_image_attachments(source):

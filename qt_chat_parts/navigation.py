@@ -147,7 +147,7 @@ class NavigationMixin:
         if hasattr(self, "locate_status_label"):
             py_cfg = str(self.cfg.get("python_exe") or "").strip()
             if py_cfg:
-                py_resolved = lz._resolve_config_path(py_cfg)
+                py_resolved = lz._resolve_configured_python_exe(py_cfg, agent_dir=self.agent_dir)
                 py_text = f"\nPython 可执行文件：{py_cfg}\n解析后：{py_resolved}"
             else:
                 py_text = "\nPython 可执行文件：未指定（将自动探测）"
@@ -185,7 +185,8 @@ class NavigationMixin:
         current = ""
         if hasattr(self, "locate_python_edit"):
             current = self.locate_python_edit.text().strip()
-        start_dir = os.path.dirname(lz._resolve_config_path(current)) if current else os.path.expanduser("~")
+        agent_dir = str(getattr(self, "agent_dir", "") or "").strip()
+        start_dir = os.path.dirname(lz._resolve_configured_python_exe(current, agent_dir=agent_dir)) if current else os.path.expanduser("~")
         if not os.path.isdir(start_dir):
             start_dir = os.path.expanduser("~")
         if os.name == "nt":
@@ -203,17 +204,17 @@ class NavigationMixin:
                 "All Files (*)",
             )
         if path and hasattr(self, "locate_python_edit"):
-            self.locate_python_edit.setText(lz._make_config_relative_path(path))
+            self.locate_python_edit.setText(lz._make_python_exe_config_path(path, agent_dir=agent_dir))
 
     def _locate_enter_chat(self):
         raw = self.locate_path_edit.text().strip() if hasattr(self, "locate_path_edit") else self.agent_dir
         py_raw = self.locate_python_edit.text().strip() if hasattr(self, "locate_python_edit") else ""
         if py_raw:
-            resolved = lz._resolve_config_path(py_raw)
+            resolved = lz._resolve_configured_python_exe(py_raw, agent_dir=raw)
             if not os.path.isfile(resolved):
                 QMessageBox.warning(self, "Python 路径无效", f"未找到可执行文件：\n{resolved}")
                 return
-            self.cfg["python_exe"] = lz._make_config_relative_path(resolved)
+            self.cfg["python_exe"] = lz._make_python_exe_config_path(resolved, agent_dir=raw)
         else:
             self.cfg.pop("python_exe", None)
         mode = "auto"

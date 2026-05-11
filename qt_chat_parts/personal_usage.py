@@ -15,7 +15,7 @@ from urllib.request import Request, urlopen
 from datetime import datetime
 
 from PySide6.QtCore import Qt, QTimer, QUrl
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QColor, QDesktopServices, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QApplication, QCheckBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QSpinBox, QVBoxLayout, QWidget
 
 from launcher_app import core as lz
@@ -2415,7 +2415,7 @@ class PersonalUsageMixin:
                     visual=bool(show_errors),
                 ):
                     return False
-        py = lz._resolve_config_path(str(self.cfg.get("python_exe") or "").strip()) or lz._find_system_python()
+        py = lz._resolve_configured_python_exe(str(self.cfg.get("python_exe") or "").strip(), agent_dir=self.agent_dir) or lz._find_system_python(agent_dir=self.agent_dir)
         if not py or not os.path.isfile(py):
             if show_errors:
                 QMessageBox.critical(self, "缺少 Python", "依赖检查完成后仍未找到可用的 Python 可执行文件。")
@@ -2927,6 +2927,215 @@ class PersonalUsageMixin:
             return "数据不足"
         return self._usage_num(normalized)
 
+    def _usage_money(self, value, currency=None):
+        try:
+            number = float(value or 0)
+        except Exception:
+            number = 0.0
+        code = lz.normalize_usage_currency(currency or ((getattr(self, "cfg", {}) or {}).get("usage_pricing") or {}).get("currency") or "USD")
+        if abs(number) >= 1:
+            text = f"{number:,.4f}".rstrip("0").rstrip(".")
+        else:
+            text = f"{number:,.6f}".rstrip("0").rstrip(".")
+        return f"{text or '0'} {code}"
+
+    def _usage_currency_totals_label(self, totals, fallback_value=0, fallback_currency=None):
+        bucket = totals if isinstance(totals, dict) else {}
+        pairs = []
+        for raw_currency, raw_value in sorted(bucket.items()):
+            try:
+                value = float(raw_value or 0)
+            except Exception:
+                value = 0.0
+            if value:
+                pairs.append((lz.normalize_usage_currency(raw_currency), value))
+        if not pairs:
+            return self._usage_money(fallback_value, fallback_currency)
+        if len(pairs) <= 2:
+            return " + ".join(self._usage_money(value, currency) for currency, value in pairs)
+        return f"多币种 {len(pairs)} 项"
+
+    def _usage_cost_label(self, item, currency=None):
+        if isinstance(item, dict):
+            return self._usage_currency_totals_label(
+                item.get("currency_totals"),
+                item.get("cost_total", 0),
+                item.get("currency") or currency,
+            )
+        return self._usage_money(item, currency)
+
+    def _usage_price_text(self, value):
+        try:
+            number = float(value or 0)
+        except Exception:
+            number = 0.0
+        return "" if number <= 0 else f"{number:.8f}".rstrip("0").rstrip(".")
+
+    def _usage_parse_price(self, edit):
+        try:
+            return max(0.0, float(str(edit.text() or "").strip() or "0"))
+        except Exception:
+            return 0.0
+
+    def _usage_pricing_target_key(self, target):
+        item = target if isinstance(target, dict) else {}
+        return lz.usage_pricing_target_key(item.get("scope") or "local", item.get("device_id") or "local")
+
+    def _usage_api_cards_for_pricing(self, target, stats=None):
+        cards = []
+        seen = set()
+        item = target if isinstance(target, dict) else {}
+
+        def add_card(var, label=""):
+            api_var = str(var or "").strip()
+            if not api_var or api_var in seen:
+                return
+            display = str(label or api_var).strip() or api_var
+            cards.append({"var": api_var, "label": display})
+            seen.add(api_var)
+
+        def target_matches_current_context():
+            getter = getattr(self, "_settings_data_target_context", None)
+            if not callable(getter):
+                return False
+            try:
+                current = getter() or {}
+            except Exception:
+                return False
+            return (
+                bool(current.get("is_remote")) == bool(item.get("is_remote"))
+                and str(current.get("scope") or "local").strip().lower() == str(item.get("scope") or "local").strip().lower()
+                and str(current.get("device_id") or "local").strip() == str(item.get("device_id") or "local").strip()
+            )
+
+        if target_matches_current_context():
+            for state in getattr(self, "_qt_api_state", []) or []:
+                if not isinstance(state, dict):
+                    continue
+                add_card(
+                    state.get("var"),
+                    state.get("name") or state.get("persisted_name") or state.get("model") or state.get("var"),
+                )
+
+        if not bool((target or {}).get("is_remote")) and lz.is_valid_agent_dir(self.agent_dir):
+            try:
+                parsed = lz.parse_mykey_py(os.path.join(self.agent_dir, "mykey.py"))
+                for cfg in parsed.get("configs") or []:
+                    var = str(cfg.get("var") or "").strip()
+                    if not var or var in seen:
+                        continue
+                    data = cfg.get("data") if isinstance(cfg.get("data"), dict) else {}
+                    label = str(data.get("name") or data.get("model") or var).strip() or var
+                    add_card(var, label)
+            except Exception:
+                pass
+        for collection in ("models", "sessions", "timeline"):
+            for row in ((stats or {}).get(collection) or []):
+                var = str(row.get("api_card_var") or "").strip()
+                if not var or var in seen:
+                    continue
+                label = str(row.get("api_card_label") or var).strip() or var
+                add_card(var, label)
+        for api_var, rule in sorted((self._usage_pricing_bucket(target) or {}).items()):
+            if not isinstance(rule, dict):
+                rule = {}
+            add_card(api_var, rule.get("api_card_label") or rule.get("label") or api_var)
+        return cards
+
+    def _usage_pricing_bucket(self, target):
+        pricing = lz.normalize_usage_pricing_config(getattr(self, "cfg", {}) or {})
+        return (pricing.get("targets") or {}).get(self._usage_pricing_target_key(target), {})
+
+    def _save_usage_pricing_rules(self, target):
+        inputs = getattr(self, "_usage_pricing_inputs", None)
+        if not isinstance(inputs, dict):
+            return
+        currency_edit = getattr(self, "settings_usage_currency_edit", None)
+        pricing = lz.normalize_usage_pricing_config(self.cfg)
+        if currency_edit is not None:
+            pricing["currency"] = lz.normalize_usage_currency(currency_edit.text())
+        for api_var, fields in inputs.items():
+            lz.set_usage_price_rule(
+                self.cfg,
+                (target or {}).get("scope") or "local",
+                (target or {}).get("device_id") or "local",
+                api_var,
+                {
+                    "api_card_label": fields.get("label", api_var),
+                    "input_per_1m": self._usage_parse_price(fields.get("input")),
+                    "output_per_1m": self._usage_parse_price(fields.get("output")),
+                    "cache_read_per_1m": self._usage_parse_price(fields.get("cache_read")),
+                    "cache_creation_per_1m": self._usage_parse_price(fields.get("cache_creation")),
+                    "updated_at": time.time(),
+                },
+            )
+        self.cfg["usage_pricing"] = lz.normalize_usage_pricing_config(self.cfg)
+        lz.save_config(self.cfg)
+        self._set_status(f"已保存 {(target or {}).get('label') or '当前设备'} 的 token 计价规则；历史用量费用不会重算。")
+        self._reload_usage_panel()
+
+    def _usage_pricing_card(self, stats, target):
+        card = self._panel_card()
+        box = QVBoxLayout(card)
+        box.setContentsMargins(14, 12, 14, 12)
+        box.setSpacing(8)
+        title = QLabel("计价规则")
+        title.setObjectName("cardTitle")
+        box.addWidget(title)
+        desc = QLabel("价格按当前设备和 API 卡片分别保存，单位是每 100 万 token。新事件完成时会冻结当时价格，后续改价不会重算历史费用。")
+        desc.setWordWrap(True)
+        desc.setObjectName("cardDesc")
+        box.addWidget(desc)
+
+        pricing = lz.normalize_usage_pricing_config(getattr(self, "cfg", {}) or {})
+        self.settings_usage_currency_edit = QLineEdit()
+        self.settings_usage_currency_edit.setPlaceholderText("USD")
+        self.settings_usage_currency_edit.setText(str(pricing.get("currency") or "USD"))
+        box.addWidget(self._langfuse_input_row("全局币种", self.settings_usage_currency_edit))
+
+        cards = self._usage_api_cards_for_pricing(target, stats)
+        rules = self._usage_pricing_bucket(target)
+        self._usage_pricing_inputs = {}
+        if cards:
+            header = self._usage_table_row(["API 卡片", "输入", "输出", "缓存读", "缓存写"], stretches=[4, 2, 2, 2, 2], header=True)
+            box.addWidget(header)
+        for card_info in cards[:16]:
+            api_var = str(card_info.get("var") or "").strip()
+            if not api_var:
+                continue
+            rule = rules.get(api_var) if isinstance(rules, dict) else {}
+            row = QFrame()
+            row.setObjectName("cardInset")
+            row_box = QHBoxLayout(row)
+            row_box.setContentsMargins(12, 10, 12, 10)
+            row_box.setSpacing(8)
+            label = QLabel(f"{card_info.get('label') or api_var}\n{api_var}")
+            label.setWordWrap(True)
+            label.setObjectName("bodyText")
+            row_box.addWidget(label, 4)
+            fields = {"label": str(card_info.get("label") or api_var)}
+            for key, placeholder in (
+                ("input", "输入"),
+                ("output", "输出"),
+                ("cache_read", "缓存读"),
+                ("cache_creation", "缓存写"),
+            ):
+                edit = QLineEdit()
+                edit.setPlaceholderText(placeholder)
+                edit.setText(self._usage_price_text((rule or {}).get(f"{key}_per_1m")))
+                edit.setStyleSheet(f"QLineEdit {{ background: {C['field_bg']}; color: {C['text']}; border: 1px solid {C['stroke_default']}; border-radius: {F['radius_md']}px; padding: 7px 8px; }}")
+                row_box.addWidget(edit, 2)
+                fields[key] = edit
+            self._usage_pricing_inputs[api_var] = fields
+            box.addWidget(row)
+        if not cards:
+            self._usage_add_line(box, "当前目标还没有可识别的 API 卡片；产生新 usage 或加载本机 mykey.py 后会显示可配置项。", object_name="mutedText")
+        save_btn = QPushButton("保存计价规则")
+        save_btn.setStyleSheet(self._action_button_style(primary=True))
+        save_btn.clicked.connect(lambda: self._save_usage_pricing_rules(target))
+        box.addWidget(save_btn, 0)
+        return card
+
     def _usage_export_dir(self):
         path = lz.launcher_data_path("usage_exports")
         os.makedirs(path, exist_ok=True)
@@ -2945,9 +3154,22 @@ class PersonalUsageMixin:
         return safe or "usage"
 
     def _usage_build_export_payload(self, stats, target, langfuse):
+        def jsonable(value):
+            if isinstance(value, set):
+                return sorted(str(item) for item in value)
+            if isinstance(value, dict):
+                return {str(k): jsonable(v) for k, v in value.items()}
+            if isinstance(value, list):
+                return [jsonable(item) for item in value]
+            return value
+
         data = dict(stats or {})
         item = target if isinstance(target, dict) else {}
         lang = langfuse if isinstance(langfuse, dict) else {}
+        current_currency = lz.normalize_usage_currency(((getattr(self, "cfg", {}) or {}).get("usage_pricing") or {}).get("currency") or "USD")
+        all_currency_totals = dict((data.get("all") or {}).get("currency_totals") or {})
+        active_currencies = [code for code, value in all_currency_totals.items() if float(value or 0) != 0]
+        export_currency = active_currencies[0] if len(active_currencies) == 1 else ("MIXED" if len(active_currencies) > 1 else current_currency)
         return {
             "target": {
                 "label": str(item.get("label") or "本机"),
@@ -2957,18 +3179,28 @@ class PersonalUsageMixin:
             },
             "generated_at": time.time(),
             "summary": {
-                "today": dict(data.get("today") or {}),
-                "recent": dict(data.get("recent") or {}),
-                "all": dict(data.get("all") or {}),
-                "activity": dict(data.get("activity") or {}),
+                "today": jsonable(dict(data.get("today") or {})),
+                "recent": jsonable(dict(data.get("recent") or {})),
+                "all": jsonable(dict(data.get("all") or {})),
+                "activity": jsonable(dict(data.get("activity") or {})),
                 "warnings": list(data.get("warnings") or []),
             },
-            "channels": list(data.get("channels") or []),
-            "models": list(data.get("models") or []),
-            "sources": list(data.get("sources") or []),
-            "timeline": list(data.get("timeline") or []),
-            "sessions": list(data.get("sessions") or []),
-            "days": list(data.get("days") or []),
+            "channels": jsonable(list(data.get("channels") or [])),
+            "models": jsonable(list(data.get("models") or [])),
+            "sources": jsonable(list(data.get("sources") or [])),
+            "timeline": jsonable(list(data.get("timeline") or [])),
+            "sessions": jsonable(list(data.get("sessions") or [])),
+            "days": jsonable(list(data.get("days") or [])),
+            "billing": {
+                "currency": export_currency,
+                "current_currency": current_currency,
+                "currency_totals": jsonable(all_currency_totals),
+                "mixed_currency": len(active_currencies) > 1,
+                "priced_events": int((data.get("activity") or {}).get("priced_events", 0) or 0),
+                "estimated_priced_events": int((data.get("activity") or {}).get("estimated_priced_events", 0) or 0),
+                "legacy_unpriced_events": int((data.get("activity") or {}).get("legacy_unpriced_events", 0) or 0),
+                "cost_total": float((data.get("all") or {}).get("cost_total", 0) or 0),
+            },
             "langfuse": {
                 "configured": bool(lang.get("configured")),
                 "summary": str(lang.get("summary") or ""),
@@ -2999,18 +3231,27 @@ class PersonalUsageMixin:
         lines.append(
             f"- 今天：总 {self._usage_num((summary.get('today') or {}).get('total_tokens'))}，"
             f"输入 {self._usage_num((summary.get('today') or {}).get('input_tokens'))}，"
-            f"输出 {self._usage_num((summary.get('today') or {}).get('output_tokens'))}"
+            f"输出 {self._usage_num((summary.get('today') or {}).get('output_tokens'))}，"
+            f"费用 {self._usage_cost_label(summary.get('today') or {}, (payload.get('billing') or {}).get('currency'))}"
         )
         lines.append(
             f"- 近 7 天：总 {self._usage_num((summary.get('recent') or {}).get('total_tokens'))}，"
-            f"调用 {self._usage_num((summary.get('recent') or {}).get('api_calls'))}"
+            f"调用 {self._usage_num((summary.get('recent') or {}).get('api_calls'))}，"
+            f"费用 {self._usage_cost_label(summary.get('recent') or {}, (payload.get('billing') or {}).get('currency'))}"
         )
         lines.append(
             f"- 累计：总 {self._usage_num((summary.get('all') or {}).get('total_tokens'))}，"
-            f"调用 {self._usage_num(activity.get('api_calls'))}"
+            f"调用 {self._usage_num(activity.get('api_calls'))}，"
+            f"费用 {self._usage_cost_label(summary.get('all') or {}, (payload.get('billing') or {}).get('currency'))}"
         )
         lines.append(
             f"- 活跃会话：{self._usage_num(activity.get('sessions_with_events'))} / {self._usage_num(activity.get('session_count'))}"
+        )
+        billing = payload.get("billing") or {}
+        lines.append(
+            f"- 计价事件：{self._usage_num(billing.get('priced_events'))}，"
+            f"估算计价 {self._usage_num(billing.get('estimated_priced_events'))}，"
+            f"legacy/unpriced {self._usage_num(billing.get('legacy_unpriced_events'))}"
         )
         lines.append("")
         warnings = list(summary.get("warnings") or [])
@@ -3173,6 +3414,224 @@ class PersonalUsageMixin:
                 )
         else:
             self._usage_add_line(box, empty_text, object_name="mutedText")
+        return card
+
+    def _usage_chart_card(self, title, desc="", *, chart_pixmap=None, empty_text="暂无可视化数据"):
+        card = self._panel_card()
+        box = QVBoxLayout(card)
+        box.setContentsMargins(14, 12, 14, 12)
+        box.setSpacing(8)
+        head = QLabel(title)
+        head.setObjectName("cardTitle")
+        box.addWidget(head)
+        if desc:
+            self._usage_add_line(box, desc, object_name="cardDesc")
+        if chart_pixmap is None or chart_pixmap.isNull():
+            self._usage_add_line(box, empty_text, object_name="mutedText")
+            return card
+        chart = QLabel()
+        chart.setObjectName("cardInset")
+        chart.setAlignment(Qt.AlignCenter)
+        chart.setPixmap(chart_pixmap)
+        box.addWidget(chart)
+        return card
+
+    def _usage_chart_pixmap(self, width=540, height=220):
+        canvas = QPixmap(max(240, int(width or 0)), max(160, int(height or 0)))
+        canvas.fill(Qt.transparent)
+        return canvas
+
+    def _usage_line_chart_pixmap(self, rows, *, width=540, height=220):
+        items = [(str(row.get("label") or "").strip(), max(0.0, float(row.get("value") or 0))) for row in (rows or []) if str(row.get("label") or "").strip()]
+        if not items:
+            return QPixmap()
+        canvas = self._usage_chart_pixmap(width=width, height=height)
+        painter = QPainter(canvas)
+        try:
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            muted = QColor(str(C["stroke_default"]))
+            muted.setAlpha(140)
+            text_color = QColor(str(C["text"]))
+            accent = QColor(str(C["accent_text"]))
+            accent_fill = QColor(accent)
+            accent_fill.setAlpha(56)
+            w = canvas.width()
+            h = canvas.height()
+            left = 42
+            top = 18
+            right = 12
+            bottom = 34
+            plot_w = max(1, w - left - right)
+            plot_h = max(1, h - top - bottom)
+            max_value = max(value for _, value in items)
+            baseline = top + plot_h
+            painter.setPen(QPen(muted, 1))
+            painter.drawLine(left, top, left, baseline)
+            painter.drawLine(left, baseline, left + plot_w, baseline)
+            if max_value <= 0:
+                painter.setPen(text_color)
+                painter.drawText(left + 8, top + 24, "暂无 usage 数据")
+                return canvas
+            painter.setPen(QPen(muted, 1, Qt.DashLine))
+            for ratio in (0.25, 0.5, 0.75):
+                y = int(top + plot_h * (1.0 - ratio))
+                painter.drawLine(left, y, left + plot_w, y)
+            step = plot_w / max(1, len(items) - 1)
+            points = []
+            for idx, (label, value) in enumerate(items):
+                x = int(left + idx * step)
+                y = int(baseline - (value / max_value) * plot_h)
+                points.append((x, y, label, value))
+            painter.setPen(QPen(accent_fill, 2))
+            for idx in range(1, len(points)):
+                x1, y1, _, _ = points[idx - 1]
+                x2, y2, _, _ = points[idx]
+                painter.drawLine(x1, y1, x2, y2)
+                painter.drawLine(x1, baseline, x1, y1)
+                painter.drawLine(x2, baseline, x2, y2)
+            painter.setPen(QPen(accent, 2))
+            for idx in range(1, len(points)):
+                x1, y1, _, _ = points[idx - 1]
+                x2, y2, _, _ = points[idx]
+                painter.drawLine(x1, y1, x2, y2)
+            painter.setBrush(accent)
+            painter.setPen(QPen(accent, 1))
+            for x, y, label, value in points:
+                painter.drawEllipse(x - 3, y - 3, 6, 6)
+                painter.drawText(x - 16, baseline + 18, label[-5:])
+            painter.setPen(text_color)
+            painter.drawText(left, top - 2 + 12, self._usage_num(int(max_value)))
+        finally:
+            painter.end()
+        return canvas
+
+    def _usage_bar_chart_pixmap(self, rows, *, width=540, height=220):
+        items = [(str(row.get("label") or "").strip(), max(0.0, float(row.get("value") or 0))) for row in (rows or []) if str(row.get("label") or "").strip()]
+        if not items:
+            return QPixmap()
+        items = items[:6]
+        canvas = self._usage_chart_pixmap(width=width, height=height)
+        painter = QPainter(canvas)
+        try:
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            axis = QColor(str(C["stroke_default"]))
+            axis.setAlpha(140)
+            text_color = QColor(str(C["text"]))
+            accent = QColor(str(C["accent_text"]))
+            w = canvas.width()
+            h = canvas.height()
+            left = 120
+            top = 18
+            right = 18
+            bottom = 18
+            plot_w = max(1, w - left - right)
+            row_h = max(22, int((h - top - bottom) / max(1, len(items))))
+            max_value = max(value for _, value in items)
+            painter.setPen(QPen(axis, 1))
+            painter.drawLine(left, top, left, h - bottom)
+            if max_value <= 0:
+                painter.setPen(text_color)
+                painter.drawText(left + 8, top + 24, "暂无 usage 数据")
+                return canvas
+            for idx, (label, value) in enumerate(items):
+                y = top + idx * row_h
+                bar_w = int((value / max_value) * plot_w)
+                painter.setPen(text_color)
+                painter.drawText(8, y + 15, label[:14])
+                fill = QColor(accent)
+                fill.setAlpha(170)
+                painter.fillRect(left + 8, y + 4, max(4, bar_w), max(10, row_h - 10), fill)
+                painter.setPen(QPen(axis, 1))
+                painter.drawRect(left + 8, y + 4, plot_w - 8, max(10, row_h - 10))
+                painter.setPen(text_color)
+                painter.drawText(left + 14 + min(bar_w, plot_w - 40), y + 15, self._usage_num(int(value)))
+        finally:
+            painter.end()
+        return canvas
+
+    def _usage_token_cost_card(self, stats):
+        card = self._panel_card()
+        box = QVBoxLayout(card)
+        box.setContentsMargins(14, 12, 14, 12)
+        box.setSpacing(10)
+        head = QLabel("Token / 费用")
+        head.setObjectName("cardTitle")
+        box.addWidget(head)
+        self._usage_add_line(box, "把 token 和费用集中放在一张卡片里看，避免与其它活跃度统计混在一起。图表使用启动器内自绘方案，避免额外依赖。", object_name="cardDesc")
+
+        metric_grid = QGridLayout()
+        metric_grid.setSpacing(10)
+        metric_grid.addWidget(
+            self._usage_metric_card(
+                "今天",
+                self._usage_num((stats.get("today") or {}).get("total_tokens")),
+                f"费用 {self._usage_cost_label(stats.get('today') or {})}",
+                accent=True,
+            ),
+            0,
+            0,
+        )
+        metric_grid.addWidget(
+            self._usage_metric_card(
+                "近 7 天",
+                self._usage_num((stats.get("recent") or {}).get("total_tokens")),
+                f"费用 {self._usage_cost_label(stats.get('recent') or {})}",
+            ),
+            0,
+            1,
+        )
+        metric_grid.addWidget(
+            self._usage_metric_card(
+                "累计",
+                self._usage_num((stats.get("all") or {}).get("total_tokens")),
+                f"费用 {self._usage_cost_label(stats.get('all') or {})}",
+            ),
+            0,
+            2,
+        )
+        activity = stats.get("activity") or {}
+        metric_grid.addWidget(
+            self._usage_metric_card(
+                "已计价事件",
+                self._usage_num(activity.get("priced_events")),
+                f"估算计价 {self._usage_num(activity.get('estimated_priced_events'))}  · legacy {self._usage_num(activity.get('legacy_unpriced_events'))}",
+            ),
+            0,
+            3,
+        )
+        box.addLayout(metric_grid)
+
+        days = list(reversed(stats.get("days") or []))
+        trend_rows = [{"label": str(row.get("date") or "")[5:], "value": row.get("total_tokens", 0)} for row in days]
+        channel_rows = list(stats.get("channels") or [])
+        use_cost = any(float(row.get("cost_total", 0) or 0) > 0 for row in channel_rows)
+        composition_rows = [
+            {"label": row.get("label") or row.get("channel_id") or "未知渠道", "value": row.get("cost_total" if use_cost else "total_tokens", 0)}
+            for row in channel_rows[:6]
+        ]
+        chart_grid = QGridLayout()
+        chart_grid.setSpacing(10)
+        chart_grid.addWidget(
+            self._usage_chart_card(
+                "7 日 Token 趋势",
+                "折线图按天观察 token 波动，适合判断最近是不是突然抬升。",
+                chart_pixmap=self._usage_line_chart_pixmap(trend_rows),
+                empty_text="最近几天还没有足够的 token 数据。",
+            ),
+            0,
+            0,
+        )
+        chart_grid.addWidget(
+            self._usage_chart_card(
+                "渠道费用结构" if use_cost else "渠道 Token 结构",
+                "优先按渠道看消耗结构；如果历史还没计价，就回退到 token 结构。",
+                chart_pixmap=self._usage_bar_chart_pixmap(composition_rows),
+                empty_text="当前还没有可分解的渠道结构数据。",
+            ),
+            0,
+            1,
+        )
+        box.addLayout(chart_grid)
         return card
 
     def _load_langfuse_status(self):
@@ -3343,6 +3802,59 @@ class PersonalUsageMixin:
     def _clear_langfuse_config(self):
         self._write_langfuse_config({}, restart=False, remove=True)
 
+    def _clear_usage_logs_for_target(self, stats, target):
+        item = target if isinstance(target, dict) else {}
+        label = str(item.get("label") or "当前目标").strip() or "当前目标"
+        if not lz.is_valid_agent_dir(self.agent_dir):
+            QMessageBox.warning(self, "无法清空", "请先选择有效的 GenericAgent 目录。")
+            return False
+        session_count = int((stats.get("activity") or {}).get("session_count", 0) or 0)
+        event_count = int((stats.get("activity") or {}).get("event_count", 0) or 0)
+        if session_count <= 0:
+            QMessageBox.information(self, "无需清空", f"{label} 当前还没有可清空的 usage 日志。")
+            return False
+        answer = QMessageBox.question(
+            self,
+            "清空使用日志",
+            f"将清空 {label} 当前缓存中的 usage 统计。\n\n涉及会话：{self._usage_num(session_count)}\n涉及事件：{self._usage_num(event_count)}\n\n这不会删除聊天内容，但会清掉当前目标的 token / 费用日志。是否继续？",
+        )
+        if answer != QMessageBox.Yes:
+            return False
+        touched = 0
+        current_session = getattr(self, "current_session", None)
+        for meta in lz.list_sessions(self.agent_dir):
+            if not self._settings_session_matches_target(meta, item.get("scope") or "local", item.get("device_id") or "local"):
+                continue
+            session = lz.load_session(self.agent_dir, meta.get("id"))
+            if not isinstance(session, dict):
+                continue
+            usage = session.get("token_usage") if isinstance(session.get("token_usage"), dict) else {}
+            session["token_usage"] = {
+                "events": [],
+                "last_model": str(usage.get("last_model") or "").strip(),
+                "currency": str(usage.get("currency") or "USD").strip() or "USD",
+                "launcher_usage_cleared": True,
+                "cleared_at": time.time(),
+            }
+            lz.save_session(self.agent_dir, session, touch=False)
+            if isinstance(current_session, dict) and str(current_session.get("id") or "") == str(session.get("id") or ""):
+                current_session["token_usage"] = dict(session["token_usage"])
+            touched += 1
+        if item.get("is_remote"):
+            self._settings_usage_remote_sync_running = False
+            self._settings_usage_remote_sync_key = ""
+            self._settings_usage_remote_synced_key = self._settings_remote_sync_key(item, kind="usage")
+        refresher = getattr(self, "_refresh_token_label", None)
+        if callable(refresher):
+            try:
+                refresher()
+            except Exception:
+                pass
+        self._set_status(f"已清空 {label} 的 usage 日志缓存，共处理 {self._usage_num(touched)} 个会话。")
+        self._reload_usage_panel()
+        QMessageBox.information(self, "已清空", f"{label} 的 usage 日志已清空，共处理 {self._usage_num(touched)} 个会话。")
+        return True
+
     def _collect_usage_stats(self, lookback_days=7, *, device_scope="local", device_id="local"):
         channel_stats = {}
         day_stats = {}
@@ -3355,16 +3867,35 @@ class PersonalUsageMixin:
         today_key = datetime.fromtimestamp(now).strftime("%Y-%m-%d")
         lookback_cutoff = now - max(1, int(lookback_days)) * 86400
 
+        def add_currency_total(target, currency, amount):
+            try:
+                value = float(amount or 0)
+            except Exception:
+                value = 0.0
+            if not value:
+                return
+            code = lz.normalize_usage_currency(currency or ((getattr(self, "cfg", {}) or {}).get("usage_pricing") or {}).get("currency") or "USD")
+            totals = target.setdefault("currency_totals", {})
+            totals[code] = round(float(totals.get(code, 0) or 0) + value, 8)
+            target["mixed_currency"] = len([v for v in totals.values() if float(v or 0) != 0]) > 1
+
         def make_total():
             return {
                 "input_tokens": 0,
                 "output_tokens": 0,
                 "total_tokens": 0,
+                "cost_input": 0.0,
+                "cost_output": 0.0,
+                "cost_cache_read": 0.0,
+                "cost_cache_creation": 0.0,
+                "cost_total": 0.0,
                 "api_calls": 0,
                 "cached_tokens": 0,
                 "cache_creation_input_tokens": 0,
                 "cache_read_input_tokens": 0,
                 "sources": set(),
+                "currency_totals": {},
+                "mixed_currency": False,
             }
 
         today_total = make_total()
@@ -3386,6 +3917,12 @@ class PersonalUsageMixin:
             "models": set(),
             "channels": set(),
             "missing_model_events": 0,
+            "priced_events": 0,
+            "estimated_priced_events": 0,
+            "legacy_unpriced_events": 0,
+            "cost_total": 0.0,
+            "currency_totals": {},
+            "mixed_currency": False,
         }
 
         if not lz.is_valid_agent_dir(self.agent_dir):
@@ -3433,6 +3970,9 @@ class PersonalUsageMixin:
                     "input_tokens": 0,
                     "output_tokens": 0,
                     "total_tokens": 0,
+                    "cost_total": 0.0,
+                    "currency_totals": {},
+                    "mixed_currency": False,
                     "turns": 0,
                     "sessions": set(),
                     "last_active": 0,
@@ -3440,6 +3980,8 @@ class PersonalUsageMixin:
                     "cache_read_input_tokens": 0,
                     "cache_creation_input_tokens": 0,
                     "sources": set(),
+                    "api_card_var": "",
+                    "api_card_label": "",
                 },
             )
             channel_row["sessions"].add(session.get("id"))
@@ -3455,12 +3997,17 @@ class PersonalUsageMixin:
                     "input_tokens": 0,
                     "output_tokens": 0,
                     "total_tokens": 0,
+                    "cost_total": 0.0,
+                    "currency_totals": {},
+                    "mixed_currency": False,
                     "turns": 0,
                     "api_calls": 0,
                     "cache_read_input_tokens": 0,
                     "cache_creation_input_tokens": 0,
                     "last_active": float(session.get("updated_at", 0) or 0),
                     "last_model": self._usage_model_label(usage.get("last_model")),
+                    "api_card_var": "",
+                    "api_card_label": "",
                     "sources": set(),
                     "pinned": bool(session.get("pinned", False)),
                 },
@@ -3486,6 +4033,20 @@ class PersonalUsageMixin:
                 cached_tokens = int(ev.get("cached_tokens", 0) or 0)
                 cache_creation = int(ev.get("cache_creation_input_tokens", 0) or 0)
                 cache_read = int(ev.get("cache_read_input_tokens", 0) or 0)
+                cost_input = float(ev.get("cost_input", 0) or 0)
+                cost_output = float(ev.get("cost_output", 0) or 0)
+                cost_cache_read = float(ev.get("cost_cache_read", 0) or 0)
+                cost_cache_creation = float(ev.get("cost_cache_creation", 0) or 0)
+                cost_total = float(ev.get("cost_total", 0) or 0)
+                if cost_total <= 0 and any(v > 0 for v in (cost_input, cost_output, cost_cache_read, cost_cache_creation)):
+                    cost_total = cost_input + cost_output + cost_cache_read + cost_cache_creation
+                event_currency = lz.normalize_usage_currency(
+                    ev.get("currency")
+                    or ((ev.get("price_snapshot") or {}) if isinstance(ev.get("price_snapshot"), dict) else {}).get("currency")
+                    or usage.get("currency")
+                    or ((getattr(self, "cfg", {}) or {}).get("usage_pricing") or {}).get("currency")
+                    or "USD"
+                )
                 try:
                     ts = float(ev.get("ts", session.get("updated_at", now)) or now)
                 except Exception:
@@ -3493,6 +4054,9 @@ class PersonalUsageMixin:
                 day_key = datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
                 source = str(ev.get("usage_source") or "estimate").strip().lower() or "estimate"
                 model_name = self._usage_model_label(ev.get("model") or session_row.get("last_model") or usage.get("last_model"))
+                api_card_var = str(ev.get("api_card_var") or "").strip()
+                api_card_label = str(ev.get("api_card_label") or api_card_var).strip()
+                is_priced = lz.usage_event_is_priced(ev)
                 if model_name == "(未记录模型)":
                     activity["missing_model_events"] += 1
 
@@ -3503,6 +4067,9 @@ class PersonalUsageMixin:
                         "input_tokens": 0,
                         "output_tokens": 0,
                         "total_tokens": 0,
+                        "cost_total": 0.0,
+                        "currency_totals": {},
+                        "mixed_currency": False,
                         "turns": 0,
                         "channels": {},
                         "api_calls": 0,
@@ -3512,6 +4079,9 @@ class PersonalUsageMixin:
                 row["input_tokens"] += inp
                 row["output_tokens"] += out
                 row["total_tokens"] += total
+                row["cost_total"] += cost_total
+                if is_priced:
+                    add_currency_total(row, event_currency, cost_total)
                 row["turns"] += 1 if inp > 0 else 0
                 row["channels"][channel_id] = row["channels"].get(channel_id, 0) + total
                 row["api_calls"] += api_calls
@@ -3524,6 +4094,9 @@ class PersonalUsageMixin:
                         "input_tokens": 0,
                         "output_tokens": 0,
                         "total_tokens": 0,
+                        "cost_total": 0.0,
+                        "currency_totals": {},
+                        "mixed_currency": False,
                         "turns": 0,
                         "sessions": set(),
                         "last_active": 0,
@@ -3531,6 +4104,8 @@ class PersonalUsageMixin:
                         "cache_read_input_tokens": 0,
                         "cache_creation_input_tokens": 0,
                         "sources": set(),
+                        "api_card_var": api_card_var,
+                        "api_card_label": api_card_label,
                     },
                 )
                 source_row = source_stats.setdefault(
@@ -3540,6 +4115,9 @@ class PersonalUsageMixin:
                         "input_tokens": 0,
                         "output_tokens": 0,
                         "total_tokens": 0,
+                        "cost_total": 0.0,
+                        "currency_totals": {},
+                        "mixed_currency": False,
                         "turns": 0,
                         "events": 0,
                         "api_calls": 0,
@@ -3550,6 +4128,9 @@ class PersonalUsageMixin:
                 channel_row["input_tokens"] += inp
                 channel_row["output_tokens"] += out
                 channel_row["total_tokens"] += total
+                channel_row["cost_total"] += cost_total
+                if is_priced:
+                    add_currency_total(channel_row, event_currency, cost_total)
                 channel_row["turns"] += 1 if inp > 0 else 0
                 channel_row["api_calls"] += api_calls
                 channel_row["cache_read_input_tokens"] += cache_read
@@ -3559,6 +4140,9 @@ class PersonalUsageMixin:
                 model_row["input_tokens"] += inp
                 model_row["output_tokens"] += out
                 model_row["total_tokens"] += total
+                model_row["cost_total"] += cost_total
+                if is_priced:
+                    add_currency_total(model_row, event_currency, cost_total)
                 model_row["turns"] += 1 if inp > 0 else 0
                 model_row["sessions"].add(session_row["session_id"])
                 model_row["last_active"] = max(model_row["last_active"], ts)
@@ -3570,6 +4154,9 @@ class PersonalUsageMixin:
                 source_row["input_tokens"] += inp
                 source_row["output_tokens"] += out
                 source_row["total_tokens"] += total
+                source_row["cost_total"] += cost_total
+                if is_priced:
+                    add_currency_total(source_row, event_currency, cost_total)
                 source_row["turns"] += 1 if inp > 0 else 0
                 source_row["events"] += 1
                 source_row["api_calls"] += api_calls
@@ -3578,12 +4165,22 @@ class PersonalUsageMixin:
                 session_row["input_tokens"] += inp
                 session_row["output_tokens"] += out
                 session_row["total_tokens"] += total
+                session_row["cost_total"] += cost_total
+                if is_priced:
+                    add_currency_total(session_row, event_currency, cost_total)
                 session_row["turns"] += 1 if inp > 0 else 0
                 session_row["api_calls"] += api_calls
                 session_row["cache_read_input_tokens"] += cache_read
                 session_row["cache_creation_input_tokens"] += cache_creation
                 session_row["last_active"] = max(session_row["last_active"], ts)
                 session_row["last_model"] = model_name
+                if api_card_var:
+                    session_row["api_card_var"] = api_card_var
+                    session_row["api_card_label"] = api_card_label
+                    model_row["api_card_var"] = api_card_var
+                    model_row["api_card_label"] = api_card_label
+                    channel_row["api_card_var"] = channel_row.get("api_card_var") or api_card_var
+                    channel_row["api_card_label"] = channel_row.get("api_card_label") or api_card_label
                 session_row["sources"].add(source)
 
                 activity["event_count"] += 1
@@ -3594,10 +4191,19 @@ class PersonalUsageMixin:
                 activity["last_event_ts"] = max(activity["last_event_ts"], ts)
                 activity["models"].add(model_name)
                 activity["channels"].add(channel_id)
+                activity["cost_total"] += cost_total
+                if is_priced:
+                    add_currency_total(activity, event_currency, cost_total)
                 if source == "provider":
                     activity["provider_events"] += 1
                 else:
                     activity["estimate_events"] += 1
+                if is_priced:
+                    activity["priced_events"] += 1
+                    if source != "provider":
+                        activity["estimated_priced_events"] += 1
+                else:
+                    activity["legacy_unpriced_events"] += 1
 
                 for total_bucket in (all_total, today_total if day_key == today_key else None, recent_total if ts >= lookback_cutoff else None):
                     if total_bucket is None:
@@ -3605,6 +4211,13 @@ class PersonalUsageMixin:
                     total_bucket["input_tokens"] += inp
                     total_bucket["output_tokens"] += out
                     total_bucket["total_tokens"] += total
+                    total_bucket["cost_input"] += cost_input
+                    total_bucket["cost_output"] += cost_output
+                    total_bucket["cost_cache_read"] += cost_cache_read
+                    total_bucket["cost_cache_creation"] += cost_cache_creation
+                    total_bucket["cost_total"] += cost_total
+                    if is_priced:
+                        add_currency_total(total_bucket, event_currency, cost_total)
                     total_bucket["api_calls"] += api_calls
                     total_bucket["cached_tokens"] += cached_tokens
                     total_bucket["cache_creation_input_tokens"] += cache_creation
@@ -3619,9 +4232,14 @@ class PersonalUsageMixin:
                         "model": model_name,
                         "source": source,
                         "total_tokens": total,
+                        "cost_total": cost_total,
+                        "currency": event_currency if is_priced else "",
+                        "currency_totals": {event_currency: round(cost_total, 8)} if is_priced and cost_total else {},
                         "input_tokens": inp,
                         "output_tokens": out,
                         "api_calls": api_calls,
+                        "api_card_var": api_card_var,
+                        "api_card_label": api_card_label,
                     }
                 )
 
@@ -3655,8 +4273,11 @@ class PersonalUsageMixin:
 
         for item in (today_total, recent_total, all_total):
             item["mode"] = lz._usage_mode_from_sources(item.get("sources"))
+            item["cost_total"] = round(float(item.get("cost_total", 0) or 0), 8)
         for row in days:
             row["mode"] = lz._usage_mode_from_sources(row.get("sources"))
+            row["cost_total"] = round(float(row.get("cost_total", 0) or 0), 8)
+        activity["cost_total"] = round(float(activity.get("cost_total", 0) or 0), 8)
 
         if activity["event_count"] <= 0:
             warnings.append("当前还没有可分析的 usage 事件，通常说明还没产生完整会话或日志都来自空白新会话。")
@@ -3666,6 +4287,12 @@ class PersonalUsageMixin:
             warnings.append(f"有 {activity['missing_model_events']} 条日志没有记录模型名，模型分布会出现“未记录模型”。")
         if activity["estimate_only_sessions"] > 0:
             warnings.append(f"当前有 {activity['estimate_only_sessions']} 个会话仍是纯估算统计。")
+        if activity["event_count"] > 0 and activity["priced_events"] <= 0:
+            warnings.append("当前目标还没有已计价事件；配置计价规则后，只有后续完成的新事件会冻结费用。")
+        elif activity["legacy_unpriced_events"] > 0:
+            warnings.append(f"有 {activity['legacy_unpriced_events']} 条历史事件没有冻结价格，将继续作为 legacy/unpriced 数据保留。")
+        if activity.get("mixed_currency"):
+            warnings.append("当前统计包含多个历史冻结币种，费用会按币种分别显示，不会按当前全局币种重标。")
 
         return {
             "today": today_total,
@@ -3765,7 +4392,7 @@ class PersonalUsageMixin:
         actions_title = QLabel("常用操作")
         actions_title.setObjectName("cardTitle")
         actions_box.addWidget(actions_title)
-        actions_desc = QLabel("可以把当前设备的使用摘要导出到本地文件，也可以直接打开当前会话缓存目录。")
+        actions_desc = QLabel("可以导出当前摘要、打开会话缓存目录，也可以直接清空当前目标的 usage 日志缓存。")
         actions_desc.setWordWrap(True)
         actions_desc.setObjectName("cardDesc")
         actions_box.addWidget(actions_desc)
@@ -3781,46 +4408,24 @@ class PersonalUsageMixin:
         cache_btn.setToolTip("打开当前启动器保存的会话缓存目录。")
         cache_btn.clicked.connect(self._usage_open_cache_dir)
         actions_row.addWidget(cache_btn, 0)
+        clear_btn = QPushButton("清空当前目标日志")
+        clear_btn.setStyleSheet(self._action_button_style(kind="destructive"))
+        clear_btn.setToolTip("清空当前目标缓存中的 token / 费用 usage 统计，不会删除聊天内容。")
+        clear_btn.clicked.connect(lambda: self._clear_usage_logs_for_target(stats, target))
+        actions_row.addWidget(clear_btn, 0)
         actions_row.addStretch(1)
         actions_box.addLayout(actions_row)
         self.settings_usage_list_layout.addWidget(actions_card)
-
-        hero_grid = QGridLayout()
-        hero_grid.setSpacing(10)
-        hero_cards = [
-            self._usage_metric_card(
-                "今天",
-                self._usage_num(stats["today"]["total_tokens"]),
-                f"{lz._usage_mode_label(stats['today'].get('mode'))}  ·  入 {self._usage_num(stats['today']['input_tokens'])} / 出 {self._usage_num(stats['today']['output_tokens'])} / 调用 {self._usage_num(stats['today']['api_calls'])}",
-                accent=True,
-            ),
-            self._usage_metric_card(
-                "近 7 天",
-                self._usage_num(stats["recent"]["total_tokens"]),
-                f"{lz._usage_mode_label(stats['recent'].get('mode'))}  ·  入 {self._usage_num(stats['recent']['input_tokens'])} / 出 {self._usage_num(stats['recent']['output_tokens'])}",
-            ),
-            self._usage_metric_card(
-                "累计",
-                self._usage_num(stats["all"]["total_tokens"]),
-                f"缓存读取 {self._usage_cache_label(stats['all']['cache_read_input_tokens'])}  ·  API 调用 {self._usage_num(stats['activity']['api_calls'])}",
-            ),
-            self._usage_metric_card(
-                "活跃概览",
-                self._usage_num(stats["activity"]["sessions_with_events"]),
-                f"有日志会话 / 全部 {self._usage_num(stats['activity']['session_count'])}  ·  最近活动 {self._usage_time_label(stats['activity']['last_event_ts'])}",
-            ),
-        ]
-        for idx, card in enumerate(hero_cards):
-            hero_grid.addWidget(card, 0, idx)
-        self.settings_usage_list_layout.addLayout(hero_grid)
+        self.settings_usage_list_layout.addWidget(self._usage_pricing_card(stats, target))
+        self.settings_usage_list_layout.addWidget(self._usage_token_cost_card(stats))
 
         stats_grid = QGridLayout()
         stats_grid.setSpacing(10)
         stats_grid.addWidget(
             self._usage_metric_card(
-                "模型数",
-                self._usage_num(len(stats["activity"]["models"])),
-                "最近 7 天内出现过的模型",
+                "活跃概览",
+                self._usage_num(stats["activity"]["sessions_with_events"]),
+                f"有日志会话 / 全部 {self._usage_num(stats['activity']['session_count'])}  ·  最近活动 {self._usage_time_label(stats['activity']['last_event_ts'])}",
             ),
             0,
             0,
@@ -3836,18 +4441,18 @@ class PersonalUsageMixin:
         )
         stats_grid.addWidget(
             self._usage_metric_card(
-                "真实 usage 事件",
-                self._usage_num(stats["activity"]["provider_events"]),
-                "provider 返回的原始 usage",
+                "来源模式",
+                lz._usage_mode_label((stats.get("recent") or {}).get("mode")),
+                f"今天 {lz._usage_mode_label((stats.get('today') or {}).get('mode'))}  ·  累计 {lz._usage_mode_label((stats.get('all') or {}).get('mode'))}",
             ),
             0,
             2,
         )
         stats_grid.addWidget(
             self._usage_metric_card(
-                "估算事件",
-                self._usage_num(stats["activity"]["estimate_events"]),
-                "按字符估算得到的 usage",
+                "未计价历史",
+                self._usage_num(stats["activity"]["legacy_unpriced_events"]),
+                "legacy/unpriced 事件",
             ),
             0,
             3,
@@ -3883,6 +4488,7 @@ class PersonalUsageMixin:
             [
                 self._usage_source_label(row["source"]),
                 self._usage_num(row["total_tokens"]),
+                self._usage_cost_label(row),
                 self._usage_num(row["events"]),
                 self._usage_num(row["sessions"]),
             ]
@@ -3891,9 +4497,9 @@ class PersonalUsageMixin:
         quality_card = self._usage_table_card(
             "日志来源",
             "优先看这里，能快速分辨当前数据到底有多少是真实 provider usage，多少还是本地估算。",
-            ["来源", "总 token", "事件数", "会话数"],
+            ["来源", "总 token", "费用", "事件数", "会话数"],
             source_rows,
-            stretches=[3, 2, 2, 2],
+            stretches=[3, 2, 2, 2, 2],
             empty_text="暂无来源统计。",
         )
         quality_extra = QFrame()
@@ -3920,18 +4526,19 @@ class PersonalUsageMixin:
             self._usage_table_card(
                 "按渠道",
                 "看问题集中在哪个入口，主聊天区和外部通讯前端能一眼区分。",
-                ["渠道", "总 token", "轮次", "会话", "最近活动"],
+                ["渠道", "总 token", "费用", "轮次", "会话", "最近活动"],
                 [
                     [
                         row["label"],
                         self._usage_num(row["total_tokens"]),
+                        self._usage_cost_label(row),
                         self._usage_num(row["turns"]),
                         self._usage_num(row["sessions"]),
                         self._usage_time_label(row["last_active"]),
                     ]
                     for row in (stats.get("channels") or [])[:8]
                 ],
-                stretches=[3, 2, 2, 2, 3],
+                stretches=[3, 2, 2, 2, 2, 3],
                 empty_text="暂无可统计的渠道日志。",
             ),
             0,
@@ -3941,18 +4548,19 @@ class PersonalUsageMixin:
             self._usage_table_card(
                 "按模型",
                 "模型维度更适合看消耗结构，尤其能看出是不是某一个模型异常偏高。",
-                ["模型", "总 token", "会话", "调用", "最近活动"],
+                ["模型", "总 token", "费用", "会话", "调用", "最近活动"],
                 [
                     [
                         row["model"],
                         self._usage_num(row["total_tokens"]),
+                        self._usage_cost_label(row),
                         self._usage_num(row["sessions"]),
                         self._usage_num(row["api_calls"]),
                         self._usage_time_label(row["last_active"]),
                     ]
                     for row in (stats.get("models") or [])[:8]
                 ],
-                stretches=[4, 2, 2, 2, 3],
+                stretches=[4, 2, 2, 2, 2, 3],
                 empty_text="暂无可统计的模型日志。",
             ),
             0,
@@ -3966,7 +4574,7 @@ class PersonalUsageMixin:
             self._usage_table_card(
                 "最近活动",
                 "按时间倒序展示，适合快速复盘最近几次请求发生在哪里、用了什么模型。",
-                ["时间", "渠道", "会话", "模型", "token"],
+                ["时间", "渠道", "会话", "模型", "token", "费用"],
                 [
                     [
                         self._usage_time_label(row["ts"]),
@@ -3974,10 +4582,11 @@ class PersonalUsageMixin:
                         row["session_title"],
                         row["model"],
                         self._usage_num(row["total_tokens"]),
+                        self._usage_cost_label(row),
                     ]
                     for row in (stats.get("timeline") or [])[:8]
                 ],
-                stretches=[2, 2, 4, 4, 2],
+                stretches=[2, 2, 4, 4, 2, 2],
                 empty_text="最近还没有 usage 事件。",
             ),
             0,
@@ -3987,18 +4596,19 @@ class PersonalUsageMixin:
             self._usage_table_card(
                 "高消耗会话",
                 "挑出 token 累积最高的会话，便于快速定位最值得排查的对象。",
-                ["会话", "渠道", "总 token", "最近模型", "最近活动"],
+                ["会话", "渠道", "总 token", "费用", "最近模型", "最近活动"],
                 [
                     [
                         row["title"] + ("  · 已收藏" if row.get("pinned") else ""),
                         row["channel_label"],
                         self._usage_num(row["total_tokens"]),
+                        self._usage_cost_label(row),
                         row["last_model"],
                         self._usage_time_label(row["last_active"]),
                     ]
                     for row in (stats.get("sessions") or [])[:8]
                 ],
-                stretches=[4, 2, 2, 3, 3],
+                stretches=[4, 2, 2, 2, 3, 3],
                 empty_text="暂无可统计的会话。",
             ),
             0,
@@ -4016,6 +4626,7 @@ class PersonalUsageMixin:
                 [
                     row["date"],
                     self._usage_num(row["total_tokens"]),
+                    self._usage_cost_label(row),
                     self._usage_num(row["turns"]),
                     self._usage_num(row["api_calls"]),
                     top_channel or "无渠道细分",
@@ -4025,9 +4636,9 @@ class PersonalUsageMixin:
             self._usage_table_card(
                 "最近几天",
                 "按天回看整体波动，适合判断今天是不是异常、哪个渠道最近突然抬升。",
-                ["日期", "总 token", "轮次", "调用", "主要渠道"],
+                ["日期", "总 token", "费用", "轮次", "调用", "主要渠道"],
                 day_rows,
-                stretches=[2, 2, 2, 2, 5],
+                stretches=[2, 2, 2, 2, 2, 5],
                 empty_text="最近几天没有可用统计。",
             )
         )

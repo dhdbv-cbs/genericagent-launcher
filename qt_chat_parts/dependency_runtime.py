@@ -5,8 +5,8 @@ import queue
 import threading
 import time
 
-from PySide6.QtCore import QTimer, Qt
-from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QProgressBar, QPushButton, QTextEdit, QVBoxLayout
+from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QMessageBox, QProgressBar, QPushButton, QTextEdit, QVBoxLayout
 
 from launcher_app import core as lz
 
@@ -22,7 +22,7 @@ class DependencyRuntimeMixin:
         except Exception:
             req_mtime = 0.0
         py_cfg = str(self.cfg.get("python_exe") or "").strip()
-        py_resolved = os.path.normcase(os.path.normpath(lz._resolve_config_path(py_cfg))) if py_cfg else ""
+        py_resolved = os.path.normcase(os.path.normpath(lz._resolve_configured_python_exe(py_cfg, agent_dir=self.agent_dir))) if py_cfg else ""
         installer_mode = str(self.cfg.get("dependency_installer") or "auto").strip().lower()
         if installer_mode not in ("auto", "uv", "pip"):
             installer_mode = "auto"
@@ -149,7 +149,7 @@ class DependencyRuntimeMixin:
         err = str(result.get("error") or "").strip()
         self._remember_dependency_report(result.get("report") or {})
         if ok and py:
-            self.cfg["python_exe"] = lz._make_config_relative_path(py)
+            self.cfg["python_exe"] = lz._make_python_exe_config_path(py, agent_dir=self.agent_dir)
             lz.save_config(self.cfg)
             if hasattr(self, "locate_python_edit"):
                 self.locate_python_edit.setText(self.cfg["python_exe"])
@@ -290,15 +290,29 @@ class DependencyRuntimeMixin:
         return bool(result_holder["ok"])
 
     def _check_runtime_dependencies_from_locate(self):
+        requested_agent_dir = self.locate_path_edit.text().strip() if hasattr(self, "locate_path_edit") else str(self.agent_dir or "").strip()
+        if requested_agent_dir and requested_agent_dir != str(self.agent_dir or "").strip():
+            self._set_agent_dir(requested_agent_dir)
         combo = getattr(self, "locate_dependency_installer_combo", None)
         if combo is not None:
             selected = str(combo.currentData() or "").strip().lower()
             if selected not in ("auto", "uv", "pip"):
                 selected = "auto"
             self.cfg["dependency_installer"] = selected
-            lz.save_config(self.cfg)
+        py_raw = self.locate_python_edit.text().strip() if hasattr(self, "locate_python_edit") else ""
+        if py_raw:
+            resolved = lz._resolve_configured_python_exe(py_raw, agent_dir=self.agent_dir)
+            if not os.path.isfile(resolved):
+                QMessageBox.warning(self, "Python 路径无效", f"未找到可执行文件：\n{resolved}")
+                return
+            self.cfg["python_exe"] = lz._make_python_exe_config_path(resolved, agent_dir=self.agent_dir)
+            if hasattr(self, "locate_python_edit"):
+                self.locate_python_edit.setText(self.cfg["python_exe"])
+        else:
+            self.cfg.pop("python_exe", None)
+        lz.save_config(self.cfg)
         if not lz.is_valid_agent_dir(self.agent_dir):
-            self._set_agent_dir(self.locate_path_edit.text().strip() if hasattr(self, "locate_path_edit") else self.agent_dir)
+            self._set_agent_dir(requested_agent_dir or self.agent_dir)
         if not lz.is_valid_agent_dir(self.agent_dir):
             return
         self._check_runtime_dependencies(purpose="载入内核", force_sync=False, ignore_cache=True)

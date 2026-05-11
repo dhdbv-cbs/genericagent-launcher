@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListView,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
@@ -40,7 +41,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from launcher_core_parts.upstream_dependencies import LAUNCHER_BOOTSTRAP_DEPENDENCIES
+from launcher_core_parts.upstream_dependencies import (
+    LAUNCHER_BOOTSTRAP_DEPENDENCIES,
+    resolve_remote_fallback_requirement_specs,
+    resolve_upstream_dependency_manifest,
+)
 from launcher_app import core as lz
 from launcher_app.theme import C, F, preferred_theme_font_families
 
@@ -226,7 +231,7 @@ class _ThemeCropDialog(QDialog):
         root.setSpacing(10)
 
         info = QLabel(
-            f"输出尺寸：{self._target_size.width()} x {self._target_size.height()}（启动器当前尺寸）\n"
+            f"输出尺寸：{self._target_size.width()} x {self._target_size.height()}（目标显示尺寸）\n"
             "拖动图片调整位置，滑动缩放后点击“确定裁切”。100% 为完整显示原图。"
         )
         info.setWordWrap(True)
@@ -341,6 +346,24 @@ class SettingsPanelMixin:
     _SETTINGS_LIVE_RELOAD_CATEGORIES = frozenset({"channels", "schedule", "personal", "usage"})
     _SETTINGS_LIVE_RELOAD_MIN_INTERVAL_SECONDS = 4.0
     _SETTINGS_SWITCH_RELOAD_DELAY_MS = 24
+
+    def _api_add_menu_specs(self):
+        return [
+            ("claude_native", f"添加 {lz.SIMPLE_FORMAT_LABEL.get('claude_native', 'Claude 原生')}"),
+            ("oai_chat", f"添加 {lz.SIMPLE_FORMAT_LABEL.get('oai_chat', 'Chat Completions')}"),
+            ("oai_responses", f"添加 {lz.SIMPLE_FORMAT_LABEL.get('oai_responses', 'Responses')}"),
+            ("mixin", f"添加 {lz.SIMPLE_FORMAT_LABEL.get('mixin', 'Mixin 故障转移')}"),
+        ]
+
+    def _bind_api_add_button_menu(self, button):
+        if button is None:
+            return None
+        menu = QMenu(button)
+        for format_key, label in self._api_add_menu_specs():
+            action = menu.addAction(str(label))
+            action.triggered.connect(lambda _checked=False, key=format_key: self._qt_api_add_channel(key))
+        button.setMenu(menu)
+        return menu
 
     def _settings_category_needs_live_reload(self, key: str) -> bool:
         return str(key or "").strip().lower() in self._SETTINGS_LIVE_RELOAD_CATEGORIES
@@ -677,7 +700,7 @@ class SettingsPanelMixin:
         api_toolbar.setSpacing(8)
         api_add_btn = QPushButton("+ 添加 API 卡片")
         api_add_btn.setStyleSheet(self._action_button_style(primary=True))
-        api_add_btn.clicked.connect(lambda: self._qt_api_add_channel("oai_chat"))
+        self._settings_api_add_menu = self._bind_api_add_button_menu(api_add_btn)
         api_toolbar.addWidget(api_add_btn, 0)
         self.settings_api_add_btn = api_add_btn
         api_save_btn = QPushButton("仅保存")
@@ -1606,7 +1629,7 @@ class SettingsPanelMixin:
         usage_layout.addWidget(
             self._settings_intro(
                 "使用日志",
-                "这里汇总本地会话里的 token / 模型 / 渠道 / 会话活动日志，并补充 Langfuse 追踪配置状态。标注说明：真实 = 直接读取模型接口返回的 usage；估算 = 按字符数 / 2.5 回推；混合 = 同一统计范围里两者都有。",
+                "这里汇总本地会话里的 token / 费用 / 模型 / 渠道 / 会话活动日志，并补充 Langfuse 追踪配置状态。标注说明：真实 = 直接读取模型接口返回的 usage；估算 = 按字符数 / 2.5 回推；混合 = 同一统计范围里两者都有。",
             )
         )
         usage_card = self._panel_card()
@@ -1616,7 +1639,7 @@ class SettingsPanelMixin:
         usage_title = QLabel("日志总览")
         usage_title.setObjectName("cardTitle")
         usage_box.addWidget(usage_title)
-        usage_desc = QLabel("这里显示的是启动器可见的本地日志；如果上游启用了 Langfuse，也会额外展示追踪配置和接线状态。")
+        usage_desc = QLabel("这里显示的是启动器可见的本地日志和按设备/API 卡片保存的计价规则；如果上游启用了 Langfuse，也会额外展示追踪配置和接线状态。")
         usage_desc.setWordWrap(True)
         usage_desc.setObjectName("cardDesc")
         usage_box.addWidget(usage_desc)
@@ -1933,7 +1956,6 @@ class SettingsPanelMixin:
             }
         )
         if current["scope"] == "remote":
-            dev = self._settings_remote_device_by_id(current["device_id"]) or {}
             path_text = self._settings_target_display_path("mykey.py")
             notice.setText(f"当前目标：远程设备（SSH 宿主机）。API/渠道配置会写入 `{path_text}`。")
         else:
@@ -3783,14 +3805,14 @@ class SettingsPanelMixin:
 
     def _resolve_vps_python_for_dependency(self):
         cfg_py = str(self.cfg.get("python_exe") or "").strip()
-        cfg_abs = lz._resolve_config_path(cfg_py) if cfg_py else ""
+        cfg_abs = lz._resolve_configured_python_exe(cfg_py, agent_dir=self.agent_dir) if cfg_py else ""
         if cfg_abs and os.path.isfile(cfg_abs):
             return cfg_abs
         last_check = getattr(self, "_last_dependency_check", None) or {}
         checked_py = str(last_check.get("python") or "").strip()
         if checked_py and os.path.isfile(checked_py):
             return checked_py
-        candidates = lz._system_python_candidates()
+        candidates = lz._system_python_candidates(agent_dir=self.agent_dir)
         if candidates:
             path = str((candidates[0] or {}).get("path") or "").strip()
             if path and os.path.isfile(path):
@@ -3901,7 +3923,7 @@ class SettingsPanelMixin:
                     py_text = str(holder.get("python") or "").strip()
                     if holder.get("ok"):
                         if py_text:
-                            self.cfg["python_exe"] = lz._make_config_relative_path(py_text)
+                            self.cfg["python_exe"] = lz._make_python_exe_config_path(py_text, agent_dir=self.agent_dir)
                             lz.save_config(self.cfg)
                         detail = str(holder.get("detail") or "").strip()
                         msg = str(holder.get("message") or "SSH 依赖安装完成。")
@@ -4183,9 +4205,13 @@ class SettingsPanelMixin:
     def _save_vps_deploy_preferences(self):
         payload = self._persist_current_vps_profile_from_form(validate_pair=False, silent=True)
         if payload is False:
-            return self._normalize_vps_deploy_cfg({})
-        current = self._current_vps_profile() or payload or {}
-        return self._normalize_vps_deploy_cfg(current)
+            return self._collect_vps_deploy_form_data()
+        if isinstance(payload, dict) and payload:
+            return self._normalize_vps_deploy_cfg(payload)
+        current = self._current_vps_profile() or {}
+        if current:
+            return self._normalize_vps_deploy_cfg(current)
+        return self._collect_vps_deploy_form_data()
 
     def _resolve_vps_runtime_connection_payload(self):
         payload = self._persist_current_vps_profile_from_form(validate_pair=False, silent=True)
@@ -4277,6 +4303,9 @@ class SettingsPanelMixin:
             return 1, "", normalize_ssh_error_text(str(e), context="SSH 命令执行")
 
     def _vps_default_direct_requirements(self):
+        resolved = [str(item or "").strip() for item in resolve_remote_fallback_requirement_specs(self.agent_dir) if str(item or "").strip()]
+        if resolved:
+            return resolved
         items = []
         seen = set()
         for dep in LAUNCHER_BOOTSTRAP_DEPENDENCIES:
@@ -4947,7 +4976,11 @@ class SettingsPanelMixin:
                 used_fallback_requirements = "__REQ__" not in req_probe_text
                 if used_fallback_requirements:
                     remote_req_path = ready_dir.rstrip("/") + "/temp/launcher_runtime/requirements.launcher_bootstrap.txt"
-                    push("上游未提供 requirements.txt；当前改用启动器维护的上游依赖表。")
+                    manifest = resolve_upstream_dependency_manifest(self.agent_dir)
+                    if manifest.get("pyproject_used"):
+                        push("上游未提供 requirements.txt；当前改用 pyproject.toml 生成 fallback requirements。")
+                    else:
+                        push("上游未提供 requirements.txt；当前改用启动器维护的上游依赖表。")
                     try:
                         req_text = self._vps_render_bootstrap_requirements()
                         sftp = client.open_sftp()
@@ -5004,7 +5037,12 @@ class SettingsPanelMixin:
                     return
                 holder["ok"] = True
                 holder["message"] = "直接部署完成。"
-                req_label = "requirements.txt" if not used_fallback_requirements else "temp/launcher_runtime/requirements.launcher_bootstrap.txt"
+                req_label = "requirements.txt"
+                if used_fallback_requirements:
+                    manifest = resolve_upstream_dependency_manifest(self.agent_dir)
+                    req_label = "temp/launcher_runtime/requirements.launcher_bootstrap.txt"
+                    if manifest.get("pyproject_used"):
+                        req_label += "（由 pyproject.toml 生成）"
                 py_exec = python_check_text.split("|", 1)[1].splitlines()[0].strip() if "__PY_OK__|" in python_check_text else holder["python_cmd"]
                 holder["detail"] = f"远端目录：{ready_dir}；Python：{py_exec or holder['python_cmd']}；依赖文件：{req_label}"
             except Exception as e:
@@ -5379,6 +5417,33 @@ class SettingsPanelMixin:
             label.setText(str(max(0, min(100, int(value or 0)))))
 
     def _theme_target_size(self) -> QSize:
+        screen = None
+        screen_getter = getattr(self, "screen", None)
+        if callable(screen_getter):
+            try:
+                screen = screen_getter()
+            except Exception:
+                screen = None
+        if screen is None:
+            app = QApplication.instance()
+            if app is not None:
+                try:
+                    screen = app.primaryScreen()
+                except Exception:
+                    screen = None
+        if screen is not None:
+            try:
+                rect = screen.availableGeometry()
+            except Exception:
+                rect = None
+            if rect is not None:
+                try:
+                    sw = int(rect.width() or 0)
+                    sh = int(rect.height() or 0)
+                except Exception:
+                    sw, sh = 0, 0
+                if sw > 0 and sh > 0:
+                    return QSize(max(960, sw), max(640, sh))
         width = max(960, int(getattr(self, "width", lambda: 1440)() or 1440))
         height = max(640, int(getattr(self, "height", lambda: 920)() or 920))
         return QSize(width, height)

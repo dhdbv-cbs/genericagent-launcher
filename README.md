@@ -203,6 +203,8 @@ python tools/generate_update_signing_keypair.py
 
 - `local_keys/` 已忽略，不会进 Git
 - `build.bat` 检测到本地 key 后会自动用于内部更新签名
+- `local_keys/update_signing_private_key.pem` 只用于 `manifest.json` / `manifest.sig` 的内部更新签名，不是 Windows `exe/installer` 的 Authenticode 程序签名私钥
+- 当前仓库默认打包链路不包含 `signtool` 或 Inno Setup 程序签名步骤；如果你看到 `build.bat` 成功，只能说明更新资产已签，不代表 Windows 主程序、`Updater.exe` 或 `Setup.exe` 已做程序签名
 - 正式发布不允许 unsigned manifest 兜底
 
 Windows 打包完成后，常见产物包括：

@@ -83,6 +83,8 @@ if defined GA_LAUNCHER_UPDATE_PRIVATE_KEY_FILE (
 if defined GA_LAUNCHER_UPDATE_PUBLIC_KEY_FILE (
     echo [INFO] Using local update signing public key file: "%GA_LAUNCHER_UPDATE_PUBLIC_KEY_FILE%"
 )
+echo [INFO] Reminder: update_signing_* keys only sign Windows internal-update assets ^(manifest.json / manifest.sig^).
+echo [INFO] Reminder: this build script does NOT Authenticode-sign GenericAgentLauncher.exe, LauncherBootstrap.exe, Updater.exe, or the Setup installer.
 
 python tools/build_release_bundle.py --version %VERSION% --out release
 if errorlevel 1 (

@@ -20,3 +20,14 @@ launcher_config.json
 .idea/
 .vscode/
 .claude/
+
+# Project-local AI/Trellis runtime state and private task memory
+.trellis/.developer
+.trellis/.current-task
+.trellis/.runtime/
+.trellis/workspace/
+.trellis/tasks/
+
+# Local packaging probes / generated installer mirrors
+installer/release/
+tmp_icon_probe/

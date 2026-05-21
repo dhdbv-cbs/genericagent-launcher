@@ -242,6 +242,15 @@ def process_cmdline_has_script(cmdline: str, script_rel: str) -> bool:
     return False
 
 
+def process_path_looks_absolute(path: str) -> bool:
+    text = str(path or "").strip()
+    if not text:
+        return False
+    if os.path.isabs(text):
+        return True
+    return bool(re.match(r"^[A-Za-z]:[\\/]", text))
+
+
 def process_cmdline_matches_agent_script(
     cmdline: str,
     *,
@@ -255,6 +264,8 @@ def process_cmdline_matches_agent_script(
     norm_script_rel = normalize_process_match_text(script_rel)
     if (not norm_cmd) or (not norm_script_rel):
         return False
+    if process_path_looks_absolute(script_rel) and norm_script_rel in norm_cmd:
+        return True
     target_script = normalize_process_match_text(os.path.join(str(agent_dir or "").strip(), script_rel))
     if target_script and target_script in norm_cmd:
         return True
@@ -311,11 +322,21 @@ def process_matcher_script_source() -> str:
         "        return True\n"
         "    return False\n"
         "\n"
+        "def process_path_looks_absolute(path):\n"
+        "    text = str(path or '').strip()\n"
+        "    if not text:\n"
+        "        return False\n"
+        "    if os.path.isabs(text):\n"
+        "        return True\n"
+        "    return bool(re.match(r\"^[A-Za-z]:[\\\\/]\", text))\n"
+        "\n"
         "def process_cmdline_matches_agent_script(cmdline, agent_dir, script_rel, cwd='', agent_dir_real='', cwd_real=''):\n"
         "    norm_cmd = normalize_process_match_text(cmdline)\n"
         "    norm_script_rel = normalize_process_match_text(script_rel)\n"
         "    if (not norm_cmd) or (not norm_script_rel):\n"
         "        return False\n"
+        "    if process_path_looks_absolute(script_rel) and norm_script_rel in norm_cmd:\n"
+        "        return True\n"
         "    target_script = normalize_process_match_text(os.path.join(str(agent_dir or '').strip(), script_rel))\n"
         "    if target_script and target_script in norm_cmd:\n"
         "        return True\n"

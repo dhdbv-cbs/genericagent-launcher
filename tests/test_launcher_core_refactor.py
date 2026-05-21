@@ -148,10 +148,10 @@ class LauncherCoreFacadeTests(unittest.TestCase):
             with open(python_exe, "w", encoding="utf-8") as f:
                 f.write("#!/usr/bin/env python3\n")
             try:
-                with mock.patch.object(
-                    runtime.os.path,
-                    "expanduser",
-                    side_effect=lambda value: value.replace("~", home_dir, 1) if str(value).startswith("~") else value,
+                with mock.patch.dict(
+                    runtime.os.environ,
+                    {"HOME": home_dir, "USERPROFILE": home_dir},
+                    clear=False,
                 ):
                     resolved = runtime._resolve_configured_python_exe("~/miniforge3/bin/python", agent_dir=agent_dir)
                     stored = runtime._make_python_exe_config_path("~/miniforge3/bin/python", agent_dir=agent_dir)

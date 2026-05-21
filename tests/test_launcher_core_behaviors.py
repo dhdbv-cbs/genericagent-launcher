@@ -1986,6 +1986,35 @@ tg_bot_token = '123'
         self.assertEqual(namespace["binaries"], ["requests-bin"])
         self.assertEqual(namespace["hiddenimports"], ["requests.hidden"])
 
+    def test_custom_charset_normalizer_and_simplejson_hooks_collect_runtime_smoke_packages(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        cases = [
+            ("hook-charset_normalizer.py", "charset_normalizer"),
+            ("hook-simplejson.py", "simplejson"),
+        ]
+        pyinstaller_hooks_module = types.ModuleType("PyInstaller.utils.hooks")
+        calls = []
+
+        def _collect_all(name):
+            calls.append(str(name))
+            return [(f"{name}-data", ".")], [f"{name}-bin"], [f"{name}.hidden"]
+
+        pyinstaller_hooks_module.collect_all = _collect_all
+        with mock.patch.dict(sys.modules, {"PyInstaller.utils.hooks": pyinstaller_hooks_module}):
+            for filename, package_name in cases:
+                path = os.path.join(root, "hooks", filename)
+                with open(path, "r", encoding="utf-8") as f:
+                    src = f.read()
+                self.assertIn("collect_all", src)
+                self.assertIn(f'collect_all("{package_name}")', src)
+                namespace = {"__builtins__": __builtins__}
+                exec(compile(src, path, "exec"), namespace)
+                self.assertEqual(namespace["datas"], [(f"{package_name}-data", ".")])
+                self.assertEqual(namespace["binaries"], [f"{package_name}-bin"])
+                self.assertEqual(namespace["hiddenimports"], [f"{package_name}.hidden"])
+
+        self.assertEqual(calls, ["charset_normalizer", "simplejson"])
+
     def test_private_python_installer_has_atomic_download_and_retry(self):
         root = os.path.dirname(os.path.dirname(__file__))
         path = os.path.join(root, "qt_chat_parts", "downloads.py")

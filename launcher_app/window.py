@@ -85,6 +85,7 @@ from qt_chat_parts.common import (
     _session_copy,
     _session_source_label,
     _svg_icon,
+    build_message_row,
 )
 from qt_chat_parts.chat_view import ChatViewMixin
 from qt_chat_parts.channel_runtime import ChannelRuntimeMixin
@@ -651,6 +652,7 @@ class FloatingOrbWindow(QWidget):
         self.send_btn.setStyleSheet(host._action_button_style(primary=True))
         self.session_menu_btn.setStyleSheet(host._action_button_style(kind="subtle"))
         self.msg_root.setStyleSheet(f"background: {chat_bg};")
+        chat_common.refresh_message_row_avatars(self)
         if self.panel.graphicsEffect() is not None:
             self.panel.setGraphicsEffect(None)
 
@@ -749,7 +751,13 @@ class FloatingOrbWindow(QWidget):
         except Exception:
             row_ok = row is not None
         if not row_ok:
-            row = MessageRow(text, "assistant", self.msg_root)
+            row = build_message_row(
+                text,
+                "assistant",
+                self.msg_root,
+                avatar_cfg=getattr(self._host, "cfg", None),
+                row_cls=MessageRow,
+            )
             row.update_content(text, finished=False)
             self.msg_layout.insertWidget(self.msg_layout.count() - 1, row)
             self._rendered_rows.append(row)
@@ -865,14 +873,27 @@ class FloatingOrbWindow(QWidget):
         for bubble in rows:
             role = str(bubble.get("role") or "assistant").strip().lower()
             on_resend = self._regenerate_from_row if role == "assistant" else None
-            row = MessageRow(str(bubble.get("text") or ""), role, self.msg_root, on_resend=on_resend)
+            row = build_message_row(
+                str(bubble.get("text") or ""),
+                role,
+                self.msg_root,
+                on_resend=on_resend,
+                avatar_cfg=getattr(self._host, "cfg", None),
+                row_cls=MessageRow,
+            )
             row.set_finished(True)
             self.msg_layout.insertWidget(insert_index, row)
             self._rendered_rows.append(row)
             self._sync_message_layout_alignment()
             insert_index += 1
         if busy:
-            row = MessageRow(str(stream_text or ""), "assistant", self.msg_root)
+            row = build_message_row(
+                str(stream_text or ""),
+                "assistant",
+                self.msg_root,
+                avatar_cfg=getattr(self._host, "cfg", None),
+                row_cls=MessageRow,
+            )
             row.update_content(str(stream_text or ""), finished=False)
             self.msg_layout.insertWidget(insert_index, row)
             self._rendered_rows.append(row)
@@ -1753,18 +1774,20 @@ class QtChatWindow(ApiEditorMixin, ChannelRuntimeMixin, DependencyRuntimeMixin, 
         self.server_status_btn.clicked.connect(self._on_server_status_clicked)
         head_layout.addWidget(self.server_status_btn, 0, Qt.AlignRight | Qt.AlignVCenter)
         self._refresh_server_status_indicator()
-        self.theme_btn = QPushButton("☀")
+        self.theme_btn = QPushButton()
         self.theme_btn.setCursor(Qt.PointingHandCursor)
         self.theme_btn.setFixedSize(36, 32)
         self.theme_btn.setStyleSheet(self._sidebar_button_style())
         self.theme_btn.clicked.connect(self._toggle_appearance_mode)
         head_layout.addWidget(self.theme_btn, 0, Qt.AlignRight | Qt.AlignVCenter)
         self._refresh_theme_button()
-        self.gear_btn = QPushButton("⚙")
+        self.gear_btn = QPushButton()
         self.gear_btn.setCursor(Qt.PointingHandCursor)
         self.gear_btn.setFixedSize(36, 32)
         self.gear_btn.setStyleSheet(self._sidebar_button_style())
         self.gear_btn.clicked.connect(self._open_functions_menu)
+        self.gear_btn.setToolTip("更多操作")
+        chat_common.set_button_svg_icon(self.gear_btn, "launcher_menu", chat_common._SVG_SETTINGS, color="text_soft", size=16)
         head_layout.addWidget(self.gear_btn, 0, Qt.AlignRight | Qt.AlignVCenter)
         self.mode_label.hide()
 
@@ -1891,15 +1914,16 @@ class QtChatWindow(ApiEditorMixin, ChannelRuntimeMixin, DependencyRuntimeMixin, 
 
         self._info_popup = QLabel(self, Qt.ToolTip | Qt.FramelessWindowHint)
         self._info_popup.setObjectName("infoPopup")
-        self._info_popup.setStyleSheet(
-            f"QLabel#infoPopup {{ background: {C['panel']}; color: {C['text']};"
-            f" border: 1px solid {C['border']}; padding: 8px 10px;"
-            f" border-radius: 6px; font-size: 12px; }}"
-        )
         self._info_popup.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         self._info_popup.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self._info_popup.setWordWrap(True)
         self._info_popup.hide()
+        styler = getattr(self, "_refresh_info_popup_style", None)
+        if callable(styler):
+            try:
+                styler()
+            except Exception:
+                pass
 
         self.stop_btn = QPushButton("  中断")
         self.stop_btn.setObjectName("stopBtn")
@@ -2150,11 +2174,11 @@ class QtChatWindow(ApiEditorMixin, ChannelRuntimeMixin, DependencyRuntimeMixin, 
 
     def _functions_menu_floating_action_text(self) -> str:
         if self._system_tray_available():
-            return "🗕  缩小到托盘，仅保留悬浮窗"
+            return "缩小到托盘，仅保留悬浮窗"
         visible = self._floating_window_visible()
         if bool(getattr(lz, "IS_MACOS", sys.platform == "darwin")):
-            return "◱  聚焦悬浮窗，主窗口继续保留" if visible else "◱  打开悬浮窗，主窗口继续保留"
-        return "◱  聚焦悬浮窗" if visible else "◱  打开悬浮窗"
+            return "聚焦悬浮窗，主窗口继续保留" if visible else "打开悬浮窗，主窗口继续保留"
+        return "聚焦悬浮窗" if visible else "打开悬浮窗"
 
     def _focus_visible_floating_chat_window(self, *, update_status: bool = True) -> bool:
         win = getattr(self, "_floating_chat_window", None)
@@ -2792,6 +2816,7 @@ def main(agent_dir: str | None = None) -> int:
     qt_theme.set_theme(mode)
     qt_theme.configure_visual_preferences(cfg)
     chat_common.set_md_css(chat_common._build_md_css())
+    qt_theme.apply_tooltip_palette(app)
     app.setStyleSheet(qt_theme.build_qss())
     try:
         win = QtChatWindow(target)

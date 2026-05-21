@@ -35,31 +35,43 @@ LAUNCHER_BOOTSTRAP_DEPENDENCIES = [
 UPSTREAM_DEPENDENCY_SOURCES = [
     {
         "source": "README.md",
-        "evidence": "Method 1: Standard Installation -> pip install streamlit pywebview",
+        "evidence": "Quick Start / Usage -> uv pip install -e \".[ui]\"；desktop 入口 python launch.pyw；Terminal UI 入口 python frontends/tuiapp_v2.py",
     },
     {
-        "source": "README.md",
-        "evidence": "Alternative App Frontends -> python frontends/qtapp.py / streamlit run frontends/stapp2.py",
+        "source": "docs/installation.md",
+        "evidence": "详细安装说明：Python 3.11/3.12；可运行 frontends/GenericAgent.exe；可选 python assets/configure_mykey.py",
     },
     {
-        "source": "README.md",
-        "evidence": "Bot Interface -> wechat / qq / feishu / wecom / dingtalk pip install examples",
+        "source": "docs/installation_zh.md",
+        "evidence": "中文安装说明与 README 保持一致：launch.pyw / tuiapp_v2.py / assets/configure_mykey.py",
+    },
+    {
+        "source": "pyproject.toml",
+        "evidence": "核心依赖含 aiohttp；ui extra 含 streamlit / pywebview / textual",
     },
     {
         "source": "frontends/dcapp.py",
         "evidence": "Discord bot frontend; pip install discord.py",
     },
     {
-        "source": "GETTING_STARTED.md",
-        "evidence": "让 Agent 自己装依赖；若 API 不通可先手动 pip install requests",
+        "source": "frontends/desktop_bridge.py",
+        "evidence": "Web2 / Tauri 桌面桥依赖 aiohttp",
     },
     {
         "source": "frontends/qtapp.py",
         "evidence": "依赖: pip install PySide6；可选: pip install markdown",
     },
     {
-        "source": "frontends/tuiapp.py",
-        "evidence": "Terminal UI; pip install textual",
+        "source": "frontends/tuiapp_v2.py",
+        "evidence": "增强版 Terminal UI；自动补装 rich / textual",
+    },
+    {
+        "source": "frontends/conductor.py",
+        "evidence": "Conductor 子 Agent 编排网页控制台；依赖 fastapi / uvicorn / pydantic",
+    },
+    {
+        "source": "assets/configure_mykey.py",
+        "evidence": "交互式 mykey 配置向导入口",
     },
 ]
 
@@ -123,6 +135,46 @@ UPSTREAM_FRONTEND_DEPENDENCY_GROUPS = [
                 "import": "streamlit",
                 "optional": True,
                 "note": "上游 Streamlit 前端",
+            },
+        ],
+    },
+    {
+        "id": "conductor_frontend",
+        "label": "Conductor 编排台可选",
+        "description": "如果用户要使用上游 frontends/conductor.py，这组依赖需要可用",
+        "required": False,
+        "items": [
+            {
+                "package": "fastapi",
+                "import": "fastapi",
+                "optional": True,
+                "note": "Conductor 本地 HTTP / WebSocket 控制台",
+            },
+            {
+                "package": "uvicorn[standard]",
+                "import": "uvicorn",
+                "optional": True,
+                "note": "Conductor 本地 Web 服务入口",
+            },
+            {
+                "package": "pydantic",
+                "import": "pydantic",
+                "optional": True,
+                "note": "Conductor 请求体模型",
+            },
+        ],
+    },
+    {
+        "id": "desktop_bridge_frontend",
+        "label": "桌面桥前端可选",
+        "description": "如果用户要使用上游 desktop_bridge.py / Tauri 桌面壳，这组依赖需要可用",
+        "required": False,
+        "items": [
+            {
+                "package": "aiohttp>=3.9",
+                "import": "aiohttp",
+                "optional": True,
+                "note": "desktop_bridge.py HTTP + WebSocket bridge",
             },
         ],
     },
@@ -329,11 +381,28 @@ def _extract_string_array_assignments(section_text: str):
 
 
 def _parse_pyproject_text_fallback(pyproject_text: str):
-    project_rows = _extract_string_array_assignments(_extract_section_text(pyproject_text, "project"))
+    project_text = _extract_section_text(pyproject_text, "project")
+    project_rows = _extract_string_array_assignments(project_text)
     optional_rows = _extract_string_array_assignments(_extract_section_text(pyproject_text, "project.optional-dependencies"))
+    requires_python = ""
+    for raw in str(project_text or "").splitlines():
+        clean = _strip_toml_comment(raw).strip()
+        if not clean:
+            continue
+        match = re.match(r"^requires-python\s*=\s*(.+)$", clean)
+        if not match:
+            continue
+        try:
+            parsed = ast.literal_eval(match.group(1).strip())
+        except Exception:
+            parsed = ""
+        requires_python = str(parsed or "").strip()
+        if requires_python:
+            break
     return {
         "project": {
             "dependencies": list(project_rows.get("dependencies") or []),
+            "requires-python": requires_python,
             "optional-dependencies": {key: list(value or []) for key, value in optional_rows.items()},
         }
     }
@@ -374,11 +443,12 @@ def _pyproject_dependency_map(pyproject_doc):
     project = dict((pyproject_doc or {}).get("project") or {})
     dependencies = [str(item or "").strip() for item in (project.get("dependencies") or []) if str(item or "").strip()]
     optional_map = {}
+    requires_python = str(project.get("requires-python") or "").strip()
     for key, value in dict(project.get("optional-dependencies") or {}).items():
         if not isinstance(value, (list, tuple)):
             continue
         optional_map[str(key or "").strip()] = [str(item or "").strip() for item in value if str(item or "").strip()]
-    return dependencies, optional_map
+    return dependencies, optional_map, requires_python
 
 
 def _resolve_frontend_groups(optional_map):
@@ -427,6 +497,7 @@ def resolve_upstream_dependency_manifest(agent_dir=""):
         "pyproject_found": pyproject_found,
         "pyproject_used": False,
         "pyproject_error": "",
+        "requires_python": "",
         "requirements_path": req_path,
         "sync_mode": "fallback",
         "sync_path": "",
@@ -440,7 +511,8 @@ def resolve_upstream_dependency_manifest(agent_dir=""):
     }
     if pyproject_found:
         pyproject_doc, pyproject_error = _load_pyproject_doc(pyproject_path)
-        dependencies, optional_map = _pyproject_dependency_map(pyproject_doc)
+        dependencies, optional_map, requires_python = _pyproject_dependency_map(pyproject_doc)
+        manifest["requires_python"] = requires_python
         if dependencies:
             sync_specs = _dedupe_specs([*dependencies, *(dep.get("package") for dep in LAUNCHER_BOOTSTRAP_DEPENDENCIES)])
             manifest["pyproject_used"] = True

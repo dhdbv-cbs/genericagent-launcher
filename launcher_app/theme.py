@@ -11,8 +11,8 @@ import sys
 from ctypes import byref, c_int
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor
-from PySide6.QtWidgets import QGraphicsDropShadowEffect, QWidget
+from PySide6.QtGui import QColor, QPalette
+from PySide6.QtWidgets import QApplication, QGraphicsDropShadowEffect, QToolTip, QWidget
 
 from launcher_app import core as lz
 
@@ -34,44 +34,44 @@ def _lz_dark(value, fallback: str) -> str:
 
 
 _DARK_PALETTE: dict = {
-    "bg": _lz_dark(lz.COLOR_APP_BG, "#1c1e22"),
-    "panel": _lz_dark(lz.COLOR_PANEL, "#23262c"),
-    "surface": _lz_dark(lz.COLOR_SURFACE, "#1c1e22"),
-    "sidebar_bg": _lz_dark(lz.COLOR_SIDEBAR_BG, "#181a1e"),
-    "card": _lz_dark(lz.COLOR_CARD, "#2a2d33"),
-    "card_hover": _lz_dark(lz.COLOR_CARD_HOVER, "#34383f"),
-    "field_bg": _lz_dark(lz.COLOR_FIELD_BG, "#14161a"),
-    "field_alt": _lz_dark(lz.COLOR_FIELD_ALT, "#262a31"),
-    "border": _lz_dark(lz.COLOR_DIVIDER, "#3a3f47"),
-    "active": _lz_dark(lz.COLOR_ACTIVE, "#2d3544"),
-    "active_hover": _lz_dark(lz.COLOR_ACTIVE_HOVER, "#34405a"),
-    "code_bg": _lz_dark(lz.COLOR_CODE_BG, "#14161a"),
-    "text": _lz_dark(lz.COLOR_TEXT, "#e8ecf2"),
-    "text_soft": _lz_dark(lz.COLOR_TEXT_SOFT, "#cfd4dc"),
-    "muted": _lz_dark(lz.COLOR_MUTED, "#8a8f99"),
-    "code_text": _lz_dark(lz.COLOR_CODE_TEXT, "#dde1e7"),
-    "accent": _lz_dark(lz.COLOR_ACCENT, "#4f8cff"),
-    "accent_hover": _lz_dark(lz.COLOR_ACCENT_HOVER, "#3a75e0"),
-    "danger": _lz_dark(lz.COLOR_DANGER_BG, "#c24848"),
-    "danger_hover": _lz_dark(lz.COLOR_DANGER_BG_HOVER, "#a13a3a"),
-    "danger_text": _lz_dark(lz.COLOR_DANGER_TEXT, "#ea7070"),
+    "bg": "#17181b",
+    "panel": "#1d1f23",
+    "surface": "#1a1c20",
+    "sidebar_bg": "#15171a",
+    "card": "#202329",
+    "card_hover": "#262a31",
+    "field_bg": "#121418",
+    "field_alt": "#1c2027",
+    "border": "#343943",
+    "active": "#252a33",
+    "active_hover": "#2b323d",
+    "code_bg": "#121418",
+    "text": "#e6e8ee",
+    "text_soft": "#c7ccd5",
+    "muted": "#8b919c",
+    "code_text": "#dde2ea",
+    "accent": "#90a2b5",
+    "accent_hover": "#7d90a4",
+    "danger": "#b85f5c",
+    "danger_hover": "#a75250",
+    "danger_text": "#e08a86",
 
-    "layer1": _lz_dark(lz.COLOR_PANEL, "#23262c"),
-    "layer2": _lz_dark(lz.COLOR_CARD, "#2a2d33"),
-    "layer3": _lz_dark(lz.COLOR_CARD_HOVER, "#34383f"),
-    "mica_fallback": _lz_dark(lz.COLOR_APP_BG, "#1c1e22"),
-    "bg_subtle": "#1a1c20",
+    "layer1": "#1d1f23",
+    "layer2": "#23262d",
+    "layer3": "#2b2f37",
+    "mica_fallback": "#17181b",
+    "bg_subtle": "#14161a",
 
-    "stroke_default": "rgba(255,255,255,0.06)",
-    "stroke_hover": "rgba(255,255,255,0.12)",
-    "stroke_focus": _lz_dark(lz.COLOR_ACCENT, "#4f8cff"),
-    "stroke_divider": "rgba(255,255,255,0.05)",
+    "stroke_default": "rgba(255,255,255,0.08)",
+    "stroke_hover": "rgba(255,255,255,0.14)",
+    "stroke_focus": "#90a2b5",
+    "stroke_divider": "rgba(255,255,255,0.06)",
 
-    "accent_pressed": "#2d5db8",
-    "accent_disabled": "rgba(79,140,255,0.35)",
-    "accent_soft_bg": "rgba(79,140,255,0.12)",
-    "accent_soft_bg_hover": "rgba(79,140,255,0.20)",
-    "accent_text": "#7db0ff",
+    "accent_pressed": "#67798c",
+    "accent_disabled": "rgba(144,162,181,0.28)",
+    "accent_soft_bg": "rgba(144,162,181,0.12)",
+    "accent_soft_bg_hover": "rgba(144,162,181,0.18)",
+    "accent_text": "#b2c0cf",
 
     "success": "#6ccf8f",
     "success_soft": "rgba(108,207,143,0.14)",
@@ -84,13 +84,13 @@ _DARK_PALETTE: dict = {
     "shadow_rgba_2": "rgba(0,0,0,0.30)",
     "shadow_rgba_3": "rgba(0,0,0,0.45)",
 
-    "user_row_bg": "rgba(255,255,255,0.03)",
-    "avatar_bg": "rgba(255,255,255,0.04)",
-    "avatar_stroke": "rgba(255,255,255,0.10)",
-    "user_avatar_color": "#c8c8d0",
-    "bot_avatar_color": "#9eb4d0",
+    "user_row_bg": "rgba(255,255,255,0.02)",
+    "avatar_bg": "rgba(255,255,255,0.03)",
+    "avatar_stroke": "rgba(255,255,255,0.08)",
+    "user_avatar_color": "#d1d5dc",
+    "bot_avatar_color": "#a6b6c7",
 
-    "selection_bg": "rgba(79,140,255,0.40)",
+    "selection_bg": "rgba(144,162,181,0.34)",
     "selection_fg": "white",
     "scrollbar_thumb": "rgba(148,163,184,0.28)",
     "scrollbar_thumb_hover": "rgba(148,163,184,0.50)",
@@ -101,44 +101,44 @@ _DARK_PALETTE: dict = {
 
 
 _LIGHT_PALETTE: dict = {
-    "bg": _lz_light(lz.COLOR_APP_BG, "#f3f5f9"),
-    "panel": _lz_light(lz.COLOR_PANEL, "#ffffff"),
-    "surface": _lz_light(lz.COLOR_SURFACE, "#ffffff"),
-    "sidebar_bg": _lz_light(lz.COLOR_SIDEBAR_BG, "#f7f8fb"),
-    "card": _lz_light(lz.COLOR_CARD, "#ffffff"),
-    "card_hover": _lz_light(lz.COLOR_CARD_HOVER, "#f0f3f9"),
-    "field_bg": _lz_light(lz.COLOR_FIELD_BG, "#ffffff"),
-    "field_alt": _lz_light(lz.COLOR_FIELD_ALT, "#f3f5f9"),
-    "border": _lz_light(lz.COLOR_DIVIDER, "#d7deea"),
-    "active": _lz_light(lz.COLOR_ACTIVE, "#dbe7ff"),
-    "active_hover": _lz_light(lz.COLOR_ACTIVE_HOVER, "#cfdcf7"),
-    "code_bg": _lz_light(lz.COLOR_CODE_BG, "#f4f7fb"),
-    "text": _lz_light(lz.COLOR_TEXT, "#1a1f2b"),
-    "text_soft": _lz_light(lz.COLOR_TEXT_SOFT, "#3f4957"),
-    "muted": _lz_light(lz.COLOR_MUTED, "#6b7280"),
-    "code_text": _lz_light(lz.COLOR_CODE_TEXT, "#253041"),
-    "accent": _lz_light(lz.COLOR_ACCENT, "#4f8cff"),
-    "accent_hover": _lz_light(lz.COLOR_ACCENT_HOVER, "#3a75e0"),
-    "danger": _lz_light(lz.COLOR_DANGER_BG, "#dc6666"),
-    "danger_hover": _lz_light(lz.COLOR_DANGER_BG_HOVER, "#c85757"),
-    "danger_text": _lz_light(lz.COLOR_DANGER_TEXT, "#b94a4a"),
+    "bg": "#f4f2ee",
+    "panel": "#fcfbf8",
+    "surface": "#fbfaf7",
+    "sidebar_bg": "#efede8",
+    "card": "#fcfbf8",
+    "card_hover": "#f2efe9",
+    "field_bg": "#ffffff",
+    "field_alt": "#f1eeea",
+    "border": "#d8d2c9",
+    "active": "#ebe6de",
+    "active_hover": "#e2ddd5",
+    "code_bg": "#f5f2ed",
+    "text": "#20242b",
+    "text_soft": "#4e5561",
+    "muted": "#757b85",
+    "code_text": "#2d3440",
+    "accent": "#5f7288",
+    "accent_hover": "#536479",
+    "danger": "#c96b67",
+    "danger_hover": "#b55d5a",
+    "danger_text": "#9f4d49",
 
-    "layer1": "#ffffff",
-    "layer2": "#f6f8fc",
-    "layer3": "#eef1f7",
-    "mica_fallback": "#f3f5f9",
-    "bg_subtle": "#ecf0f6",
+    "layer1": "#fcfbf8",
+    "layer2": "#f3f0eb",
+    "layer3": "#ece8e1",
+    "mica_fallback": "#f4f2ee",
+    "bg_subtle": "#ece8e1",
 
-    "stroke_default": "rgba(0,0,0,0.06)",
-    "stroke_hover": "rgba(0,0,0,0.12)",
-    "stroke_focus": _lz_light(lz.COLOR_ACCENT, "#4f8cff"),
-    "stroke_divider": "rgba(0,0,0,0.06)",
+    "stroke_default": "rgba(36,41,47,0.08)",
+    "stroke_hover": "rgba(36,41,47,0.14)",
+    "stroke_focus": "#5f7288",
+    "stroke_divider": "rgba(36,41,47,0.08)",
 
-    "accent_pressed": "#2d5db8",
-    "accent_disabled": "rgba(79,140,255,0.35)",
-    "accent_soft_bg": "rgba(79,140,255,0.10)",
-    "accent_soft_bg_hover": "rgba(79,140,255,0.18)",
-    "accent_text": "#1e4ea8",
+    "accent_pressed": "#46576a",
+    "accent_disabled": "rgba(95,114,136,0.30)",
+    "accent_soft_bg": "rgba(95,114,136,0.10)",
+    "accent_soft_bg_hover": "rgba(95,114,136,0.16)",
+    "accent_text": "#516273",
 
     "success": "#3ea35f",
     "success_soft": "rgba(62,163,95,0.14)",
@@ -152,12 +152,12 @@ _LIGHT_PALETTE: dict = {
     "shadow_rgba_3": "rgba(15,23,42,0.22)",
 
     "user_row_bg": "rgba(15,23,42,0.035)",
-    "avatar_bg": "rgba(15,23,42,0.04)",
-    "avatar_stroke": "rgba(15,23,42,0.10)",
+    "avatar_bg": "rgba(15,23,42,0.035)",
+    "avatar_stroke": "rgba(15,23,42,0.08)",
     "user_avatar_color": "#4f5766",
-    "bot_avatar_color": "#2d5db8",
+    "bot_avatar_color": "#617487",
 
-    "selection_bg": "rgba(79,140,255,0.25)",
+    "selection_bg": "rgba(95,114,136,0.22)",
     "selection_fg": "#1a1f2b",
     "scrollbar_thumb": "rgba(15,23,42,0.18)",
     "scrollbar_thumb_hover": "rgba(15,23,42,0.32)",
@@ -169,6 +169,209 @@ _LIGHT_PALETTE: dict = {
 
 C: dict = {}
 C.update(_LIGHT_PALETTE)
+
+
+DEFAULT_THEME_VISUAL_PRESET = "graphite"
+_FALLBACK_THEME_VISUAL_PRESET = "paper"
+
+_VISUAL_PRESET_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("graphite", "石墨"),
+    ("paper", "静纸"),
+    ("mist", "雾钛"),
+)
+
+_LEGACY_BG_PRESET_TO_VISUAL: dict[str, str] = {
+    "default": DEFAULT_THEME_VISUAL_PRESET,
+    "warm": _FALLBACK_THEME_VISUAL_PRESET,
+    "mist": "mist",
+    "graphite": "graphite",
+}
+
+_MIST_LIGHT_PALETTE: dict = {
+    "bg": "#eef2f6",
+    "panel": "#f8fafc",
+    "surface": "#f6f8fb",
+    "sidebar_bg": "#e8edf3",
+    "card": "#fafbfd",
+    "card_hover": "#eff3f7",
+    "field_bg": "#ffffff",
+    "field_alt": "#edf2f7",
+    "border": "#d3dae4",
+    "active": "#dfe7f0",
+    "active_hover": "#d6dee8",
+    "code_bg": "#eef3f8",
+    "text": "#1e2631",
+    "text_soft": "#4b5968",
+    "muted": "#718092",
+    "code_text": "#2a3747",
+    "accent": "#607a92",
+    "accent_hover": "#536b80",
+    "layer1": "#f8fafc",
+    "layer2": "#eef3f7",
+    "layer3": "#e6ebf1",
+    "mica_fallback": "#eef2f6",
+    "bg_subtle": "#e6ebf1",
+    "stroke_default": "rgba(30,38,49,0.08)",
+    "stroke_hover": "rgba(30,38,49,0.14)",
+    "stroke_focus": "#607a92",
+    "stroke_divider": "rgba(30,38,49,0.08)",
+    "accent_pressed": "#475b6d",
+    "accent_disabled": "rgba(96,122,146,0.30)",
+    "accent_soft_bg": "rgba(96,122,146,0.11)",
+    "accent_soft_bg_hover": "rgba(96,122,146,0.17)",
+    "accent_text": "#4b6277",
+    "user_row_bg": "rgba(20,32,48,0.032)",
+    "avatar_bg": "rgba(20,32,48,0.036)",
+    "avatar_stroke": "rgba(20,32,48,0.08)",
+    "user_avatar_color": "#4f5d6c",
+    "bot_avatar_color": "#647d95",
+    "selection_bg": "rgba(96,122,146,0.21)",
+    "selection_fg": "#17202b",
+    "scrollbar_thumb": "rgba(30,38,49,0.16)",
+    "scrollbar_thumb_hover": "rgba(30,38,49,0.28)",
+    "scrollbar_thumb_pressed": "rgba(30,38,49,0.42)",
+}
+
+_MIST_DARK_PALETTE: dict = {
+    "bg": "#161a21",
+    "panel": "#1b2028",
+    "surface": "#181d25",
+    "sidebar_bg": "#14181f",
+    "card": "#202631",
+    "card_hover": "#262d39",
+    "field_bg": "#12161d",
+    "field_alt": "#1b2330",
+    "border": "#36404d",
+    "active": "#24303d",
+    "active_hover": "#2a3644",
+    "code_bg": "#121821",
+    "text": "#e6ebf2",
+    "text_soft": "#c3ccd8",
+    "muted": "#8d97a5",
+    "code_text": "#dce5ef",
+    "accent": "#8ca3bb",
+    "accent_hover": "#7d93aa",
+    "layer1": "#1b2028",
+    "layer2": "#222935",
+    "layer3": "#29313e",
+    "mica_fallback": "#161a21",
+    "bg_subtle": "#141922",
+    "stroke_default": "rgba(255,255,255,0.08)",
+    "stroke_hover": "rgba(255,255,255,0.15)",
+    "stroke_focus": "#8ca3bb",
+    "stroke_divider": "rgba(255,255,255,0.07)",
+    "accent_pressed": "#687d92",
+    "accent_disabled": "rgba(140,163,187,0.30)",
+    "accent_soft_bg": "rgba(140,163,187,0.14)",
+    "accent_soft_bg_hover": "rgba(140,163,187,0.20)",
+    "accent_text": "#aec0d2",
+    "user_row_bg": "rgba(255,255,255,0.025)",
+    "avatar_bg": "rgba(255,255,255,0.030)",
+    "avatar_stroke": "rgba(255,255,255,0.08)",
+    "user_avatar_color": "#d0d7e0",
+    "bot_avatar_color": "#a6bbd0",
+    "selection_bg": "rgba(140,163,187,0.34)",
+    "selection_fg": "#ffffff",
+    "scrollbar_thumb": "rgba(140,163,187,0.28)",
+    "scrollbar_thumb_hover": "rgba(140,163,187,0.44)",
+    "scrollbar_thumb_pressed": "rgba(140,163,187,0.62)",
+}
+
+_GRAPHITE_LIGHT_PALETTE: dict = {
+    "bg": "#eceff2",
+    "panel": "#f7f8fa",
+    "surface": "#f5f6f8",
+    "sidebar_bg": "#e3e6ea",
+    "card": "#fafbfc",
+    "card_hover": "#edf0f3",
+    "field_bg": "#ffffff",
+    "field_alt": "#eceff3",
+    "border": "#ccd2d9",
+    "active": "#dde1e7",
+    "active_hover": "#d3d8df",
+    "code_bg": "#edf0f4",
+    "text": "#1d232b",
+    "text_soft": "#4b5562",
+    "muted": "#727b87",
+    "code_text": "#2b333e",
+    "accent": "#5b6877",
+    "accent_hover": "#505c6b",
+    "layer1": "#f7f8fa",
+    "layer2": "#edf0f3",
+    "layer3": "#e6eaee",
+    "mica_fallback": "#eceff2",
+    "bg_subtle": "#e6eaee",
+    "stroke_default": "rgba(29,35,43,0.08)",
+    "stroke_hover": "rgba(29,35,43,0.14)",
+    "stroke_focus": "#5b6877",
+    "stroke_divider": "rgba(29,35,43,0.08)",
+    "accent_pressed": "#444f5c",
+    "accent_disabled": "rgba(91,104,119,0.30)",
+    "accent_soft_bg": "rgba(91,104,119,0.10)",
+    "accent_soft_bg_hover": "rgba(91,104,119,0.16)",
+    "accent_text": "#495563",
+    "user_row_bg": "rgba(15,23,42,0.030)",
+    "avatar_bg": "rgba(15,23,42,0.032)",
+    "avatar_stroke": "rgba(15,23,42,0.08)",
+    "user_avatar_color": "#4d5561",
+    "bot_avatar_color": "#647180",
+    "selection_bg": "rgba(91,104,119,0.20)",
+    "selection_fg": "#161c24",
+    "scrollbar_thumb": "rgba(29,35,43,0.18)",
+    "scrollbar_thumb_hover": "rgba(29,35,43,0.30)",
+    "scrollbar_thumb_pressed": "rgba(29,35,43,0.46)",
+}
+
+_GRAPHITE_DARK_PALETTE: dict = {
+    "bg": "#121418",
+    "panel": "#171a1f",
+    "surface": "#15181d",
+    "sidebar_bg": "#0f1216",
+    "card": "#1b1f24",
+    "card_hover": "#22272d",
+    "field_bg": "#0d1014",
+    "field_alt": "#171c23",
+    "border": "#313840",
+    "active": "#20252d",
+    "active_hover": "#272d36",
+    "code_bg": "#0f1318",
+    "text": "#e5e8ec",
+    "text_soft": "#c4cad3",
+    "muted": "#87909b",
+    "code_text": "#d9dee6",
+    "accent": "#8f9cab",
+    "accent_hover": "#7f8b99",
+    "layer1": "#171a1f",
+    "layer2": "#1d2127",
+    "layer3": "#252a31",
+    "mica_fallback": "#121418",
+    "bg_subtle": "#101317",
+    "stroke_default": "rgba(255,255,255,0.08)",
+    "stroke_hover": "rgba(255,255,255,0.14)",
+    "stroke_focus": "#8f9cab",
+    "stroke_divider": "rgba(255,255,255,0.06)",
+    "accent_pressed": "#697481",
+    "accent_disabled": "rgba(143,156,171,0.28)",
+    "accent_soft_bg": "rgba(143,156,171,0.12)",
+    "accent_soft_bg_hover": "rgba(143,156,171,0.18)",
+    "accent_text": "#b0bcc8",
+    "user_row_bg": "rgba(255,255,255,0.020)",
+    "avatar_bg": "rgba(255,255,255,0.028)",
+    "avatar_stroke": "rgba(255,255,255,0.08)",
+    "user_avatar_color": "#cfd4dc",
+    "bot_avatar_color": "#aab6c3",
+    "selection_bg": "rgba(143,156,171,0.32)",
+    "selection_fg": "#ffffff",
+    "scrollbar_thumb": "rgba(143,156,171,0.26)",
+    "scrollbar_thumb_hover": "rgba(143,156,171,0.42)",
+    "scrollbar_thumb_pressed": "rgba(143,156,171,0.60)",
+}
+
+_VISUAL_PRESETS: dict[str, dict[str, dict]] = {
+    "paper": {"light": {}, "dark": {}},
+    "mist": {"light": _MIST_LIGHT_PALETTE, "dark": _MIST_DARK_PALETTE},
+    "graphite": {"light": _GRAPHITE_LIGHT_PALETTE, "dark": _GRAPHITE_DARK_PALETTE},
+}
 
 
 def _default_ui_font_family(platform_name: str | None = None) -> str:
@@ -250,10 +453,10 @@ F: dict = {
     "font_display": 28,
 
     "radius_xs": 4,
-    "radius_sm": 6,
-    "radius_md": 8,
-    "radius_lg": 12,
-    "radius_xl": 16,
+    "radius_sm": 8,
+    "radius_md": 10,
+    "radius_lg": 14,
+    "radius_xl": 18,
 
     "spacing_xs": 4,
     "spacing_sm": 8,
@@ -261,8 +464,8 @@ F: dict = {
     "spacing_lg": 16,
     "spacing_xl": 24,
 
-    "button_h": 32,
-    "input_h": 32,
+    "button_h": 34,
+    "input_h": 34,
     "topbar_h": 56,
 }
 
@@ -284,18 +487,12 @@ _VISUAL_PREFS: dict = {
     "font_weight": 400,
     "font_size": 14,
     "bg_blur": 18,
+    "visual_preset": DEFAULT_THEME_VISUAL_PRESET,
     "bg_preset": "default",
     "bg_color": "",
     "bg_image": "",
     "bg_image_mode": "center",
     "use_bg_image": False,
-}
-
-_BACKGROUND_PRESETS: dict = {
-    "default": {"light": "", "dark": ""},
-    "mist": {"light": "#eef4ff", "dark": "#1c2636"},
-    "warm": {"light": "#f9f1e7", "dark": "#2a2219"},
-    "graphite": {"light": "#edf1f7", "dark": "#171d28"},
 }
 
 
@@ -330,10 +527,30 @@ def _normalize_font_size(value) -> int:
     return max(11, min(24, parsed))
 
 
-def _normalize_bg_preset(value) -> str:
+def theme_visual_preset_options() -> tuple[tuple[str, str], ...]:
+    return _VISUAL_PRESET_OPTIONS
+
+
+def normalize_theme_visual_preset(value) -> str:
     raw = str(value or "").strip().lower()
-    if raw in ("default", "mist", "warm", "graphite", "image"):
+    if raw in {item[0] for item in _VISUAL_PRESET_OPTIONS}:
         return raw
+    return DEFAULT_THEME_VISUAL_PRESET
+
+
+def resolve_theme_visual_preset(cfg: dict | None) -> str:
+    data = cfg if isinstance(cfg, dict) else {}
+    raw = str(data.get("theme_visual_preset") or "").strip()
+    if raw:
+        return normalize_theme_visual_preset(raw)
+    legacy_raw = str(data.get("theme_bg_preset") or "").strip().lower()
+    return _LEGACY_BG_PRESET_TO_VISUAL.get(legacy_raw, DEFAULT_THEME_VISUAL_PRESET)
+
+
+def normalize_theme_background_mode(value) -> str:
+    raw = str(value or "").strip().lower()
+    if raw == "image":
+        return "image"
     return "default"
 
 
@@ -362,12 +579,19 @@ def _format_font_family(value: str) -> str:
     return f'"{escaped}", {F["font_family"]}'
 
 
-def _background_color_for_preset(preset: str) -> str:
-    preset_map = _BACKGROUND_PRESETS.get(preset) or {}
+def _visual_palette_for_preset(preset: str) -> dict:
+    preset_map = _VISUAL_PRESETS.get(normalize_theme_visual_preset(preset)) or {}
     mode = current_mode()
-    if mode == "light":
-        return str(preset_map.get("light") or C["bg"])
-    return str(preset_map.get("dark") or C["bg"])
+    palette = preset_map.get(mode) or {}
+    return dict(palette)
+
+
+def _apply_visual_preset(preset: str) -> str:
+    normalized = normalize_theme_visual_preset(preset)
+    overlay = _visual_palette_for_preset(normalized)
+    if overlay:
+        C.update(overlay)
+    return normalized
 
 
 def configure_visual_preferences(cfg: dict | None) -> None:
@@ -376,18 +600,21 @@ def configure_visual_preferences(cfg: dict | None) -> None:
     font_weight = _normalize_font_weight(data.get("theme_font_weight"))
     font_size = _normalize_font_size(data.get("theme_font_size"))
     bg_blur = _normalize_bg_blur(data.get("theme_bg_fade", data.get("theme_bg_blur")))
-    bg_preset = _normalize_bg_preset(data.get("theme_bg_preset"))
+    visual_preset = resolve_theme_visual_preset(data)
+    bg_preset = normalize_theme_background_mode(data.get("theme_bg_preset"))
     bg_image_mode = _normalize_bg_image_mode(data.get("theme_bg_image_mode"))
     raw_image = str(data.get("theme_bg_image") or "").strip()
     resolved_image = lz._resolve_config_path(raw_image) if raw_image else ""
     has_image = bool(resolved_image and os.path.isfile(resolved_image))
+    visual_preset = _apply_visual_preset(visual_preset)
     use_bg_image = bool(bg_preset == "image" and has_image)
-    bg_color = _background_color_for_preset(bg_preset if bg_preset != "image" else "default")
+    bg_color = str(C.get("bg") or "")
 
     _VISUAL_PREFS["font_family"] = font_family
     _VISUAL_PREFS["font_weight"] = font_weight
     _VISUAL_PREFS["font_size"] = font_size
     _VISUAL_PREFS["bg_blur"] = bg_blur
+    _VISUAL_PREFS["visual_preset"] = visual_preset
     _VISUAL_PREFS["bg_preset"] = bg_preset
     _VISUAL_PREFS["bg_color"] = bg_color
     _VISUAL_PREFS["bg_image"] = resolved_image
@@ -411,6 +638,42 @@ def chat_surface_background() -> str:
     if has_background_image():
         return "transparent"
     return app_surface_background()
+
+
+def build_tooltip_palette() -> QPalette:
+    bg = QColor(str(C.get("layer2") or C.get("field_bg") or "#ffffff"))
+    text = QColor(str(C.get("text") or "#111111"))
+    pal = QPalette(QToolTip.palette())
+    for group in (QPalette.Active, QPalette.Inactive, QPalette.Disabled):
+        pal.setColor(group, QPalette.ToolTipBase, bg)
+        pal.setColor(group, QPalette.ToolTipText, text)
+        # Some Windows/Qt paths still consult generic window/text roles for tooltips.
+        pal.setColor(group, QPalette.Window, bg)
+        pal.setColor(group, QPalette.WindowText, text)
+        pal.setColor(group, QPalette.Base, bg)
+        pal.setColor(group, QPalette.Text, text)
+        pal.setColor(group, QPalette.ButtonText, text)
+        pal.setColor(group, QPalette.HighlightedText, text)
+    return pal
+
+
+def apply_tooltip_palette(app: QApplication | None = None) -> QPalette:
+    pal = build_tooltip_palette()
+    try:
+        QToolTip.setPalette(pal)
+    except Exception:
+        pass
+    inst = app if app is not None else QApplication.instance()
+    if inst is not None:
+        try:
+            app_pal = QPalette(inst.palette())
+            for group in (QPalette.Active, QPalette.Inactive, QPalette.Disabled):
+                app_pal.setColor(group, QPalette.ToolTipBase, pal.color(group, QPalette.ToolTipBase))
+                app_pal.setColor(group, QPalette.ToolTipText, pal.color(group, QPalette.ToolTipText))
+            inst.setPalette(app_pal)
+        except Exception:
+            pass
+    return pal
 
 
 def _alpha_color(color_text: str, alpha: int) -> str:
@@ -545,16 +808,16 @@ def build_qss() -> str:
         background: {layer2};
         color: {text};
         border: 1px solid {stroke_hover};
-        border-radius: 4px;
-        padding: 4px 8px;
+        border-radius: 8px;
+        padding: 5px 9px;
     }}
 
     QPushButton {{
-        background: {layer2};
+        background: {field_bg};
         color: {text};
         border: 1px solid {stroke};
         border-radius: {r_md}px;
-        padding: 6px 14px;
+        padding: 7px 14px;
         font-size: {fs}px;
     }}
     QPushButton:hover {{
@@ -631,20 +894,19 @@ def build_qss() -> str:
     QListWidget::item {{
         background: transparent;
         border: 1px solid transparent;
-        border-left: 2px solid transparent;
         border-radius: {r_md}px;
-        padding: 9px 12px 9px 10px;
+        padding: 9px 12px;
         margin: 2px 6px;
         color: {text_soft};
     }}
     QListWidget::item:hover {{
-        background: {accent_soft};
+        background: {layer2};
         color: {text};
     }}
     QListWidget::item:selected {{
-        background: {accent_soft_hover};
+        background: {accent_soft};
         color: {text};
-        border-left: 2px solid {accent};
+        border: 1px solid {stroke_hover};
     }}
 
     QCheckBox {{ color: {text}; spacing: 8px; }}
@@ -753,7 +1015,7 @@ def build_qss() -> str:
     }}
     QFrame#chatComposer {{
         background: {layer1};
-        border: none;
+        border: 1px solid {stroke};
         border-radius: {r_lg}px;
     }}
     QFrame#panelCard {{
@@ -789,8 +1051,8 @@ def build_qss() -> str:
         border: none;
     }}
     QFrame#recentCard, QFrame#statusCard {{
-        background: {accent_soft};
-        border: none;
+        background: {layer2};
+        border: 1px solid {stroke};
         border-radius: {r_lg}px;
     }}
     QFrame#turnFold {{
@@ -819,7 +1081,7 @@ def build_qss() -> str:
     }}
     QFrame#optionCard:hover {{
         background: {layer2};
-        border-color: {accent};
+        border-color: {stroke_hover};
     }}
     QFrame#userBubble {{
         background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
@@ -929,21 +1191,20 @@ def build_qss() -> str:
         background: transparent;
     }}
     QLabel#optionIcon {{
-        font-size: 26px;
-        background: transparent;
+        background: {layer2};
+        border: 1px solid {stroke};
+        border-radius: 12px;
+        padding: 6px;
     }}
     QLabel#optionArrow {{
-        color: {muted};
-        font-size: 22px;
-        font-weight: 600;
+        color: {text_soft};
         background: transparent;
     }}
     QLabel#sidebarLogo {{
-        background: {accent_soft};
+        background: {field_bg};
         color: {C['accent_text']};
-        border-radius: 10px;
-        font-size: 22px;
-        font-weight: 600;
+        border: 1px solid {stroke};
+        border-radius: 12px;
     }}
     QWidget#userMsgRow {{
         background: {C['user_row_bg']};
@@ -955,6 +1216,10 @@ def build_qss() -> str:
         background: {C['avatar_bg']};
         border: 1px solid {C['avatar_stroke']};
         border-radius: 15px;
+    }}
+    QLabel#msgAvatar[avatarVariant="custom"] {{
+        background: transparent;
+        border: 1px solid transparent;
     }}
     QLabel#msgRoleLabel {{
         color: {text_soft};
@@ -1051,8 +1316,20 @@ FLUENT_QSS: str = build_qss()
 
 
 _DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+_DWMWA_BORDER_COLOR = 34
+_DWMWA_CAPTION_COLOR = 35
+_DWMWA_TEXT_COLOR = 36
 _DWMWA_SYSTEMBACKDROP_TYPE = 38
 _DWMSBT_MAINWINDOW = 2
+
+
+def _to_win_colorref(color_text: str, fallback: str) -> int | None:
+    color = QColor(str(color_text or fallback or ""))
+    if not color.isValid():
+        color = QColor(str(fallback or ""))
+    if not color.isValid():
+        return None
+    return int(color.red()) | (int(color.green()) << 8) | (int(color.blue()) << 16)
 
 
 def apply_mica(window: QWidget, *, dark: bool | None = None) -> bool:
@@ -1063,21 +1340,64 @@ def apply_mica(window: QWidget, *, dark: bool | None = None) -> bool:
     try:
         hwnd = int(window.winId())
         dwm = ctypes.windll.dwmapi
+        success = True
         dark_val = c_int(1 if dark else 0)
-        dwm.DwmSetWindowAttribute(
-            hwnd,
-            _DWMWA_USE_IMMERSIVE_DARK_MODE,
-            byref(dark_val),
-            ctypes.sizeof(dark_val),
-        )
+        success = (
+            dwm.DwmSetWindowAttribute(
+                hwnd,
+                _DWMWA_USE_IMMERSIVE_DARK_MODE,
+                byref(dark_val),
+                ctypes.sizeof(dark_val),
+            )
+            == 0
+        ) and success
+        caption_color = _to_win_colorref(str(C.get("panel") or C.get("bg") or ""), str(C.get("bg") or "#ffffff"))
+        if caption_color is not None:
+            caption_val = c_int(caption_color)
+            success = (
+                dwm.DwmSetWindowAttribute(
+                    hwnd,
+                    _DWMWA_CAPTION_COLOR,
+                    byref(caption_val),
+                    ctypes.sizeof(caption_val),
+                )
+                == 0
+            ) and success
+        text_color = _to_win_colorref(str(C.get("text") or ""), "#111111" if not dark else "#f5f5f5")
+        if text_color is not None:
+            text_val = c_int(text_color)
+            success = (
+                dwm.DwmSetWindowAttribute(
+                    hwnd,
+                    _DWMWA_TEXT_COLOR,
+                    byref(text_val),
+                    ctypes.sizeof(text_val),
+                )
+                == 0
+            ) and success
+        border_color = _to_win_colorref(str(C.get("border") or C.get("panel") or ""), str(C.get("panel") or "#ffffff"))
+        if border_color is not None:
+            border_val = c_int(border_color)
+            success = (
+                dwm.DwmSetWindowAttribute(
+                    hwnd,
+                    _DWMWA_BORDER_COLOR,
+                    byref(border_val),
+                    ctypes.sizeof(border_val),
+                )
+                == 0
+            ) and success
         backdrop_val = c_int(_DWMSBT_MAINWINDOW)
-        res = dwm.DwmSetWindowAttribute(
-            hwnd,
-            _DWMWA_SYSTEMBACKDROP_TYPE,
-            byref(backdrop_val),
-            ctypes.sizeof(backdrop_val),
-        )
-        return res == 0
+        success = (
+            dwm.DwmSetWindowAttribute(
+                hwnd,
+                _DWMWA_SYSTEMBACKDROP_TYPE,
+                byref(backdrop_val),
+                ctypes.sizeof(backdrop_val),
+            )
+            == 0
+        ) and success
+        return success
     except Exception:
         return False
 

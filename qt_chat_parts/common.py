@@ -6,7 +6,7 @@ import os
 import re
 
 from PySide6.QtCore import QByteArray, QPoint, QSize, QTimer, Qt
-from PySide6.QtGui import QCursor, QIcon, QImage, QKeyEvent, QPainter, QPixmap, QTextCursor
+from PySide6.QtGui import QCursor, QIcon, QImage, QKeyEvent, QPainter, QPainterPath, QPixmap, QTextCursor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -38,8 +38,32 @@ _SVG_SEND = '<svg viewBox="0 0 24 24" fill="none" stroke="{c}" stroke-width="2" 
 _SVG_STOP = '<svg viewBox="0 0 24 24" fill="{c}" stroke="none"><rect width="10" height="10" x="7" y="7" rx="1.5" ry="1.5"/></svg>'
 _SVG_INFO = '<svg viewBox="0 0 24 24" fill="none" stroke="{c}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>'
 _SVG_CHEVRON_DOWN = '<svg viewBox="0 0 24 24" fill="none" stroke="{c}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>'
+_SVG_CHEVRON_LEFT = '<svg viewBox="0 0 24 24" fill="none" stroke="{c}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>'
+_SVG_CHEVRON_RIGHT = '<svg viewBox="0 0 24 24" fill="none" stroke="{c}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>'
+_SVG_SETTINGS = '<svg viewBox="0 0 24 24" fill="none" stroke="{c}" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><line x1="4" x2="20" y1="6" y2="6"/><line x1="4" x2="20" y1="12" y2="12"/><line x1="4" x2="20" y1="18" y2="18"/><circle cx="9" cy="6" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="11" cy="18" r="2"/></svg>'
+_SVG_SEARCH = '<svg viewBox="0 0 24 24" fill="none" stroke="{c}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>'
+_SVG_FOLDER = '<svg viewBox="0 0 24 24" fill="none" stroke="{c}" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7.5A2.5 2.5 0 0 1 5.5 5H10l2 2h6.5A2.5 2.5 0 0 1 21 9.5v7A2.5 2.5 0 0 1 18.5 19h-13A2.5 2.5 0 0 1 3 16.5z"/></svg>'
+_SVG_DOWNLOAD = '<svg viewBox="0 0 24 24" fill="none" stroke="{c}" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v10"/><path d="m8 10 4 4 4-4"/><path d="M5 19h14"/></svg>'
+_SVG_HOME = '<svg viewBox="0 0 24 24" fill="none" stroke="{c}" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="m3 10 9-7 9 7"/><path d="M5 9.5V20h14V9.5"/></svg>'
+_SVG_WINDOW = '<svg viewBox="0 0 24 24" fill="none" stroke="{c}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="M3 9h18"/><path d="M7 7h.01"/><path d="M10 7h.01"/></svg>'
+_SVG_SUN = '<svg viewBox="0 0 24 24" fill="none" stroke="{c}" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2.5"/><path d="M12 19.5V22"/><path d="m4.93 4.93 1.77 1.77"/><path d="m17.3 17.3 1.77 1.77"/><path d="M2 12h2.5"/><path d="M19.5 12H22"/><path d="m4.93 19.07 1.77-1.77"/><path d="m17.3 6.7 1.77-1.77"/></svg>'
+_SVG_MOON = '<svg viewBox="0 0 24 24" fill="none" stroke="{c}" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A8.8 8.8 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/></svg>'
+_SVG_WRENCH = '<svg viewBox="0 0 24 24" fill="none" stroke="{c}" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 5.5a4 4 0 0 0 4.9 4.9l-8.8 8.8a2 2 0 0 1-2.8-2.8l8.8-8.8a4 4 0 0 0-2.1-7.1Z"/></svg>'
+_SVG_SPARKLE = '<svg viewBox="0 0 24 24" fill="none" stroke="{c}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3 1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8Z"/><path d="M19 3v4"/><path d="M21 5h-4"/></svg>'
+_SVG_PLAY = '<svg viewBox="0 0 24 24" fill="{c}" stroke="none"><path d="M8 5.5v13l10-6.5Z"/></svg>'
+_SVG_PAUSE = '<svg viewBox="0 0 24 24" fill="{c}" stroke="none"><rect x="7" y="5" width="4" height="14" rx="1.5"/><rect x="13" y="5" width="4" height="14" rx="1.5"/></svg>'
+_SVG_CLOSE = '<svg viewBox="0 0 24 24" fill="none" stroke="{c}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 6 12 12"/><path d="M18 6 6 18"/></svg>'
+_SVG_KEY = '<svg viewBox="0 0 24 24" fill="none" stroke="{c}" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="8.5" cy="15.5" r="4.5"/><path d="M12 12 21 3"/><path d="M17 7h4v4"/></svg>'
+_SVG_MESSAGE = '<svg viewBox="0 0 24 24" fill="none" stroke="{c}" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v7A2.5 2.5 0 0 1 17.5 16H10l-4.5 4v-4H6.5A2.5 2.5 0 0 1 4 13.5z"/></svg>'
+_SVG_SERVER = '<svg viewBox="0 0 24 24" fill="none" stroke="{c}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="6" rx="2"/><rect x="4" y="14" width="16" height="6" rx="2"/><path d="M8 7h.01"/><path d="M8 17h.01"/><path d="M12 7h5"/><path d="M12 17h5"/></svg>'
+_SVG_CLOCK = '<svg viewBox="0 0 24 24" fill="none" stroke="{c}" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>'
+_SVG_PUZZLE = '<svg viewBox="0 0 24 24" fill="none" stroke="{c}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4h3a2 2 0 1 1 4 0h3v5a2 2 0 1 0 0 4v5h-5a2 2 0 1 1-4 0H5v-5a2 2 0 1 0 0-4V4h4"/></svg>'
+_SVG_SWATCH = '<svg viewBox="0 0 24 24" fill="none" stroke="{c}" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 4 7v10l8 4 8-4V7Z"/><path d="m4 7 8 4 8-4"/><path d="M12 11v10"/></svg>'
+_SVG_RECEIPT = '<svg viewBox="0 0 24 24" fill="none" stroke="{c}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h12v18l-2.5-1.5L13 21l-2.5-1.5L8 21 6 19.5z"/><path d="M9 8h6"/><path d="M9 12h6"/><path d="M9 16h4"/></svg>'
+_SVG_DOT = '<svg viewBox="0 0 24 24" fill="{c}" stroke="none"><circle cx="12" cy="12" r="5"/></svg>'
 
 _ICON_CACHE: dict[str, QIcon] = {}
+_AVATAR_PIXMAP_CACHE: dict[str, QPixmap] = {}
 _MD_CSS = ""
 _HTML_STYLE_ATTR_RE = re.compile(r"\s(?:style|bgcolor|color|face|size)\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s>]+)", re.IGNORECASE)
 _HTML_FONT_OPEN_RE = re.compile(r"<\s*font\b[^>]*>", re.IGNORECASE)
@@ -614,11 +638,12 @@ def _md_to_html(text: str) -> str:
 
 
 def _svg_icon(key: str, svg_template: str, color: str = "#94a3b8", size: int = 16) -> QIcon:
-    cache_key = f"{key}_{color}_{size}"
+    resolved_color = _svg_resolve_color(color)
+    cache_key = f"{key}_{resolved_color}_{size}"
     if cache_key not in _ICON_CACHE:
         from PySide6.QtSvg import QSvgRenderer
 
-        data = QByteArray(svg_template.format(c=color).encode("utf-8"))
+        data = QByteArray(svg_template.format(c=resolved_color).encode("utf-8"))
         renderer = QSvgRenderer(data)
         pixmap = QPixmap(size, size)
         pixmap.fill(Qt.transparent)
@@ -627,6 +652,164 @@ def _svg_icon(key: str, svg_template: str, color: str = "#94a3b8", size: int = 1
         painter.end()
         _ICON_CACHE[cache_key] = QIcon(pixmap)
     return _ICON_CACHE[cache_key]
+
+
+def _svg_resolve_color(color: str = "#94a3b8") -> str:
+    raw = str(color or "").strip()
+    if raw in C:
+        return str(C.get(raw) or "#94a3b8")
+    return raw or "#94a3b8"
+
+
+def set_button_svg_icon(button: QPushButton, key: str, svg_template: str, *, color: str = "muted", size: int = 16) -> None:
+    if button is None:
+        return
+    px = max(12, int(size or 16))
+    button.setProperty("_ga_svg_target", "button")
+    button.setProperty("_ga_svg_key", str(key or "icon"))
+    button.setProperty("_ga_svg_template", str(svg_template or ""))
+    button.setProperty("_ga_svg_color", str(color or "muted"))
+    button.setProperty("_ga_svg_size", px)
+    button.setIcon(_svg_icon(str(key or "icon"), str(svg_template or ""), color=_svg_resolve_color(color), size=px))
+    button.setIconSize(QSize(px, px))
+
+
+def set_label_svg_icon(label: QLabel, key: str, svg_template: str, *, color: str = "muted", size: int = 16) -> None:
+    if label is None:
+        return
+    px = max(12, int(size or 16))
+    label.setProperty("_ga_svg_target", "label")
+    label.setProperty("_ga_svg_key", str(key or "icon"))
+    label.setProperty("_ga_svg_template", str(svg_template or ""))
+    label.setProperty("_ga_svg_color", str(color or "muted"))
+    label.setProperty("_ga_svg_size", px)
+    icon = _svg_icon(str(key or "icon"), str(svg_template or ""), color=_svg_resolve_color(color), size=px)
+    label.setPixmap(icon.pixmap(px, px))
+
+
+def refresh_svg_icons(root: QWidget | None) -> None:
+    if root is None:
+        return
+    widgets = [root]
+    widgets.extend(root.findChildren(QWidget))
+    for widget in widgets:
+        target = str(widget.property("_ga_svg_target") or "").strip().lower()
+        if target not in ("button", "label"):
+            continue
+        key = str(widget.property("_ga_svg_key") or "icon").strip() or "icon"
+        svg_template = str(widget.property("_ga_svg_template") or "").strip()
+        color = str(widget.property("_ga_svg_color") or "muted").strip() or "muted"
+        try:
+            size = max(12, int(widget.property("_ga_svg_size") or 16))
+        except Exception:
+            size = 16
+        if (not svg_template) or size <= 0:
+            continue
+        if target == "button" and isinstance(widget, QPushButton):
+            widget.setIcon(_svg_icon(key, svg_template, color=_svg_resolve_color(color), size=size))
+            widget.setIconSize(QSize(size, size))
+        elif target == "label" and isinstance(widget, QLabel):
+            widget.setPixmap(_svg_icon(key, svg_template, color=_svg_resolve_color(color), size=size).pixmap(size, size))
+
+
+def _avatar_role_key(role: str) -> str:
+    return "user" if str(role or "").strip().lower() == "user" else "assistant"
+
+
+def _avatar_cfg_value(cfg: dict | None, role: str, key_suffix: str) -> str:
+    data = cfg if isinstance(cfg, dict) else {}
+    prefix = "theme_user_avatar" if _avatar_role_key(role) == "user" else "theme_ai_avatar"
+    return str(data.get(f"{prefix}_{key_suffix}") or "").strip()
+
+
+def _avatar_source_path(cfg: dict | None, role: str) -> str:
+    generated = _avatar_cfg_value(cfg, role, "image")
+    source = _avatar_cfg_value(cfg, role, "source")
+    raw = generated or source
+    if not raw:
+        return ""
+    resolved = lz._resolve_config_path(raw)
+    if not resolved or (not os.path.isfile(resolved)):
+        return ""
+    return resolved
+
+
+def _render_custom_avatar_pixmap(image_path: str, size: int) -> QPixmap | None:
+    path = str(image_path or "").strip()
+    px = max(12, int(size or 30))
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        mtime = os.path.getmtime(path)
+    except Exception:
+        mtime = 0.0
+    cache_key = f"{path}|{mtime}|{px}"
+    cached = _AVATAR_PIXMAP_CACHE.get(cache_key)
+    if cached is not None and not cached.isNull():
+        return QPixmap(cached)
+    image = QImage(path)
+    if image.isNull():
+        return None
+    inner_px = max(4, px - 2)
+    rendered = image.scaled(inner_px, inner_px, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+    if rendered.width() != inner_px or rendered.height() != inner_px:
+        ox = max(0, int((rendered.width() - inner_px) / 2))
+        oy = max(0, int((rendered.height() - inner_px) / 2))
+        rendered = rendered.copy(ox, oy, inner_px, inner_px)
+    pixmap = QPixmap(px, px)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing, True)
+    painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+    clip = QPainterPath()
+    clip.addEllipse(1.0, 1.0, float(inner_px), float(inner_px))
+    painter.setClipPath(clip)
+    painter.drawImage(1, 1, rendered)
+    painter.end()
+    _AVATAR_PIXMAP_CACHE[cache_key] = QPixmap(pixmap)
+    return pixmap
+
+
+def _refresh_widget_style(widget: QWidget | None) -> None:
+    if widget is None:
+        return
+    try:
+        style = widget.style()
+        if style is not None:
+            style.unpolish(widget)
+            style.polish(widget)
+    except Exception:
+        pass
+    widget.update()
+
+
+def _apply_message_avatar(label: QLabel | None, role: str, cfg: dict | None = None, *, size: int = 30) -> None:
+    if label is None:
+        return
+    role_key = _avatar_role_key(role)
+    px = max(12, int(size or 30))
+    label.setProperty("_ga_avatar_role", role_key)
+    label.setProperty("_ga_avatar_size", px)
+    label.clear()
+    label.setPixmap(QPixmap())
+    image_path = _avatar_source_path(cfg, role_key)
+    if image_path:
+        pixmap = _render_custom_avatar_pixmap(image_path, px)
+        if pixmap is not None and (not pixmap.isNull()):
+            label.setProperty("avatarVariant", "custom")
+            _refresh_widget_style(label)
+            label.setPixmap(pixmap)
+            return
+    label.setProperty("avatarVariant", "default")
+    _refresh_widget_style(label)
+    svg_data = _SVG_USER if role_key == "user" else _SVG_BOT
+    avatar_color = C["user_avatar_color"] if role_key == "user" else C["bot_avatar_color"]
+    icon = _svg_icon(f"msg_avatar_{role_key}", svg_data, color=avatar_color, size=px)
+    pixmap = icon.pixmap(px, px)
+    if pixmap is not None and (not pixmap.isNull()):
+        label.setPixmap(pixmap)
+        return
+    label.setText("你" if role_key == "user" else "助")
 
 
 _STREAMING_HEIGHT_GROWTH_STEP_PX = 8
@@ -1076,11 +1259,12 @@ class TurnFold(QFrame):
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(6)
 
-        self._button = QPushButton(f"▸  {self._title}")
+        self._button = QPushButton(self._title)
         self._button.setObjectName("turnFoldHeader")
         self._button.setCursor(QCursor(Qt.PointingHandCursor))
         self._button.clicked.connect(self.toggle)
         layout.addWidget(self._button)
+        self._refresh_button_state()
 
         self._body = QTextBrowser()
         self._body.setReadOnly(True)
@@ -1103,10 +1287,20 @@ class TurnFold(QFrame):
 
     def toggle(self):
         self._expanded = not self._expanded
-        self._button.setText(("▾ " if self._expanded else "▸ ") + self._title)
+        self._refresh_button_state()
         self._body.setVisible(self._expanded)
         if self._expanded:
             _fit_browser_height(self._body)
+
+    def _refresh_button_state(self) -> None:
+        self._button.setText(self._title)
+        set_button_svg_icon(
+            self._button,
+            "turn_fold_open" if self._expanded else "turn_fold_closed",
+            _SVG_CHEVRON_DOWN if self._expanded else _SVG_CHEVRON_RIGHT,
+            color="muted",
+            size=14,
+        )
 
     def set_text(self, text: str):
         self._text = text or ""
@@ -1134,10 +1328,11 @@ class TurnFold(QFrame):
 
 
 class MessageRow(QWidget):
-    def __init__(self, text: str, role: str, parent=None, on_resend=None):
+    def __init__(self, text: str, role: str, parent=None, on_resend=None, avatar_cfg: dict | None = None):
         super().__init__(parent)
         self._text = text or ""
         self._role = role
+        self._avatar_cfg = avatar_cfg if isinstance(avatar_cfg, dict) else {}
         self._finished = True
         self._on_resend = on_resend
         self._stream_prefix_signature = None
@@ -1157,20 +1352,8 @@ class MessageRow(QWidget):
         avatar.setObjectName("msgAvatar")
         avatar.setFixedSize(30, 30)
         avatar.setAlignment(Qt.AlignCenter)
-        svg_data = _SVG_USER if is_user else _SVG_BOT
-        avatar_color = C["user_avatar_color"] if is_user else C["bot_avatar_color"]
-        try:
-            from PySide6.QtSvg import QSvgRenderer
-
-            pm = QPixmap(30, 30)
-            pm.fill(Qt.transparent)
-            renderer = QSvgRenderer(QByteArray(svg_data.replace("{c}", avatar_color).encode("utf-8")))
-            p = QPainter(pm)
-            renderer.render(p)
-            p.end()
-            avatar.setPixmap(pm)
-        except Exception:
-            avatar.setText("👤" if is_user else "🤖")
+        self._avatar_label = avatar
+        self.refresh_avatar()
         outer.addWidget(avatar, 0, Qt.AlignTop)
 
         right = QVBoxLayout()
@@ -1253,6 +1436,9 @@ class MessageRow(QWidget):
 
         outer.addLayout(right, 1)
         self.set_text(self._text)
+
+    def refresh_avatar(self):
+        _apply_message_avatar(getattr(self, "_avatar_label", None), self._role, getattr(self, "_avatar_cfg", None), size=30)
 
     def _copy_text(self):
         try:
@@ -1536,6 +1722,37 @@ class MessageRow(QWidget):
         self._schedule_finished_assistant_refit()
 
 
+def refresh_message_row_avatars(root: QWidget | None) -> None:
+    if root is None:
+        return
+    widgets = []
+    if isinstance(root, MessageRow):
+        widgets.append(root)
+    widgets.extend(root.findChildren(MessageRow))
+    for widget in widgets:
+        try:
+            widget.refresh_avatar()
+        except Exception:
+            pass
+
+
+def build_message_row(text: str, role: str, parent=None, *, on_resend=None, avatar_cfg: dict | None = None, row_cls=None):
+    cls = row_cls or MessageRow
+    try:
+        return cls(text, role, parent, on_resend=on_resend, avatar_cfg=avatar_cfg)
+    except TypeError:
+        row = cls(text, role, parent, on_resend=on_resend)
+        if hasattr(row, "_avatar_cfg") and isinstance(avatar_cfg, dict):
+            try:
+                row._avatar_cfg = avatar_cfg
+                refresher = getattr(row, "refresh_avatar", None)
+                if callable(refresher):
+                    refresher()
+            except Exception:
+                pass
+        return row
+
+
 class OptionCard(QFrame):
     def __init__(self, icon: str, title: str, desc: str, command, parent=None):
         super().__init__(parent)
@@ -1548,11 +1765,21 @@ class OptionCard(QFrame):
         row.setContentsMargins(22, 14, 22, 14)
         row.setSpacing(16)
 
-        icon_lbl = QLabel(icon)
+        icon_lbl = QLabel()
         icon_lbl.setObjectName("optionIcon")
-        icon_lbl.setFixedWidth(34)
+        icon_lbl.setFixedSize(40, 40)
         icon_lbl.setAlignment(Qt.AlignCenter)
         icon_lbl.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        if isinstance(icon, dict):
+            set_label_svg_icon(
+                icon_lbl,
+                str(icon.get("key") or "option_icon"),
+                str(icon.get("svg") or _SVG_WINDOW),
+                color=str(icon.get("color") or "accent_text"),
+                size=int(icon.get("size") or 18),
+            )
+        else:
+            icon_lbl.setText(str(icon or ""))
         row.addWidget(icon_lbl, 0)
 
         text_col = QVBoxLayout()
@@ -1567,9 +1794,12 @@ class OptionCard(QFrame):
         text_col.addWidget(desc_lbl)
         row.addLayout(text_col, 1)
 
-        arrow = QLabel("›")
+        arrow = QLabel()
         arrow.setObjectName("optionArrow")
+        arrow.setFixedSize(18, 18)
+        arrow.setAlignment(Qt.AlignCenter)
         arrow.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        set_label_svg_icon(arrow, "option_arrow", _SVG_CHEVRON_RIGHT, color="muted", size=14)
         row.addWidget(arrow, 0)
 
     def mousePressEvent(self, event):

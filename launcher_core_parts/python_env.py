@@ -19,6 +19,7 @@ from .upstream_dependencies import (
     LAUNCHER_BOOTSTRAP_DEPENDENCIES,
     resolve_upstream_dependency_manifest,
 )
+from .channels import channel_script_path, resolve_channel_script
 
 _AUTO_BOOTSTRAP_PACKAGES = ("requests", "simplejson", "charset-normalizer")
 _DEPENDENCY_STATE_FILE = os.path.join("temp", "launcher_dependency_state.json")
@@ -290,6 +291,69 @@ def _version_meets_minimum(installed_version, minimum_version):
         right = right + (0,) * (max_len - len(right))
         return left >= right
     return installed >= minimum
+
+
+def _compare_version_parts(left, right):
+    lseq = tuple(left or ())
+    rseq = tuple(right or ())
+    if not lseq or not rseq:
+        return 0
+    max_len = max(len(lseq), len(rseq))
+    lseq = lseq + (0,) * (max_len - len(lseq))
+    rseq = rseq + (0,) * (max_len - len(rseq))
+    if lseq < rseq:
+        return -1
+    if lseq > rseq:
+        return 1
+    return 0
+
+
+def _python_version_satisfies_clause(version_text, clause):
+    version = str(version_text or "").strip()
+    text = str(clause or "").strip()
+    if not text:
+        return True
+    match = re.match(r"^(<=|>=|==|!=|<|>)\s*([A-Za-z0-9_.+-]+)$", text)
+    if not match:
+        return True
+    left = _numeric_version_parts(version)
+    right = _numeric_version_parts(match.group(2))
+    if not left or not right:
+        return False
+    comp = _compare_version_parts(left, right)
+    op = match.group(1)
+    if op == ">=":
+        return comp >= 0
+    if op == "<=":
+        return comp <= 0
+    if op == ">":
+        return comp > 0
+    if op == "<":
+        return comp < 0
+    if op == "==":
+        return comp == 0
+    if op == "!=":
+        return comp != 0
+    return True
+
+
+def _python_version_matches_requires(version_text, requires_python):
+    version = str(version_text or "").strip()
+    required = str(requires_python or "").strip()
+    if not required:
+        return True
+    if not version:
+        return False
+    clauses = [item.strip() for item in required.split(",") if item.strip()]
+    if not clauses:
+        return True
+    return all(_python_version_satisfies_clause(version, clause) for clause in clauses)
+
+
+def _upstream_python_range_error(version_text, requires_python):
+    version = str(version_text or "").strip() or "未知版本"
+    required = str(requires_python or "").strip() or "未声明"
+    return f"Python {version} 不在上游声明支持范围 {required} 内；当前请优先使用 Python 3.11 / 3.12。"
 
 
 def _probe_python_dependency(py, spec, *, import_name="", strict_version=True):
@@ -698,6 +762,7 @@ def _prepare_python_runtime_candidate(info, agent_dir, *, extra_packages=None, p
     label = _format_python_candidate_label(info)
     extra_packages = [str(item or "").strip() for item in (extra_packages or []) if str(item or "").strip()]
     manifest = resolve_upstream_dependency_manifest(agent_dir)
+    requires_python = str(manifest.get("requires_python") or "").strip()
     sync_mode = str(manifest.get("sync_mode") or "").strip().lower()
     sync_path = str(manifest.get("sync_path") or "").strip()
     sync_specs = [str(item or "").strip() for item in (manifest.get("sync_specs") or []) if str(item or "").strip()]
@@ -716,6 +781,7 @@ def _prepare_python_runtime_candidate(info, agent_dir, *, extra_packages=None, p
         "extra_synced": False,
         "sync_mode": sync_mode,
         "sync_label": sync_label,
+        "requires_python": requires_python,
     }
 
     need_bootstrap = (not ok) and _should_bootstrap_python_runtime(detail)
@@ -734,6 +800,11 @@ def _prepare_python_runtime_candidate(info, agent_dir, *, extra_packages=None, p
         need_sync = True
     if (not ok) and (sync_path or sync_specs):
         need_sync = True
+
+    if requires_python and not _python_version_matches_requires(info.get("version"), requires_python):
+        detail = _upstream_python_range_error(info.get("version"), requires_python)
+        _emit_dependency_progress(progress, "candidate_fail", f"解释器不可用：{label} -> {detail}", status="error")
+        return False, f"解释器兼容性失败：{detail}", meta
 
     if need_bootstrap:
         boot_ok, boot_detail = _bootstrap_python_runtime(py, progress=progress)
@@ -888,6 +959,13 @@ def _build_dependency_report(agent_dir, py, *, candidate_meta=None, failures=Non
             py_ver = _run_python_command(py, ["-c", "import sys;print(sys.version.split()[0])"], timeout=15)
             py_label = (py_ver.stdout or "").strip()
             system_items.append(_make_report_item("Python", "ok", f"{py} (Python {py_label})" if py_label else py))
+            requires_python = str(manifest.get("requires_python") or "").strip()
+            if requires_python:
+                version_status = "ok" if _python_version_matches_requires(py_label, requires_python) else "error"
+                version_detail = f"上游要求 {requires_python}"
+                if version_status == "error":
+                    version_detail = _upstream_python_range_error(py_label, requires_python)
+                system_items.append(_make_report_item("Python 版本约束", version_status, version_detail))
         except Exception as e:
             system_items.append(_make_report_item("Python", "error", str(e)))
         try:
@@ -917,6 +995,9 @@ def _build_dependency_report(agent_dir, py, *, candidate_meta=None, failures=Non
         if manifest.get("pyproject_error"):
             pyproject_detail = f"{pyproject_path}；{manifest.get('pyproject_error')}"
         project_items.append(_make_report_item("pyproject.toml", pyproject_status, pyproject_detail, optional=not manifest.get("pyproject_used")))
+    requires_python = str(manifest.get("requires_python") or "").strip()
+    if requires_python:
+        project_items.append(_make_report_item("上游 Python 约束", "info", requires_python, optional=True))
     req_path = _agent_requirements_path(agent_dir)
     if req_path:
         project_items.append(_make_report_item("requirements.txt", "ok", req_path))
@@ -986,26 +1067,51 @@ def _build_dependency_report(agent_dir, py, *, candidate_meta=None, failures=Non
     frontend_items = []
     if py:
         frontends_dir = os.path.join(agent_dir, "frontends")
-        for filename in ("qtapp.py", "stapp.py", "stapp2.py", "desktop_pet.pyw", "desktop_pet_v2.pyw"):
+        compile_targets = (
+            ("qtapp.py", False),
+            ("stapp.py", False),
+            ("stapp2.py", False),
+            ("tuiapp.py", True),
+            ("tuiapp_v2.py", True),
+            ("tui_v3.py", True),
+            ("dcapp.py", True),
+            ("genericagent_acp_bridge.py", True),
+            ("desktop_bridge.py", True),
+            ("desktop_pet.pyw", True),
+            ("desktop_pet_v2.pyw", True),
+        )
+        for filename, optional in compile_targets:
             path = os.path.join(frontends_dir, filename)
             if not os.path.isfile(path):
                 frontend_items.append(_make_report_item(filename, "warn", "文件不存在", optional=True))
                 continue
             ok, detail = _probe_python_compile(py, path)
-            frontend_items.append(_make_report_item(filename, "ok" if ok else "error", detail, optional=filename.startswith("desktop_pet")))
+            frontend_items.append(_make_report_item(filename, "ok" if ok else "error", detail, optional=optional))
     sections.append({"title": "前端脚本", "items": frontend_items})
     sections.extend(_frontend_dependency_group_sections(agent_dir, py))
 
     parsed = {"configs": [], "extras": {}, "passthrough": [], "error": "未解析"}
-    if parse_mykey_py and os.path.isfile(mykey_py):
-        parsed = parse_mykey_py(mykey_py)
+    mykey_source = os.path.join(agent_dir, "mykey.py")
+    if parse_mykey_py:
+        try:
+            from .channels import parse_mykey_source, resolve_mykey_source_path
+        except Exception:
+            parse_mykey_source = None
+            resolve_mykey_source_path = None
+        if callable(resolve_mykey_source_path):
+            mykey_source = resolve_mykey_source_path(agent_dir)
+        if callable(parse_mykey_source) and os.path.isfile(mykey_source):
+            parsed = parse_mykey_source(mykey_source)
+        elif os.path.isfile(mykey_py):
+            parsed = parse_mykey_py(mykey_py)
     api_items = []
+    source_name = os.path.basename(mykey_source) if str(mykey_source or "").strip() else "mykey.py"
     if parsed.get("error"):
-        api_items.append(_make_report_item("解析 mykey.py", "error", str(parsed.get("error") or "").strip()))
-    elif os.path.isfile(mykey_py):
-        api_items.append(_make_report_item("解析 mykey.py", "ok", f"检测到 {len(parsed.get('configs') or [])} 个 API 配置"))
+        api_items.append(_make_report_item(f"解析 {source_name}", "error", str(parsed.get("error") or "").strip()))
+    elif os.path.isfile(mykey_source):
+        api_items.append(_make_report_item(f"解析 {source_name}", "ok", f"检测到 {len(parsed.get('configs') or [])} 个 API 配置"))
     else:
-        api_items.append(_make_report_item("解析 mykey.py", "warn", "当前没有 mykey.py", optional=True))
+        api_items.append(_make_report_item("解析 mykey 配置", "warn", "当前没有 mykey.py / mykey.json", optional=True))
     config_rows = list(parsed.get("configs") or [])
     for config in config_rows:
         api_items.append(_api_config_item_report(config))
@@ -1019,7 +1125,10 @@ def _build_dependency_report(agent_dir, py, *, candidate_meta=None, failures=Non
     if py:
         for spec in COMM_CHANNEL_SPECS:
             label = str(spec.get("label") or spec.get("id") or "").strip()
-            script_path = os.path.join(agent_dir, "frontends", spec.get("script", ""))
+            script_path = channel_script_path(agent_dir, spec, existing_only=True)
+            if not script_path:
+                script_name = resolve_channel_script(spec)
+                script_path = os.path.join(agent_dir, "frontends", script_name) if script_name else ""
             configured = spec.get("id") in configured_channels
             target_items = configured_channel_items if configured else optional_channel_items
             target_items.append(
@@ -1143,7 +1252,7 @@ def _ensure_runtime_dependencies(agent_dir, *, extra_packages=None, progress=Non
         lines.append("可在 launcher_config.json 中手动指定 python_exe，例如 /opt/homebrew/bin/python3 或 venv/bin/python。")
         lines.append("如果系统里有多个解释器，建议先确认 python3，或常见 Homebrew 绝对路径是否可用。")
     lines.append("如果上面的错误里包含 pip / uv / requirements，同样说明当前解释器需要先完成依赖安装。")
-    lines.append("当前不会强制限制版本，但如果高版本解释器兼容性不稳，通常改用 Python 3.11 / 3.12 更稳。")
+    lines.append("当前会按上游 pyproject.toml 的 requires-python 拦截不支持的解释器；优先使用 Python 3.11 / 3.12。")
     error_text = "\n".join(lines)
     report = _build_dependency_report(agent_dir, "", candidate_meta=chosen_meta, failures=failures, extra_packages=extra_packages, error=error_text)
     return {"ok": False, "python": "", "error": error_text, "failures": failures, "report": report, "meta": chosen_meta}

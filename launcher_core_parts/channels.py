@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import ast as _ast
 import importlib.util as _il_util
+import json
 import os
 import re
+
+from . import conductor_runtime as _conductor_runtime
 
 KIND_LABEL = {
     "native_claude": "原生 Claude",
@@ -84,14 +87,30 @@ COMM_CHANNEL_SPECS = [
     {
         "id": "tui",
         "label": "终端 TUI",
-        "subtitle": "Textual 终端会话入口",
-        "script": "tuiapp.py",
+        "subtitle": "Textual 终端会话入口（优先 v2）",
+        "script": "tuiapp_v2.py",
+        "script_candidates": ["tuiapp_v2.py", "tuiapp.py"],
         "log_name": "tuiapp.log",
         "pip": "textual",
         "launch_mode": "terminal",
         "fields": [],
         "required": [],
-        "notes": "直接打开可见终端窗口运行 TUI。",
+        "notes": "优先打开上游更完善的 tuiapp_v2.py；旧版仓库会自动回退到 tuiapp.py。",
+        "conflicts_with": [],
+    },
+    {
+        "id": "conductor",
+        "label": "Conductor 总管台",
+        "subtitle": "本机子 Agent 编排网页控制台",
+        "script": "conductor.py",
+        "log_name": "conductor.log",
+        "pip": "fastapi uvicorn[standard] pydantic",
+        "launch_mode": "web",
+        "local_only": True,
+        "web_url": "http://127.0.0.1:8900/",
+        "fields": [],
+        "required": [],
+        "notes": "启动后会托管本地网页控制台，并由上游脚本自动尝试打开浏览器；当前仅支持启动器本机使用，不支持远端托管。",
         "conflicts_with": [],
     },
     {
@@ -163,6 +182,69 @@ COMM_CHANNEL_SPECS = [
 
 COMM_CHANNEL_INDEX = {spec["id"]: spec for spec in COMM_CHANNEL_SPECS}
 
+
+def _channel_spec_row(channel_or_spec):
+    if isinstance(channel_or_spec, dict):
+        return dict(channel_or_spec)
+    cid = str(channel_or_spec or "").strip()
+    if not cid:
+        return {}
+    row = COMM_CHANNEL_INDEX.get(cid)
+    if row:
+        return dict(row)
+    for spec in COMM_CHANNEL_SPECS:
+        if str((spec or {}).get("id") or "").strip() == cid:
+            return dict(spec)
+    return {}
+
+
+def channel_script_candidates(channel_or_spec):
+    spec = _channel_spec_row(channel_or_spec)
+    seen = set()
+    out = []
+    for raw in [spec.get("script"), *(spec.get("script_candidates") or [])]:
+        name = str(raw or "").strip()
+        if not name:
+            continue
+        key = name.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(name)
+    return out
+
+
+def resolve_channel_script(channel_or_spec, agent_dir="", *, existing_only=False):
+    candidates = channel_script_candidates(channel_or_spec)
+    if not candidates:
+        return ""
+    root = str(agent_dir or "").strip()
+    if root:
+        frontends_dir = os.path.join(root, "frontends")
+        for name in candidates:
+            if os.path.isfile(os.path.join(frontends_dir, name)):
+                return name
+    return "" if existing_only else candidates[0]
+
+
+def channel_script_rel(channel_or_spec, agent_dir="", *, existing_only=False):
+    name = resolve_channel_script(channel_or_spec, agent_dir=agent_dir, existing_only=existing_only)
+    return (("frontends/" + name).replace("\\", "/")) if name else ""
+
+
+def channel_script_rel_candidates(channel_or_spec):
+    return [(("frontends/" + name).replace("\\", "/")) for name in channel_script_candidates(channel_or_spec)]
+
+
+def channel_script_path(agent_dir, channel_or_spec, *, existing_only=False):
+    root = str(agent_dir or "").strip()
+    spec = COMM_CHANNEL_INDEX.get(channel_or_spec, {}) if isinstance(channel_or_spec, str) else dict(channel_or_spec or {})
+    if str(spec.get("id") or "").strip().lower() == "conductor":
+        return str((_conductor_runtime.ensure_launcher_conductor_runtime() or {}).get("script") or "").strip()
+    if not root:
+        return ""
+    name = resolve_channel_script(channel_or_spec, agent_dir=root, existing_only=existing_only)
+    return os.path.join(root, "frontends", name) if name else ""
 
 
 def _classify_config_kind(var_name):
@@ -253,6 +335,47 @@ def parse_mykey_py(path):
         elif _is_passthrough_var(name, v):
             out["passthrough"].append({"name": name, "value": v})
     return out
+
+
+def parse_mykey_json(path):
+    out = {"configs": [], "extras": {}, "passthrough": [], "error": None}
+    if not os.path.isfile(path):
+        return out
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            values = json.load(f)
+    except Exception as e:
+        out["error"] = f"JSON 解析失败: {e}"
+        return out
+    if not isinstance(values, dict):
+        out["error"] = "JSON 根节点必须是对象。"
+        return out
+    for name, value in values.items():
+        if name in EXTRA_KEYS:
+            out["extras"][name] = value
+        elif _is_config_var(name, value):
+            out["configs"].append({"var": name, "kind": _classify_config_kind(name), "data": dict(value)})
+        elif _is_passthrough_var(name, value):
+            out["passthrough"].append({"name": name, "value": value})
+    return out
+
+
+def parse_mykey_source(path):
+    suffix = os.path.splitext(str(path or "").strip())[1].lower()
+    if suffix == ".json":
+        return parse_mykey_json(path)
+    return parse_mykey_py(path)
+
+
+def resolve_mykey_source_path(agent_dir):
+    root = str(agent_dir or "").strip()
+    py_path = os.path.join(root, "mykey.py")
+    json_path = os.path.join(root, "mykey.json")
+    if os.path.isfile(py_path):
+        return py_path
+    if os.path.isfile(json_path):
+        return json_path
+    return py_path
 
 
 _FIELD_ORDER = [
@@ -417,6 +540,34 @@ def validate_api_config_references(configs):
                 errors.append(
                     f"{var_name}.llm_nos[{idx}]={target_name!r} 找不到同名 API 会话；当前可引用 name 为：{available}。"
                 )
+    return errors
+
+
+def validate_runnable_api_configs(configs):
+    rows = [dict(item) for item in (configs or []) if isinstance(item, dict)]
+    errors = [str(err or "").strip() for err in validate_api_config_references(rows) if str(err or "").strip()]
+    runnable_count = 0
+    incomplete = []
+    for row in rows:
+        kind = str(row.get("kind") or "").strip().lower()
+        if kind == "mixin":
+            continue
+        data = dict(row.get("data") or {})
+        ident = str(data.get("name") or row.get("var") or "未命名配置").strip() or "未命名配置"
+        missing = []
+        for key in ("apikey", "apibase"):
+            if not str(data.get(key) or "").strip():
+                missing.append(key)
+        if missing:
+            incomplete.append(f"{ident} 缺少 {' / '.join(missing)}")
+            continue
+        runnable_count += 1
+    if runnable_count > 0:
+        return errors
+    if incomplete:
+        errors.append("当前没有可直接运行的非 mixin API 会话：" + "；".join(incomplete))
+    else:
+        errors.append("当前没有可直接运行的非 mixin API 会话。请先填写至少一条模型配置。")
     return errors
 
 

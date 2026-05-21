@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ctypes
 import json
 import types
 import os
@@ -12,11 +13,13 @@ from unittest import mock
 
 import bridge
 from PySide6.QtCore import QEvent, QPointF, Qt
-from PySide6.QtGui import QMouseEvent
-from PySide6.QtWidgets import QApplication, QLabel
+from PySide6.QtGui import QColor, QImage, QMouseEvent, QPalette
+from PySide6.QtWidgets import QApplication, QLabel, QToolTip
 from launcher_app import app_icon as launcher_app_icon
 from launcher_app import core as lz
 from launcher_app import theme as launcher_theme
+from launcher_core_parts import channels as channels_mod
+from launcher_core_parts import conductor_runtime as conductor_runtime_mod
 from launcher_core_parts import model_api
 from launcher_core_parts import python_env
 from launcher_core_parts import sessions as sessions_mod
@@ -388,6 +391,229 @@ class LauncherCoreBehaviorTests(unittest.TestCase):
         self.assertIn("preferred_theme_font_families", src)
         self.assertIn("preferred = preferred_theme_font_families()", src)
 
+    def test_theme_visual_presets_change_multiple_palette_roles(self):
+        original_palette = dict(launcher_theme.C)
+        original_prefs = dict(launcher_theme._VISUAL_PREFS)
+        try:
+            launcher_theme.set_theme("light")
+            launcher_theme.configure_visual_preferences({"theme_visual_preset": "paper", "theme_bg_preset": "default"})
+            paper_palette = {
+                key: launcher_theme.C[key]
+                for key in ("bg", "panel", "sidebar_bg", "card", "field_alt", "accent")
+            }
+
+            launcher_theme.set_theme("light")
+            launcher_theme.configure_visual_preferences({"theme_visual_preset": "mist", "theme_bg_preset": "default"})
+            changed = [key for key, value in paper_palette.items() if launcher_theme.C.get(key) != value]
+
+            self.assertGreaterEqual(len(changed), 6)
+            self.assertEqual(launcher_theme.app_surface_background(), launcher_theme.C["bg"])
+            self.assertEqual(launcher_theme._VISUAL_PREFS["visual_preset"], "mist")
+            self.assertEqual(launcher_theme._VISUAL_PREFS["bg_preset"], "default")
+        finally:
+            launcher_theme.C.clear()
+            launcher_theme.C.update(original_palette)
+            launcher_theme._VISUAL_PREFS.clear()
+            launcher_theme._VISUAL_PREFS.update(original_prefs)
+
+    def test_theme_visual_preset_compatibility_maps_legacy_background_values(self):
+        original_palette = dict(launcher_theme.C)
+        original_prefs = dict(launcher_theme._VISUAL_PREFS)
+        try:
+            self.assertEqual(launcher_theme.resolve_theme_visual_preset({}), "graphite")
+            self.assertEqual(launcher_theme.resolve_theme_visual_preset({"theme_bg_preset": "default"}), "graphite")
+            self.assertEqual(launcher_theme.resolve_theme_visual_preset({"theme_bg_preset": "warm"}), "paper")
+            self.assertEqual(launcher_theme.resolve_theme_visual_preset({"theme_bg_preset": "mist"}), "mist")
+            self.assertEqual(launcher_theme.resolve_theme_visual_preset({"theme_bg_preset": "graphite"}), "graphite")
+            self.assertEqual(launcher_theme.normalize_theme_background_mode("mist"), "default")
+            self.assertEqual(launcher_theme.normalize_theme_background_mode("image"), "image")
+
+            launcher_theme.set_theme("dark")
+            launcher_theme.configure_visual_preferences({"theme_bg_preset": "graphite"})
+
+            self.assertEqual(launcher_theme._VISUAL_PREFS["visual_preset"], "graphite")
+            self.assertEqual(launcher_theme._VISUAL_PREFS["bg_preset"], "default")
+            self.assertEqual(launcher_theme.app_surface_background(), launcher_theme.C["bg"])
+        finally:
+            launcher_theme.C.clear()
+            launcher_theme.C.update(original_palette)
+            launcher_theme._VISUAL_PREFS.clear()
+            launcher_theme._VISUAL_PREFS.update(original_prefs)
+
+    def test_apply_tooltip_palette_tracks_theme_colors_for_light_and_dark_modes(self):
+        app = QApplication.instance() or QApplication([])
+        original_palette = dict(launcher_theme.C)
+        original_prefs = dict(launcher_theme._VISUAL_PREFS)
+        try:
+            for mode, preset in (("light", "paper"), ("dark", "graphite")):
+                launcher_theme.set_theme(mode)
+                launcher_theme.configure_visual_preferences({"theme_visual_preset": preset, "theme_bg_preset": "default"})
+                launcher_theme.apply_tooltip_palette(app)
+                pal = QToolTip.palette()
+                self.assertEqual(
+                    pal.color(QPalette.Active, QPalette.ToolTipBase).name(),
+                    QColor(str(launcher_theme.C["layer2"])).name(),
+                )
+                self.assertEqual(
+                    pal.color(QPalette.Active, QPalette.ToolTipText).name(),
+                    QColor(str(launcher_theme.C["text"])).name(),
+                )
+                self.assertEqual(
+                    app.palette().color(QPalette.Active, QPalette.ToolTipBase).name(),
+                    QColor(str(launcher_theme.C["layer2"])).name(),
+                )
+                self.assertEqual(
+                    app.palette().color(QPalette.Active, QPalette.ToolTipText).name(),
+                    QColor(str(launcher_theme.C["text"])).name(),
+                )
+        finally:
+            launcher_theme.C.clear()
+            launcher_theme.C.update(original_palette)
+            launcher_theme._VISUAL_PREFS.clear()
+            launcher_theme._VISUAL_PREFS.update(original_prefs)
+            launcher_theme.apply_tooltip_palette(app)
+
+    def test_apply_mica_syncs_native_caption_text_and_border_colors(self):
+        original_palette = dict(launcher_theme.C)
+        light_palette = {}
+
+        class DummyWindow:
+            def winId(self):
+                return 101
+
+        captured: list[tuple[int, int, int]] = []
+
+        class DummyDwm:
+            @staticmethod
+            def DwmSetWindowAttribute(hwnd, attr, value_ptr, value_size):
+                value = ctypes.cast(value_ptr, ctypes.POINTER(ctypes.c_int)).contents.value
+                captured.append((int(hwnd), int(attr), int(value)))
+                return 0
+
+        try:
+            launcher_theme.set_theme("light")
+            light_palette = dict(launcher_theme.C)
+            with mock.patch.object(launcher_theme.sys, "platform", "win32"), mock.patch.object(
+                launcher_theme.ctypes,
+                "windll",
+                types.SimpleNamespace(dwmapi=DummyDwm()),
+                create=True,
+            ):
+                self.assertTrue(launcher_theme.apply_mica(DummyWindow(), dark=False))
+        finally:
+            launcher_theme.C.clear()
+            launcher_theme.C.update(original_palette)
+
+        expected = {
+            20: 0,
+            34: launcher_theme._to_win_colorref(str(light_palette["border"]), "#ffffff"),
+            35: launcher_theme._to_win_colorref(str(light_palette["panel"]), "#ffffff"),
+            36: launcher_theme._to_win_colorref(str(light_palette["text"]), "#111111"),
+            38: 2,
+        }
+        self.assertEqual(len(captured), 5)
+        self.assertTrue(all(hwnd == 101 for hwnd, _attr, _value in captured))
+        attr_map = {attr: value for _hwnd, attr, value in captured}
+        self.assertEqual(attr_map, expected)
+
+    def test_theme_settings_source_uses_visual_presets_and_background_mode(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        path = os.path.join(root, "qt_chat_parts", "settings_panel.py")
+        with open(path, "r", encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn('visual_label = QLabel("主体预设")', src)
+        self.assertIn('bg_label = QLabel("背景模式")', src)
+        self.assertIn("self.settings_theme_visual_combo = _StablePopupComboBox()", src)
+        self.assertIn('visual_preset = str(visual_combo.itemData(visual_combo.currentIndex()) or "graphite").strip()', src)
+        self.assertIn('self.cfg["theme_visual_preset"] = visual_preset', src)
+        self.assertIn("resolve_theme_visual_preset(self.cfg)", src)
+        self.assertIn('normalize_theme_background_mode(self.cfg.get("theme_bg_preset"))', src)
+
+    def test_theme_application_updates_tooltip_palette_on_startup_and_runtime_switch(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        window_path = os.path.join(root, "launcher_app", "window.py")
+        with open(window_path, "r", encoding="utf-8") as f:
+            window_src = f.read()
+        self.assertIn("qt_theme.apply_tooltip_palette(app)", window_src)
+
+        shell_path = os.path.join(root, "qt_chat_parts", "window_shell.py")
+        with open(shell_path, "r", encoding="utf-8") as f:
+            shell_src = f.read()
+        self.assertIn("qt_theme.apply_tooltip_palette(app)", shell_src)
+
+    def test_theme_application_refreshes_custom_info_popup_style(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        session_shell_path = os.path.join(root, "qt_chat_parts", "session_shell.py")
+        with open(session_shell_path, "r", encoding="utf-8") as f:
+            session_shell_src = f.read()
+        self.assertIn("def _refresh_info_popup_style(self):", session_shell_src)
+        self.assertIn('popup.setStyleSheet(', session_shell_src)
+
+        window_path = os.path.join(root, "launcher_app", "window.py")
+        with open(window_path, "r", encoding="utf-8") as f:
+            window_src = f.read()
+        self.assertIn('styler = getattr(self, "_refresh_info_popup_style", None)', window_src)
+
+        shell_path = os.path.join(root, "qt_chat_parts", "window_shell.py")
+        with open(shell_path, "r", encoding="utf-8") as f:
+            shell_src = f.read()
+        self.assertIn('refresh_info_popup_style = getattr(self, "_refresh_info_popup_style", None)', shell_src)
+        self.assertIn("refresh_info_popup_style()", shell_src)
+
+    def test_message_row_uses_custom_theme_avatar_image_when_configured(self):
+        app = QApplication.instance() or QApplication([])
+        self.addCleanup(lambda: app.processEvents())
+        with tempfile.TemporaryDirectory() as td:
+            avatar_path = os.path.join(td, "user_avatar.png")
+            image = QImage(64, 64, QImage.Format_ARGB32)
+            image.fill(QColor("#cc4b4b"))
+            self.assertTrue(image.save(avatar_path, "PNG"))
+
+            row = common.MessageRow(
+                "hello",
+                "user",
+                avatar_cfg={"theme_user_avatar_image": avatar_path},
+            )
+            avatar = getattr(row, "_avatar_label", None)
+            self.assertIsNotNone(avatar)
+            pixmap = avatar.pixmap()
+            self.assertIsNotNone(pixmap)
+            self.assertFalse(pixmap.isNull())
+            self.assertEqual(avatar.property("avatarVariant"), "custom")
+            center = pixmap.toImage().pixelColor(15, 15)
+            self.assertGreater(center.red(), 150)
+            self.assertLess(center.green(), 120)
+            self.assertLess(center.blue(), 120)
+
+    def test_theme_settings_source_includes_chat_avatar_configuration(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        settings_path = os.path.join(root, "qt_chat_parts", "settings_panel.py")
+        common_path = os.path.join(root, "qt_chat_parts", "common.py")
+        chat_view_path = os.path.join(root, "qt_chat_parts", "chat_view.py")
+        shell_path = os.path.join(root, "qt_chat_parts", "window_shell.py")
+        floating_path = os.path.join(root, "launcher_app", "window.py")
+        with open(settings_path, "r", encoding="utf-8") as f:
+            settings_src = f.read()
+        with open(common_path, "r", encoding="utf-8") as f:
+            common_src = f.read()
+        with open(chat_view_path, "r", encoding="utf-8") as f:
+            chat_view_src = f.read()
+        with open(shell_path, "r", encoding="utf-8") as f:
+            shell_src = f.read()
+        with open(floating_path, "r", encoding="utf-8") as f:
+            floating_src = f.read()
+        self.assertIn('avatar_title = QLabel("聊天头像")', settings_src)
+        self.assertIn("self.settings_theme_user_avatar_path = QLineEdit()", settings_src)
+        self.assertIn("self.settings_theme_ai_avatar_path = QLineEdit()", settings_src)
+        self.assertIn('self.cfg["theme_user_avatar_image"] = user_avatar_generated_rel', settings_src)
+        self.assertIn('self.cfg["theme_ai_avatar_image"] = ai_avatar_generated_rel', settings_src)
+        self.assertIn("def _choose_theme_chat_avatar(self, role: str):", settings_src)
+        self.assertIn("def _clear_theme_chat_avatar(self, role: str):", settings_src)
+        self.assertIn("def refresh_message_row_avatars(root: QWidget | None) -> None:", common_src)
+        self.assertIn('avatar_cfg=getattr(self, "cfg", None)', chat_view_src)
+        self.assertIn("chat_common.refresh_message_row_avatars(self)", shell_src)
+        self.assertIn("chat_common.refresh_message_row_avatars(self)", floating_src)
+
     def test_window_sets_runtime_launcher_icon_for_app_and_windows(self):
         root = os.path.dirname(os.path.dirname(__file__))
         path = os.path.join(root, "launcher_app", "window.py")
@@ -533,6 +759,35 @@ tg_bot_token = '123'
         self.assertEqual(out["extras"].get("tg_bot_token"), "123")
         self.assertEqual(out["extras"].get("langfuse_config", {}).get("public_key"), "pk-demo")
         self.assertEqual(out["passthrough"][0]["name"], "my_cookie")
+
+    def test_parse_mykey_source_supports_json_configs(self):
+        payload = {
+            "native_oai_config": {
+                "name": "Primary OpenAI",
+                "apikey": "k",
+                "apibase": "https://api.openai.com/v1",
+                "model": "gpt-5.4",
+            },
+            "langfuse_config": {
+                "public_key": "pk-demo",
+                "secret_key": "sk-demo",
+                "host": "https://cloud.langfuse.com",
+            },
+            "tg_bot_token": "123",
+        }
+        with tempfile.TemporaryDirectory() as td:
+            fp = os.path.join(td, "mykey.json")
+            with open(fp, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False)
+            out = lz.parse_mykey_source(fp)
+            resolved = lz.resolve_mykey_source_path(td)
+
+        self.assertIsNone(out["error"])
+        self.assertEqual(len(out["configs"]), 1)
+        self.assertEqual(out["configs"][0]["kind"], "native_oai")
+        self.assertEqual(out["configs"][0]["data"].get("name"), "Primary OpenAI")
+        self.assertEqual(out["extras"].get("tg_bot_token"), "123")
+        self.assertEqual(resolved, fp)
 
     def test_auto_config_var_increments(self):
         existing = {"native_oai_config", "native_oai_config2"}
@@ -864,6 +1119,24 @@ tg_bot_token = '123'
         self.assertEqual(lz._usage_mode_label("provider_usage"), "真实")
         self.assertEqual(lz._usage_mode_label("mixed_provider_and_estimate"), "混合")
         self.assertEqual(lz._usage_mode_label("estimate_chars_div_2_5"), "估算")
+
+    def test_usage_cost_helpers(self):
+        row = {
+            "input_tokens": 100,
+            "output_tokens": 90,
+            "cache_creation_input_tokens": 20,
+            "cache_read_input_tokens": 50,
+            "api_calls": 3,
+        }
+        self.assertEqual(lz.usage_input_side_tokens(row), 170)
+        self.assertEqual(lz.usage_total_consumed_tokens(row), 260)
+        self.assertAlmostEqual(lz.usage_cache_hit_rate(row), 29.4118, places=4)
+
+        summary = lz.summarize_usage_rows([row, {"input_tokens": 10, "output_tokens": 5, "api_calls": 1}])
+        self.assertEqual(summary["input_side_tokens"], 180)
+        self.assertEqual(summary["usage_total_tokens"], 275)
+        self.assertEqual(summary["api_calls"], 4)
+        self.assertEqual(summary["event_count"], 2)
 
     def test_usage_channel_helpers(self):
         self.assertEqual(lz._normalize_usage_channel_id("official", "launcher"), "launcher")
@@ -1229,7 +1502,7 @@ tg_bot_token = '123'
         self.assertIn("def _show_floating_chat_window_only(self):", window_src)
         self.assertIn('_launcher_tray_signal_owner', window_src)
         self.assertIn('tray.activated.connect(self._on_launcher_tray_activated)', window_src)
-        self.assertIn('tray_action = menu.addAction(floating_action_text)', shell_src)
+        self.assertIn('tray_action = menu.addAction(chat_common._svg_icon("menu_floating"', shell_src)
         self.assertIn('action = getattr(self, "_handle_functions_menu_floating_action", None)', shell_src)
         self.assertIn('floating_label_getter = getattr(self, "_functions_menu_floating_action_text", None)', shell_src)
         self.assertIn("floating.apply_theme()", shell_src)
@@ -1441,7 +1714,7 @@ tg_bot_token = '123'
             personal_src = f.read()
         with open(channels_path, "r", encoding="utf-8") as f:
             channels_src = f.read()
-        self.assertIn('("usage", "🧾  使用日志")', settings_src)
+        self.assertIn('("usage", "使用日志")', settings_src)
         self.assertIn('"使用日志"', settings_src)
         self.assertIn("Langfuse 追踪", personal_src)
         self.assertIn("日志来源", personal_src)
@@ -1467,6 +1740,80 @@ tg_bot_token = '123'
         self.assertIn("使用官方云端", personal_src)
         self.assertIn("langfuse_config", personal_src)
         self.assertIn('"langfuse_config"', channels_src)
+
+    def test_usage_chart_helpers_render_pixmaps(self):
+        app = QApplication.instance() or QApplication([])
+        self.addCleanup(lambda: app.processEvents())
+
+        class DummyUsage(personal_usage_mod.PersonalUsageMixin):
+            _usage_chart_pixmap = personal_usage_mod.PersonalUsageMixin._usage_chart_pixmap
+            _usage_qcolor = personal_usage_mod.PersonalUsageMixin._usage_qcolor
+            _usage_num = personal_usage_mod.PersonalUsageMixin._usage_num
+            _usage_line_chart_pixmap = personal_usage_mod.PersonalUsageMixin._usage_line_chart_pixmap
+            _usage_bar_chart_pixmap = personal_usage_mod.PersonalUsageMixin._usage_bar_chart_pixmap
+
+        original_palette = dict(launcher_theme.C)
+        original_prefs = dict(launcher_theme._VISUAL_PREFS)
+        try:
+            launcher_theme.set_theme("light")
+            launcher_theme.configure_visual_preferences({})
+            dummy = DummyUsage()
+            line = dummy._usage_line_chart_pixmap(
+                [
+                    {"label": "05-19", "value": 1200, "value_label": "1,200"},
+                    {"label": "05-20", "value": 1800, "value_label": "1,800"},
+                    {"label": "05-21", "value": 900, "value_label": "900"},
+                ]
+            )
+            bar = dummy._usage_bar_chart_pixmap(
+                [
+                    {"label": "主聊天区", "value": 1800, "value_label": "1,800", "detail": "provider"},
+                    {"label": "微信", "value": 900, "value_label": "900", "detail": "estimate"},
+                ]
+            )
+            self.assertFalse(line.isNull())
+            self.assertFalse(bar.isNull())
+        finally:
+            launcher_theme.C.clear()
+            launcher_theme.C.update(original_palette)
+            launcher_theme._VISUAL_PREFS.clear()
+            launcher_theme._VISUAL_PREFS.update(original_prefs)
+
+    def test_load_langfuse_status_accepts_agentmain_hook_loader_chain(self):
+        class DummyUsage(personal_usage_mod.PersonalUsageMixin):
+            _load_langfuse_status = personal_usage_mod.PersonalUsageMixin._load_langfuse_status
+
+            def __init__(self, agent_dir):
+                self.agent_dir = agent_dir
+
+        with tempfile.TemporaryDirectory() as td:
+            plugins_dir = os.path.join(td, "plugins")
+            os.makedirs(plugins_dir, exist_ok=True)
+            with open(os.path.join(plugins_dir, "langfuse_tracing.py"), "w", encoding="utf-8") as f:
+                f.write("# plugin\n")
+            with open(os.path.join(plugins_dir, "hooks.py"), "w", encoding="utf-8") as f:
+                f.write("def discover_and_load():\n    return None\n")
+            with open(os.path.join(td, "agentmain.py"), "w", encoding="utf-8") as f:
+                f.write("from plugins.hooks import discover_and_load; discover_and_load()\n")
+            with open(os.path.join(td, "llmcore.py"), "w", encoding="utf-8") as f:
+                f.write("# modern hook mode\n")
+            with open(os.path.join(td, "mykey.py"), "w", encoding="utf-8") as f:
+                f.write(
+                    "langfuse_config = {\n"
+                    "    'public_key': 'pk-demo',\n"
+                    "    'secret_key': 'sk-demo',\n"
+                    "    'host': 'https://cloud.langfuse.com',\n"
+                    "}\n"
+                )
+
+            with mock.patch.object(personal_usage_mod.lz, "is_valid_agent_dir", return_value=True):
+                status = DummyUsage(td)._load_langfuse_status()
+
+        self.assertTrue(status["configured"])
+        self.assertTrue(status["enabled"])
+        self.assertTrue(status["agent_hook_loader"])
+        self.assertTrue(status["hook_registry"])
+        self.assertIn("hooks 自动发现", status["summary"])
 
     def test_schedule_page_recognizes_upstream_tasks(self):
         root = os.path.dirname(os.path.dirname(__file__))
@@ -1534,6 +1881,33 @@ tg_bot_token = '123'
         self.assertIn("self._enter_chat(skip_dependency_check=self._can_skip_dependency_check_on_quick_enter())", nav_src)
         self.assertIn("def _enter_chat(self, *, skip_dependency_check=False):", nav_src)
         self.assertIn('if (not skip_dependency_check) and (not self._check_runtime_dependencies(purpose="载入内核")):', nav_src)
+
+    def test_welcome_page_exposes_official_gui_entry(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        setup_path = os.path.join(root, "qt_chat_parts", "setup_pages.py")
+        with open(setup_path, "r", encoding="utf-8") as f:
+            setup_src = f.read()
+        self.assertIn("或许你想试试官方的？", setup_src)
+        self.assertIn("直接拉起上游默认 GUI / 官方发布版桌面端", setup_src)
+        self.assertIn("self._show_official_gui_page", setup_src)
+        self.assertIn("self.official_gui_launch_btn.clicked.connect(self._launch_official_gui)", setup_src)
+        self.assertIn("self.official_desktop_launch_btn.clicked.connect(self._launch_official_desktop_app)", setup_src)
+        self.assertIn("self.official_desktop_release_btn.clicked.connect(self._open_official_desktop_release_page)", setup_src)
+        self.assertIn("打开 Release 页面", setup_src)
+        self.assertIn("官方桌面版（发布版）", setup_src)
+
+        nav_path = os.path.join(root, "qt_chat_parts", "navigation.py")
+        with open(nav_path, "r", encoding="utf-8") as f:
+            nav_src = f.read()
+        self.assertIn("def _launch_official_gui(self):", nav_src)
+        self.assertIn("def _launch_official_desktop_app(self):", nav_src)
+        self.assertIn("def _open_official_desktop_release_page(self):", nav_src)
+        self.assertIn('purpose="启动官方 GUI"', nav_src)
+        self.assertIn("launch_web_ui", nav_src)
+        self.assertIn("launch.pyw", nav_src)
+        self.assertIn("/releases/latest", nav_src)
+        self.assertIn("GenericAgent.app", nav_src)
+        self.assertIn("GenericAgent-windows-x64.exe", nav_src)
 
     def test_spec_uses_local_hooks_dir(self):
         root = os.path.dirname(os.path.dirname(__file__))
@@ -1840,7 +2214,9 @@ tg_bot_token = '123'
             settings_src = f.read()
         with open(req_path, "r", encoding="utf-8") as f:
             req_src = f.read()
-        self.assertIn('("vps", "🖥️  VPS 管理")', settings_src)
+        self.assertIn('("vps", "VPS 管理")', settings_src)
+        self.assertIn("def _settings_nav_icon_spec(self, key: str):", settings_src)
+        self.assertIn("def _apply_settings_nav_button_icon(self, key: str, button, *, selected: bool = False) -> None:", settings_src)
         self.assertIn("self.settings_vps_username_edit", settings_src)
         self.assertIn("self.settings_vps_port_spin", settings_src)
         self.assertIn("self.settings_vps_key_path_edit", settings_src)
@@ -2129,7 +2505,8 @@ tg_bot_token = '123'
         self.assertIn('terminal_prompt = QLabel(">")', settings_src)
         self.assertIn('self.settings_vps_terminal_input.setPlaceholderText("输入命令后回车执行，↑/↓ 取历史命令")', settings_src)
         self.assertIn('self.settings_vps_terminal_send_btn = QPushButton("执行")', settings_src)
-        self.assertIn('self.settings_vps_profile_light = QLabel("●")', settings_src)
+        self.assertIn('self.settings_vps_profile_light = QLabel()', settings_src)
+        self.assertIn('chat_common.set_label_svg_icon(self.settings_vps_profile_light, "settings_vps_status", chat_common._SVG_DOT, color="#94a3b8", size=12)', settings_src)
         self.assertIn("def _vps_profile_health", settings_src)
         self.assertIn("self.settings_vps_terminal_output = QPlainTextEdit()", settings_src)
         self.assertIn("self.settings_vps_terminal_output.setMaximumBlockCount(4000)", settings_src)
@@ -2410,6 +2787,7 @@ tg_bot_token = '123'
                 )
             manifest = upstream_dependencies.resolve_upstream_dependency_manifest(td)
         self.assertTrue(manifest["pyproject_used"])
+        self.assertEqual(manifest["requires_python"], ">=3.10,<3.14")
         self.assertEqual(manifest["sync_mode"], "pyproject")
         self.assertIn("beautifulsoup4>=4.12", manifest["sync_specs"])
         self.assertIn("charset-normalizer>=3.3", manifest["sync_specs"])
@@ -2419,23 +2797,113 @@ tg_bot_token = '123'
         launch_items = [str(item.get("package") or "") for item in groups["launch_web_ui"]["items"]]
         self.assertTrue(any(item.startswith("pywebview") for item in launch_items))
         self.assertTrue(any(item.startswith("streamlit") for item in launch_items))
+        conductor_items = [str(item.get("package") or "") for item in groups["conductor_frontend"]["items"]]
+        self.assertIn("fastapi", conductor_items)
+        self.assertTrue(any(item.startswith("uvicorn") for item in conductor_items))
+        self.assertIn("pydantic", conductor_items)
+        self.assertTrue(any(str(item.get("source") or "") == "frontends/conductor.py" for item in manifest["dependency_sources"]))
+
+    def test_prepare_python_runtime_candidate_rejects_version_outside_upstream_requires_python(self):
+        with tempfile.TemporaryDirectory() as td:
+            with open(os.path.join(td, "pyproject.toml"), "w", encoding="utf-8") as f:
+                f.write(
+                    "[project]\n"
+                    "name = 'genericagent'\n"
+                    "version = '0.1.0'\n"
+                    "requires-python = '>=3.10,<3.14'\n"
+                    "dependencies = ['requests>=2.28']\n"
+                )
+            info = {"path": "C:\\Python314\\python.exe", "version": "3.14.0"}
+            with mock.patch.object(python_env, "_dependency_state_matches", return_value=True), mock.patch.object(
+                python_env, "_core_runtime_packages_ready", return_value=True
+            ), mock.patch.object(
+                python_env, "_core_runtime_packages_import_ready", return_value=True
+            ), mock.patch.object(
+                python_env, "_probe_python_agent_compat", return_value=(True, "")
+            ), mock.patch.object(
+                python_env, "_missing_dependency_specs", return_value=[]
+            ), mock.patch.object(
+                python_env, "_should_sync_runtime_dependencies", return_value=False
+            ):
+                ok, detail, meta = python_env._prepare_python_runtime_candidate(info, td)
+        self.assertFalse(ok)
+        self.assertIn(">=3.10,<3.14", detail)
+        self.assertIn("3.11 / 3.12", detail)
+        self.assertEqual(meta.get("requires_python"), ">=3.10,<3.14")
 
     def test_channel_registry_includes_terminal_tui_channel(self):
         spec = lz.COMM_CHANNEL_INDEX.get("tui") or {}
-        self.assertEqual(spec.get("script"), "tuiapp.py")
+        self.assertEqual(spec.get("script"), "tuiapp_v2.py")
+        self.assertEqual(list(spec.get("script_candidates") or []), ["tuiapp_v2.py", "tuiapp.py"])
         self.assertEqual(spec.get("pip"), "textual")
         self.assertEqual(spec.get("launch_mode"), "terminal")
         self.assertEqual(spec.get("fields"), [])
         self.assertEqual(spec.get("required"), [])
         self.assertEqual(lz.COMM_CHANNEL_INDEX.get("discord", {}).get("launch_mode"), None)
 
+    def test_channel_registry_includes_local_only_conductor_web_channel(self):
+        spec = lz.COMM_CHANNEL_INDEX.get("conductor") or {}
+        self.assertEqual(spec.get("script"), "conductor.py")
+        self.assertEqual(spec.get("launch_mode"), "web")
+        self.assertTrue(spec.get("local_only"))
+        self.assertEqual(spec.get("web_url"), "http://127.0.0.1:8900/")
+        self.assertIn("fastapi", str(spec.get("pip") or ""))
+        self.assertEqual(spec.get("fields"), [])
+        self.assertEqual(spec.get("required"), [])
+
+    def test_channel_script_resolution_prefers_existing_candidate_and_keeps_rel_paths(self):
+        with tempfile.TemporaryDirectory() as td:
+            frontends = os.path.join(td, "frontends")
+            os.makedirs(frontends, exist_ok=True)
+            legacy = os.path.join(frontends, "tuiapp.py")
+            with open(legacy, "w", encoding="utf-8") as f:
+                f.write("print('legacy')\n")
+
+            self.assertEqual(lz.resolve_channel_script("tui"), "tuiapp_v2.py")
+            self.assertEqual(lz.resolve_channel_script("tui", agent_dir=td, existing_only=True), "tuiapp.py")
+            self.assertEqual(lz.channel_script_rel("tui"), "frontends/tuiapp_v2.py")
+            self.assertEqual(lz.channel_script_rel("tui", agent_dir=td, existing_only=True), "frontends/tuiapp.py")
+            self.assertEqual(
+                lz.channel_script_rel_candidates("tui"),
+                ["frontends/tuiapp_v2.py", "frontends/tuiapp.py"],
+            )
+            self.assertTrue(str(lz.channel_script_path(td, "tui", existing_only=True)).endswith(os.path.join("frontends", "tuiapp.py")))
+
+    def test_conductor_channel_uses_launcher_owned_runtime_bundle(self):
+        with tempfile.TemporaryDirectory() as td:
+            runtime_root = os.path.join(td, "runtime", "conductor")
+            with mock.patch.object(conductor_runtime_mod, "launcher_data_path", return_value=runtime_root), mock.patch.object(
+                channels_mod, "_conductor_runtime", conductor_runtime_mod
+            ):
+                paths = conductor_runtime_mod.ensure_launcher_conductor_runtime()
+                script_path = lz.channel_script_path("C:\\demo", "conductor", existing_only=True)
+
+            self.assertTrue(os.path.isfile(paths["script"]))
+            self.assertTrue(os.path.isfile(paths["html"]))
+            self.assertEqual(script_path, paths["script"])
+            self.assertEqual(lz.channel_script_rel("conductor"), "frontends/conductor.py")
+            self.assertEqual(lz.channel_script_rel_candidates("conductor"), ["frontends/conductor.py"])
+            with open(paths["script"], "r", encoding="utf-8") as f:
+                script_src = f.read()
+            self.assertIn("GA_LAUNCHER_AGENT_DIR", script_src)
+            self.assertIn("mark_all_user_messages_read()", script_src)
+            with open(paths["html"], "r", encoding="utf-8") as f:
+                html_src = f.read()
+            self.assertIn("Conductor", html_src)
+
     def test_dependency_reporting_no_longer_duplicates_tui_as_frontend_category(self):
         root = os.path.dirname(os.path.dirname(__file__))
         dep_path = os.path.join(root, "launcher_core_parts", "upstream_dependencies.py")
+        py_env_path = os.path.join(root, "launcher_core_parts", "python_env.py")
         with open(dep_path, "r", encoding="utf-8") as f:
             dep_src = f.read()
+        with open(py_env_path, "r", encoding="utf-8") as f:
+            py_env_src = f.read()
         self.assertNotIn("terminal_frontend", dep_src)
-        self.assertIn("frontends/tuiapp.py", dep_src)
+        self.assertIn("frontends/tuiapp_v2.py", dep_src)
+        self.assertIn("desktop_bridge.py", dep_src)
+        self.assertIn("genericagent_acp_bridge.py", py_env_src)
+        self.assertIn("tui_v3.py", py_env_src)
 
         ok_result = mock.Mock(returncode=0, stdout="demo\n", stderr="")
         with mock.patch.object(
@@ -2460,6 +2928,12 @@ tg_bot_token = '123'
 
         titles = [str(section.get("title") or "") for section in report.get("sections") or []]
         self.assertNotIn("终端前端可选", titles)
+        frontend_section = next((section for section in report.get("sections") or [] if section.get("title") == "前端脚本"), {})
+        frontend_names = [str(item.get("name") or "") for item in (frontend_section.get("items") or [])]
+        self.assertIn("tuiapp_v2.py", frontend_names)
+        self.assertIn("tui_v3.py", frontend_names)
+        self.assertIn("desktop_bridge.py", frontend_names)
+        self.assertIn("genericagent_acp_bridge.py", frontend_names)
         optional_section = next((section for section in report.get("sections") or [] if section.get("title") == "渠道专属可选"), {})
         items = list(optional_section.get("items") or [])
         self.assertTrue(any(str(item.get("name") or "") == "终端 TUI 依赖 textual" for item in items))

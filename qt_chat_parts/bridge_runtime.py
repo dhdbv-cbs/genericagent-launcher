@@ -39,11 +39,116 @@ _RUNTIME_REASONING_EFFORT_VALUES = {value for value, _label in _RUNTIME_REASONIN
 
 
 class BridgeRuntimeMixin:
+    def _upstream_optional_slash_command_items(self):
+        agent_dir = str(getattr(self, "agent_dir", "") or "").strip()
+        if (not agent_dir) or (not lz.is_valid_agent_dir(agent_dir)):
+            return []
+        frontends_dir = os.path.join(agent_dir, "frontends")
+        out = []
+        has_continue = os.path.isfile(os.path.join(frontends_dir, "continue_cmd.py"))
+        has_export = os.path.isfile(os.path.join(frontends_dir, "export_cmd.py"))
+        has_session_names = os.path.isfile(os.path.join(frontends_dir, "session_names.py"))
+        if has_continue:
+            out.extend(
+                [
+                    {
+                        "command": "/continue",
+                        "insert_text": "/continue",
+                        "description": "恢复上游可恢复会话快照",
+                        "aliases": ["/continue"],
+                    },
+                    {
+                        "command": "/continue N",
+                        "insert_text": "/continue ",
+                        "description": "恢复第 N 个上游会话快照",
+                        "aliases": ["/continue", "/continue "],
+                    },
+                ]
+            )
+            if has_session_names:
+                out.append(
+                    {
+                        "command": "/continue <name>",
+                        "insert_text": "/continue ",
+                        "description": "按上游会话名恢复可恢复快照",
+                        "aliases": ["/continue", "/continue "],
+                    }
+                )
+        if has_session_names:
+            out.append(
+                {
+                    "command": "/rename <name>",
+                    "insert_text": "/rename ",
+                    "description": "给当前上游可恢复会话起一个持久化名字",
+                    "aliases": ["/rename", "/rename "],
+                }
+            )
+        if has_export:
+            out.extend(
+                [
+                    {
+                        "command": "/export",
+                        "insert_text": "/export",
+                        "description": "查看导出上一条回复的可用方式",
+                        "aliases": ["/export"],
+                    },
+                    {
+                        "command": "/export clip",
+                        "insert_text": "/export clip",
+                        "description": "把上一条回复整理成可复制文本",
+                        "aliases": ["/export", "/export "],
+                    },
+                    {
+                        "command": "/export all",
+                        "insert_text": "/export all",
+                        "description": "显示当前上游完整日志路径",
+                        "aliases": ["/export", "/export "],
+                    },
+                    {
+                        "command": "/export <file>",
+                        "insert_text": "/export ",
+                        "description": "把上一条回复导出到 temp/<file>",
+                        "aliases": ["/export", "/export "],
+                    },
+                ]
+            )
+        if os.path.isfile(os.path.join(frontends_dir, "btw_cmd.py")):
+            out.append(
+                {
+                    "command": "/btw <q>",
+                    "insert_text": "/btw ",
+                    "description": "临时插问主 agent 进展，不打断当前任务",
+                    "aliases": ["/btw", "/btw "],
+                }
+            )
+        if os.path.isfile(os.path.join(frontends_dir, "review_cmd.py")):
+            out.append(
+                {
+                    "command": "/review [scope]",
+                    "insert_text": "/review",
+                    "description": "让上游主 agent 在当前会话里直接做代码审查",
+                    "aliases": ["/review", "/review "],
+                }
+            )
+        return out
+
     def _local_slash_command_items(self):
         return [
             {"command": "/help", "insert_text": "/help", "description": "显示启动器支持的斜杠命令"},
             {"command": "/stop", "insert_text": "/stop", "description": "停止当前回复任务"},
             {"command": "/new", "insert_text": "/new", "description": "新建一个当前设备上下文会话"},
+            {
+                "command": "/cost",
+                "insert_text": "/cost",
+                "description": "查看当前会话的 /cost 口径 token、缓存与上下文窗口",
+                "aliases": ["/cost"],
+            },
+            {
+                "command": "/cost all",
+                "insert_text": "/cost all",
+                "description": "汇总当前设备上下文内所有会话的 /cost 口径统计",
+                "aliases": ["/cost", "/cost "],
+            },
             {
                 "command": "/llm",
                 "insert_text": "/llm",
@@ -56,18 +161,7 @@ class BridgeRuntimeMixin:
                 "description": "切换到第 N 个模型编号",
                 "aliases": ["/llm", "/llm "],
             },
-            {
-                "command": "/continue",
-                "insert_text": "/continue",
-                "description": "后台恢复最近一条历史会话",
-                "aliases": ["/continue"],
-            },
-            {
-                "command": "/continue N",
-                "insert_text": "/continue ",
-                "description": "后台恢复第 N 条历史会话",
-                "aliases": ["/continue", "/continue "],
-            },
+            *self._upstream_optional_slash_command_items(),
             {
                 "command": "/session.<attr>=<val>",
                 "insert_text": "/session.",
@@ -116,18 +210,38 @@ class BridgeRuntimeMixin:
         return "当前还没有可用的 LLM 配置。"
 
     def _local_slash_help_text(self):
-        return "\n".join(
-            [
-                "/help - 显示帮助",
-                "/stop - 停止当前任务",
-                "/new - 触发启动器新建会话",
-                "/llm - 查看当前模型列表",
-                "/llm N - 切换到第 N 个模型",
-                "/continue - 后台恢复最近一条历史会话",
-                "/continue N - 后台恢复第 N 条历史会话",
-                "/session.<attr>=<val> - 透传给上游 agant 执行运行时参数覆盖",
-            ]
-        )
+        lines = [
+            "/help - 显示帮助",
+            "/stop - 停止当前任务",
+            "/new - 触发启动器新建会话",
+            "/cost - 查看当前会话的 /cost 口径 token 与缓存统计",
+            "/cost all - 查看当前设备上下文内全部会话的 /cost 汇总",
+            "/llm - 查看当前模型列表",
+            "/llm N - 切换到第 N 个模型",
+        ]
+        commands = {str(item.get("command") or "").strip(): item for item in self._upstream_optional_slash_command_items()}
+        if "/continue" in commands:
+            lines.append("/continue - 恢复上游可恢复会话快照")
+        if "/continue N" in commands:
+            lines.append("/continue N - 恢复第 N 个上游会话快照")
+        if "/continue <name>" in commands:
+            lines.append("/continue <name> - 按上游会话名恢复可恢复快照")
+        if "/rename <name>" in commands:
+            lines.append("/rename <name> - 给当前上游可恢复会话起一个持久化名字")
+        if "/export" in commands:
+            lines.append("/export - 查看导出上一条回复的可用方式")
+        if "/export clip" in commands:
+            lines.append("/export clip - 把上一条回复整理成可复制文本")
+        if "/export all" in commands:
+            lines.append("/export all - 显示当前上游完整日志路径")
+        if "/export <file>" in commands:
+            lines.append("/export <file> - 把上一条回复导出到 temp/<file>")
+        if "/btw <q>" in commands:
+            lines.append("/btw <q> - 临时插问主 agent 进展，不打断当前任务")
+        if "/review [scope]" in commands:
+            lines.append("/review [scope] - 让上游主 agent 在当前会话里直接做代码审查")
+        lines.append("/session.<attr>=<val> - 透传给上游 agant 执行运行时参数覆盖")
+        return "\n".join(lines)
 
     def _local_slash_llm_text(self):
         if not self.llms:
@@ -265,6 +379,162 @@ class BridgeRuntimeMixin:
         self._load_session_by_id(sid)
         return True
 
+    def _local_slash_cost_number(self, value):
+        try:
+            num = max(0, int(value or 0))
+        except Exception:
+            num = 0
+        if num < 1000:
+            return str(num)
+        if num < 1_000_000:
+            scaled = num / 1000.0
+            return f"{scaled:.1f}K" if scaled < 100 else f"{int(scaled)}K"
+        scaled = num / 1_000_000.0
+        return f"{scaled:.2f}M" if scaled < 100 else f"{int(scaled)}M"
+
+    def _local_slash_cost_time_label(self, ts):
+        try:
+            value = float(ts or 0)
+        except Exception:
+            value = 0.0
+        if value <= 0:
+            return "暂无"
+        return time.strftime("%Y-%m-%d %H:%M", time.localtime(value))
+
+    def _local_slash_cost_context_metrics(self, session):
+        data = session if isinstance(session, dict) else {}
+        snapshot = data.get("snapshot") if isinstance(data.get("snapshot"), dict) else {}
+        try:
+            cap = max(0, int(snapshot.get("context_window_chars", 0) or 0))
+        except Exception:
+            cap = 0
+        try:
+            used = max(0, int(snapshot.get("current_input_chars", 0) or 0))
+        except Exception:
+            used = 0
+        if used <= 0:
+            history = data.get("backend_history")
+            if isinstance(history, list):
+                try:
+                    used = sum(len(json.dumps(item, ensure_ascii=False)) for item in history)
+                except Exception:
+                    used = 0
+        return {"context_window_chars": cap, "current_input_chars": used}
+
+    def _local_slash_cost_session_rows(self):
+        if not lz.is_valid_agent_dir(getattr(self, "agent_dir", "")):
+            return []
+        scope = "local"
+        device_id = "local"
+        resolver = getattr(self, "_current_device_context", None)
+        if callable(resolver):
+            try:
+                scope, device_id = resolver()
+            except Exception:
+                scope, device_id = "local", "local"
+        channel_id = str(((self.current_session or {}).get("channel_id")) or "launcher").strip().lower() or "launcher"
+        rows = []
+        for meta in self._active_sessions_for_channel(channel_id, device_scope=scope, device_id=device_id):
+            sid = str(meta.get("id") or "").strip()
+            if not sid:
+                continue
+            try:
+                session = lz.load_session(self.agent_dir, sid)
+            except Exception:
+                session = None
+            if not session:
+                continue
+            summary = lz.summarize_session_usage(session)
+            if int(summary.get("event_count", 0) or 0) <= 0 and int(summary.get("usage_total_tokens", 0) or 0) <= 0:
+                continue
+            title = str(session.get("title") or meta.get("title") or "").strip() or "(未命名会话)"
+            rows.append(
+                {
+                    "session": session,
+                    "summary": summary,
+                    "title": title,
+                    "last_active": float(session.get("updated_at", 0) or 0),
+                }
+            )
+        rows.sort(
+            key=lambda item: (
+                int(((item.get("summary") or {}).get("usage_total_tokens", 0) or 0)),
+                float(item.get("last_active", 0) or 0),
+            ),
+            reverse=True,
+        )
+        return rows
+
+    def _local_slash_cost_section_lines(self, heading: str, summary: dict, *, session=None):
+        data = summary if isinstance(summary, dict) else {}
+        title = str(heading or "").strip() or "Token usage"
+        total = int(data.get("usage_total_tokens", lz.usage_total_consumed_tokens(data)) or 0)
+        input_side = int(data.get("input_side_tokens", lz.usage_input_side_tokens(data)) or 0)
+        output_tokens = int(data.get("output_tokens", 0) or 0)
+        cache_read = int(data.get("cache_read_input_tokens", 0) or 0)
+        cache_create = int(data.get("cache_creation_input_tokens", 0) or 0)
+        api_calls = int(data.get("api_calls", 0) or 0)
+        hit_rate = float(data.get("cache_hit_rate", lz.usage_cache_hit_rate(data)) or 0.0)
+        lines = [title]
+        lines.append(
+            f"Token usage: {self._local_slash_cost_number(total)} total "
+            f"({self._local_slash_cost_number(input_side)} input + {self._local_slash_cost_number(output_tokens)} output)"
+        )
+        if cache_read or cache_create:
+            lines.append(
+                f"Cache: {self._local_slash_cost_number(cache_read)} read · "
+                f"{self._local_slash_cost_number(cache_create)} created · {hit_rate:.1f}% hit"
+            )
+        lines.append(f"Requests: {self._local_slash_cost_number(api_calls)}")
+        if isinstance(session, dict):
+            context = self._local_slash_cost_context_metrics(session)
+            cap = int(context.get("context_window_chars", 0) or 0)
+            used = int(context.get("current_input_chars", 0) or 0)
+            if cap > 0:
+                pct_left = max(0.0, (cap - used) / float(cap) * 100.0)
+                lines.append(
+                    f"Context window: {pct_left:.0f}% left "
+                    f"({self._local_slash_cost_number(used)} chars used / {self._local_slash_cost_number(cap)} cap)"
+                )
+        return lines
+
+    def _handle_local_slash_cost(self, parts, *, source_editor=None):
+        args = [str(item or "").strip().lower() for item in list(parts or [])[1:] if str(item or "").strip()]
+        if args and args[0] != "all":
+            self._local_slash_clear_input(source_editor=source_editor)
+            self._show_local_slash_feedback("用法错误", "用法: /cost 或 /cost all", status_text="斜杠命令 /cost 执行失败。")
+            return True
+        self._local_slash_clear_input(source_editor=source_editor)
+        if args and args[0] == "all":
+            rows = self._local_slash_cost_session_rows()
+            if not rows:
+                self._show_local_slash_feedback("当前设备暂无 /cost 统计。", status_text="当前设备暂无 /cost 统计。")
+                return True
+            aggregate = lz.summarize_usage_rows([item.get("summary") or {} for item in rows])
+            lines = ["✦ Token usage（当前设备上下文）", *self._local_slash_cost_section_lines("合计", aggregate), "", "会话明细"]
+            for idx, item in enumerate(rows, 1):
+                summary = item.get("summary") or {}
+                lines.append(
+                    f"{idx}. {item.get('title')} · "
+                    f"{self._local_slash_cost_number(summary.get('usage_total_tokens', 0))} total · "
+                    f"API {self._local_slash_cost_number(summary.get('api_calls', 0))} · "
+                    f"{self._local_slash_cost_time_label(item.get('last_active'))}"
+                )
+            self._show_local_slash_feedback("全部会话 /cost", "\n".join(lines), status_text="已显示当前设备的 /cost 汇总。")
+            return True
+        session = self.current_session if isinstance(getattr(self, "current_session", None), dict) else None
+        if not session:
+            self._show_local_slash_feedback("当前还没有可统计的会话。", status_text="当前还没有可统计的会话。")
+            return True
+        summary = lz.summarize_session_usage(session)
+        if int(summary.get("event_count", 0) or 0) <= 0 and int(summary.get("usage_total_tokens", 0) or 0) <= 0:
+            self._show_local_slash_feedback("当前会话还没有 /cost 统计。", status_text="当前会话还没有 /cost 统计。")
+            return True
+        title = str(session.get("title") or "").strip() or "当前会话"
+        lines = ["✦ Token usage", *self._local_slash_cost_section_lines(title, summary, session=session)]
+        self._show_local_slash_feedback("当前会话 /cost", "\n".join(lines), status_text="已显示当前会话的 /cost 统计。")
+        return True
+
     def _handle_local_slash_command(self, text: str, *, source_editor=None):
         cmd = str(text or "").strip()
         if not cmd.startswith("/"):
@@ -293,6 +563,8 @@ class BridgeRuntimeMixin:
                     scope, did = "local", "local"
             self._new_session(scope=scope, device_id=did, prompt_device=False)
             return True
+        if op == "/cost":
+            return self._handle_local_slash_cost(parts, source_editor=source_editor)
         if op == "/llm":
             self._local_slash_clear_input(source_editor=source_editor)
             if len(parts) == 1:
@@ -320,16 +592,6 @@ class BridgeRuntimeMixin:
             detail = f"有效编号: {', '.join(dict.fromkeys(valid_ids))}" if valid_ids else "当前没有可用的 LLM 配置。"
             self._show_local_slash_feedback("切换失败", f"用法: /llm N\n{detail}", status_text="斜杠命令 /llm 执行失败。")
             return True
-        if op == "/continue":
-            self._local_slash_clear_input(source_editor=source_editor)
-            if len(parts) == 1:
-                return self._local_slash_restore_session(0)
-            try:
-                target_index = int(parts[1]) - 1
-            except Exception:
-                self._show_local_slash_feedback("恢复失败", "用法: /continue 或 /continue N", status_text="用法: /continue 或 /continue N")
-                return True
-            return self._local_slash_restore_session(target_index)
         return False
 
     def _normalize_reasoning_effort_value(self, value):
@@ -779,6 +1041,8 @@ class BridgeRuntimeMixin:
         process_pid=None,
         snapshot_ts=None,
         reasoning_effort=None,
+        context_window_chars=None,
+        current_input_chars=None,
     ):
         if not session_id:
             return
@@ -819,6 +1083,22 @@ class BridgeRuntimeMixin:
         snapshot["process_pid"] = int(target.get("process_pid", 0) or 0)
         snapshot["has_backend_history"] = bool(target["backend_history"])
         snapshot["has_agent_history"] = bool(target["agent_history"])
+        if context_window_chars is not None:
+            try:
+                snapshot["context_window_chars"] = max(0, int(context_window_chars or 0))
+            except Exception:
+                snapshot["context_window_chars"] = 0
+        if current_input_chars is not None:
+            try:
+                snapshot["current_input_chars"] = max(0, int(current_input_chars or 0))
+            except Exception:
+                snapshot["current_input_chars"] = 0
+        cap = int(snapshot.get("context_window_chars", 0) or 0)
+        used = int(snapshot.get("current_input_chars", 0) or 0)
+        if cap > 0:
+            snapshot["context_window_left_pct"] = round(max(0.0, (cap - used) / float(cap) * 100.0), 1)
+        else:
+            snapshot.pop("context_window_left_pct", None)
         if normalized_reasoning_effort:
             snapshot["reasoning_effort"] = normalized_reasoning_effort
             snapshot["reasoning_effort_source"] = "override" if ("reasoning_effort" in target) else "runtime"
@@ -848,7 +1128,8 @@ class BridgeRuntimeMixin:
         except Exception:
             idx = 0
         try:
-            configs = (lz.parse_mykey_py(os.path.join(self.agent_dir, "mykey.py")).get("configs") or [])
+            mykey_path = lz.resolve_mykey_source_path(self.agent_dir)
+            configs = (lz.parse_mykey_source(mykey_path).get("configs") or [])
         except Exception:
             configs = []
         cfg = configs[idx] if 0 <= int(idx or 0) < len(configs) else None
@@ -1477,6 +1758,8 @@ class BridgeRuntimeMixin:
                         "reasoning_effort": ev.get("reasoning_effort"),
                         "process_pid": ev.get("process_pid"),
                         "snapshot_ts": ev.get("snapshot_ts"),
+                        "context_window_chars": ev.get("context_window_chars"),
+                        "current_input_chars": ev.get("current_input_chars"),
                     }
                     self._remote_emit_bridge_event(payload, session_id=(ev.get("session_id") or session_id))
                     if done_seen:
@@ -1489,6 +1772,8 @@ class BridgeRuntimeMixin:
                         "agent_history": ev.get("agent_history") or [],
                         "llm_idx": ev.get("llm_idx"),
                         "reasoning_effort": ev.get("reasoning_effort"),
+                        "context_window_chars": ev.get("context_window_chars"),
+                        "current_input_chars": ev.get("current_input_chars"),
                     }
                     self._remote_emit_bridge_event(payload, session_id=(ev.get("session_id") or session_id))
                     continue
@@ -2022,6 +2307,8 @@ class BridgeRuntimeMixin:
                 ev.get("agent_history") or [],
                 llm_idx=ev.get("llm_idx"),
                 reasoning_effort=ev.get("reasoning_effort"),
+                context_window_chars=ev.get("context_window_chars"),
+                current_input_chars=ev.get("current_input_chars"),
             )
             return
         if et == "remote_turn_snapshot":
@@ -2033,6 +2320,8 @@ class BridgeRuntimeMixin:
                 reasoning_effort=ev.get("reasoning_effort"),
                 process_pid=ev.get("process_pid"),
                 snapshot_ts=ev.get("snapshot_ts"),
+                context_window_chars=ev.get("context_window_chars"),
+                current_input_chars=ev.get("current_input_chars"),
             )
             return
         if et == "remote_error":
@@ -2116,6 +2405,8 @@ class BridgeRuntimeMixin:
                 ev.get("agent_history") or [],
                 llm_idx=ev.get("llm_idx"),
                 reasoning_effort=ev.get("reasoning_effort"),
+                context_window_chars=ev.get("context_window_chars"),
+                current_input_chars=ev.get("current_input_chars"),
             )
             return
         if et == "turn_snapshot":
@@ -2127,6 +2418,8 @@ class BridgeRuntimeMixin:
                 reasoning_effort=ev.get("reasoning_effort"),
                 process_pid=ev.get("process_pid"),
                 snapshot_ts=ev.get("snapshot_ts"),
+                context_window_chars=ev.get("context_window_chars"),
+                current_input_chars=ev.get("current_input_chars"),
             )
             return
         if et == "llm_switched":

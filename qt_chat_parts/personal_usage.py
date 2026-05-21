@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import platform
 import re
@@ -14,14 +15,43 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from datetime import datetime
 
-from PySide6.QtCore import Qt, QTimer, QUrl
-from PySide6.QtGui import QColor, QDesktopServices, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import QApplication, QCheckBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QSpinBox, QVBoxLayout, QWidget
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, QUrl
+from PySide6.QtGui import QColor, QDesktopServices, QFontMetrics, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtWidgets import QApplication, QCheckBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QSizePolicy, QSpinBox, QVBoxLayout, QWidget
 
 from launcher_app import core as lz
 from launcher_app.theme import C, F
 
 from .common import capture_runtime_context, runtime_context_matches
+
+
+class _ResponsivePixmapLabel(QLabel):
+    def __init__(self, parent=None, *, max_width=440):
+        super().__init__(parent)
+        self._source_pixmap = QPixmap()
+        self._max_width = max(180, int(max_width or 440))
+        self.setAlignment(Qt.AlignCenter)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+    def set_source_pixmap(self, pixmap: QPixmap | None):
+        self._source_pixmap = QPixmap(pixmap) if pixmap is not None else QPixmap()
+        self._update_scaled_pixmap()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_scaled_pixmap()
+
+    def _update_scaled_pixmap(self):
+        if self._source_pixmap.isNull():
+            self.clear()
+            return
+        target_w = self.contentsRect().width()
+        if target_w <= 0:
+            target_w = self._source_pixmap.width()
+        target_w = max(180, min(self._max_width, int(target_w)))
+        scaled = self._source_pixmap.scaledToWidth(target_w, Qt.SmoothTransformation)
+        self.setPixmap(scaled)
+        self.setMinimumHeight(max(120, scaled.height()))
 
 
 class PersonalUsageMixin:
@@ -2953,6 +2983,14 @@ class PersonalUsageMixin:
             return "数据不足"
         return self._usage_num(normalized)
 
+    def _usage_hit_rate_label(self, item):
+        data = item if isinstance(item, dict) else {}
+        try:
+            pct = float(data.get("cache_hit_rate", 0) or 0.0)
+        except Exception:
+            pct = 0.0
+        return f"{pct:.1f}%"
+
     def _usage_money(self, value, currency=None):
         try:
             number = float(value or 0)
@@ -3045,7 +3083,7 @@ class PersonalUsageMixin:
 
         if not bool((target or {}).get("is_remote")) and lz.is_valid_agent_dir(self.agent_dir):
             try:
-                parsed = lz.parse_mykey_py(os.path.join(self.agent_dir, "mykey.py"))
+                parsed = lz.parse_mykey_source(lz.resolve_mykey_source_path(self.agent_dir))
                 for cfg in parsed.get("configs") or []:
                     var = str(cfg.get("var") or "").strip()
                     if not var or var in seen:
@@ -3256,17 +3294,20 @@ class PersonalUsageMixin:
         lines.append("概览")
         lines.append(
             f"- 今天：总 {self._usage_num((summary.get('today') or {}).get('total_tokens'))}，"
+            f"/cost {self._usage_num((summary.get('today') or {}).get('usage_total_tokens'))}，"
             f"输入 {self._usage_num((summary.get('today') or {}).get('input_tokens'))}，"
             f"输出 {self._usage_num((summary.get('today') or {}).get('output_tokens'))}，"
             f"费用 {self._usage_cost_label(summary.get('today') or {}, (payload.get('billing') or {}).get('currency'))}"
         )
         lines.append(
             f"- 近 7 天：总 {self._usage_num((summary.get('recent') or {}).get('total_tokens'))}，"
+            f"/cost {self._usage_num((summary.get('recent') or {}).get('usage_total_tokens'))}，"
             f"调用 {self._usage_num((summary.get('recent') or {}).get('api_calls'))}，"
             f"费用 {self._usage_cost_label(summary.get('recent') or {}, (payload.get('billing') or {}).get('currency'))}"
         )
         lines.append(
             f"- 累计：总 {self._usage_num((summary.get('all') or {}).get('total_tokens'))}，"
+            f"/cost {self._usage_num((summary.get('all') or {}).get('usage_total_tokens'))}，"
             f"调用 {self._usage_num(activity.get('api_calls'))}，"
             f"费用 {self._usage_cost_label(summary.get('all') or {}, (payload.get('billing') or {}).get('currency'))}"
         )
@@ -3362,6 +3403,161 @@ class PersonalUsageMixin:
         box.addWidget(line)
         return line
 
+    def _usage_qcolor(self, value, *, alpha=None):
+        raw = value
+        if isinstance(raw, str) and raw in C:
+            raw = C.get(raw)
+        if isinstance(raw, QColor):
+            color = QColor(raw)
+        else:
+            raw_text = str(raw or "").strip()
+            color = QColor(raw_text)
+            if not color.isValid() and raw_text.lower().startswith("rgba(") and raw_text.endswith(")"):
+                parts = [part.strip() for part in raw_text[5:-1].split(",")]
+                if len(parts) == 4:
+                    try:
+                        r = max(0, min(255, int(float(parts[0]))))
+                        g = max(0, min(255, int(float(parts[1]))))
+                        b = max(0, min(255, int(float(parts[2]))))
+                        a_raw = float(parts[3])
+                        a = int(round(a_raw * 255)) if a_raw <= 1 else int(round(a_raw))
+                        color = QColor(r, g, b, max(0, min(255, a)))
+                    except Exception:
+                        color = QColor()
+            if not color.isValid():
+                color = QColor("#000000")
+        if alpha is not None:
+            color.setAlpha(max(0, min(255, int(alpha))))
+        return color
+
+    def _usage_qss_rgba(self, value, alpha):
+        color = self._usage_qcolor(value, alpha=alpha)
+        return f"rgba({color.red()}, {color.green()}, {color.blue()}, {color.alpha()})"
+
+    def _usage_elided_text(self, painter: QPainter, text: str, width: float) -> str:
+        raw = str(text or "")
+        if width <= 8:
+            return raw
+        try:
+            metrics = QFontMetrics(painter.font())
+            return metrics.elidedText(raw, Qt.ElideRight, max(8, int(width)))
+        except Exception:
+            return raw
+
+    def _usage_share_text(self, value, total, *, empty="占比 --"):
+        try:
+            part = float(value or 0)
+            whole = float(total or 0)
+        except Exception:
+            return empty
+        if whole <= 0:
+            return empty
+        pct = max(0.0, (part / whole) * 100.0)
+        return f"占比 {pct:.1f}%"
+
+    def _usage_source_detail_label(self, source):
+        key = str(source or "").strip().lower()
+        if key == "provider":
+            return "provider 真实回传"
+        if key == "estimate":
+            return "启动器本地估算"
+        return "混合/历史来源"
+
+    def _usage_day_context_label(self, date_text):
+        raw = str(date_text or "").strip()
+        if not raw:
+            return ""
+        try:
+            day = datetime.strptime(raw, "%Y-%m-%d").date()
+        except Exception:
+            return ""
+        today = datetime.fromtimestamp(time.time()).date()
+        delta = (today - day).days
+        if delta == 0:
+            return "今天"
+        if delta == 1:
+            return "昨天"
+        if delta == 2:
+            return "前天"
+        week = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+        return week[day.weekday()]
+
+    def _usage_table_cell_payload(self, value, *, selectable=False, primary=False):
+        payload = dict(value) if isinstance(value, dict) else {"text": value}
+        text = payload.get("text", "")
+        detail = payload.get("detail", "")
+        cell_text = str(text if text is not None else "").strip()
+        cell_detail = str(detail if detail is not None else "").strip()
+        if not cell_text and cell_detail:
+            cell_text, cell_detail = cell_detail, ""
+        align = str(payload.get("align") or "left").strip().lower()
+        if align not in {"left", "right", "center"}:
+            align = "left"
+        return {
+            "text": cell_text,
+            "detail": cell_detail,
+            "align": align,
+            "mono": bool(payload.get("mono", False)),
+            "accent": bool(payload.get("accent", False)),
+            "muted": bool(payload.get("muted", False)),
+            "selectable": bool(payload.get("selectable", selectable)),
+            "primary": bool(payload.get("primary", primary)),
+        }
+
+    def _usage_table_cell_widget(self, value, *, header=False, selectable=False, primary=False):
+        payload = self._usage_table_cell_payload(value, selectable=selectable, primary=primary)
+        align = payload["align"]
+        if align == "right":
+            alignment = Qt.AlignRight | Qt.AlignVCenter
+        elif align == "center":
+            alignment = Qt.AlignHCenter | Qt.AlignVCenter
+        else:
+            alignment = Qt.AlignLeft | Qt.AlignVCenter
+
+        host = QWidget()
+        host.setStyleSheet("background: transparent;")
+        box = QVBoxLayout(host)
+        box.setContentsMargins(0, 0, 0, 0)
+        box.setSpacing(2 if payload["detail"] and not header else 0)
+
+        main = QLabel(payload["text"])
+        main.setWordWrap(True)
+        main.setAlignment(alignment)
+        if payload["selectable"]:
+            main.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        if header:
+            main.setStyleSheet(
+                f"background: transparent; color: {C['text_soft']}; "
+                f"font-size: {F['font_caption']}px; font-weight: 700;"
+            )
+        else:
+            main_color = C["accent_text"] if payload["accent"] else (C["muted"] if payload["muted"] else C["text"])
+            weight = 700 if payload["accent"] else (650 if payload["primary"] else 600 if payload["mono"] else 500)
+            style = (
+                f"background: transparent; color: {main_color}; "
+                f"font-size: {F['font_body']}px; font-weight: {weight};"
+            )
+            if payload["mono"]:
+                style += f" font-family: {F['font_family_mono']};"
+            main.setStyleSheet(style)
+        box.addWidget(main, 0, alignment)
+
+        if payload["detail"] and not header:
+            sub = QLabel(payload["detail"])
+            sub.setWordWrap(True)
+            sub.setAlignment(alignment)
+            if payload["selectable"]:
+                sub.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            sub_style = (
+                f"background: transparent; color: {C['muted']}; "
+                f"font-size: {F['font_caption']}px; font-weight: 500;"
+            )
+            if payload["mono"]:
+                sub_style += f" font-family: {F['font_family_mono']};"
+            sub.setStyleSheet(sub_style)
+            box.addWidget(sub, 0, alignment)
+        return host
+
     def _usage_detail_card(self, title, desc="", *, lines=None):
         card = self._panel_card()
         box = QVBoxLayout(card)
@@ -3384,8 +3580,8 @@ class PersonalUsageMixin:
     def _usage_metric_card(self, title, value, detail="", *, accent=False):
         card = self._panel_card()
         box = QVBoxLayout(card)
-        box.setContentsMargins(16, 14, 16, 14)
-        box.setSpacing(4)
+        box.setContentsMargins(14, 12, 14, 12)
+        box.setSpacing(3)
         head = QLabel(title)
         head.setObjectName("mutedText")
         box.addWidget(head)
@@ -3400,52 +3596,189 @@ class PersonalUsageMixin:
         box.addStretch(1)
         return card
 
-    def _usage_table_row(self, values, *, stretches=None, header=False, selectable_cols=None):
+    def _usage_metric_grid(self, items, *, columns=2, spacing=8):
+        grid = QGridLayout()
+        grid.setSpacing(max(0, int(spacing or 0)))
+        safe_columns = max(1, int(columns or 1))
+        for idx, item in enumerate(items or []):
+            if item is None:
+                continue
+            row = int(idx / safe_columns)
+            col = idx % safe_columns
+            grid.addWidget(item, row, col)
+        return grid
+
+    def _usage_table_row(self, values, *, stretches=None, header=False, selectable_cols=None, row_index=0, last=False):
         frame = QFrame()
-        frame.setObjectName("cardInset")
         row = QHBoxLayout(frame)
-        row.setContentsMargins(12, 10, 12, 10)
+        row.setContentsMargins(12, 8 if header else 8, 12, 8 if header else 8)
         row.setSpacing(10)
         stretches = list(stretches or [1] * len(values))
         selectable_cols = set(selectable_cols or [])
+        if header:
+            divider = self._usage_qss_rgba(C["accent"], 52)
+            frame.setStyleSheet(
+                f"background: transparent; border: none; border-bottom: 1px solid {divider}; border-radius: 0;"
+            )
+        else:
+            divider = self._usage_qss_rgba(C["text"], 14 if row_index % 2 == 0 else 10)
+            frame.setStyleSheet(
+                f"background: transparent; border: none; border-bottom: {'0px' if last else '1px'} solid {divider}; border-radius: 0;"
+            )
         for idx, text in enumerate(values):
-            label = QLabel(str(text or ""))
-            label.setWordWrap(True)
-            label.setObjectName("mutedText" if header else ("bodyText" if idx == 0 else "softTextSmall"))
-            if idx in selectable_cols:
-                label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-            row.addWidget(label, stretches[idx] if idx < len(stretches) else 1)
+            row.addWidget(
+                self._usage_table_cell_widget(
+                    text,
+                    header=header,
+                    selectable=idx in selectable_cols,
+                    primary=(idx == 0),
+                ),
+                stretches[idx] if idx < len(stretches) else 1,
+            )
         return frame
 
     def _usage_table_card(self, title, desc, headers, rows, *, stretches=None, empty_text="暂无数据", selectable_cols=None):
         card = self._panel_card()
         box = QVBoxLayout(card)
-        box.setContentsMargins(14, 12, 14, 12)
+        box.setContentsMargins(12, 11, 12, 11)
         box.setSpacing(8)
         head = QLabel(title)
         head.setObjectName("cardTitle")
         box.addWidget(head)
         if desc:
             self._usage_add_line(box, desc, object_name="cardDesc")
-        box.addWidget(self._usage_table_row(headers, stretches=stretches, header=True))
+        table_wrap = QWidget()
+        table_wrap.setStyleSheet("background: transparent;")
+        table_box = QVBoxLayout(table_wrap)
+        table_box.setContentsMargins(0, 0, 0, 0)
+        table_box.setSpacing(0)
+        table_box.addWidget(self._usage_table_row(headers, stretches=stretches, header=True))
         if rows:
-            for row_values in rows:
-                box.addWidget(
+            for idx, row_values in enumerate(rows):
+                table_box.addWidget(
                     self._usage_table_row(
                         row_values,
                         stretches=stretches,
                         header=False,
                         selectable_cols=selectable_cols,
+                        row_index=idx,
+                        last=(idx == len(rows) - 1),
                     )
                 )
+        else:
+            self._usage_add_line(table_box, empty_text, object_name="mutedText")
+        box.addWidget(table_wrap)
+        return card
+
+    def _usage_stack_row(self, item, *, last=False):
+        data = item if isinstance(item, dict) else {}
+        row = QWidget()
+        box = QHBoxLayout(row)
+        box.setContentsMargins(0, 9, 0, 9)
+        box.setSpacing(12)
+        divider = self._usage_qss_rgba(C["text"], 12)
+        row.setStyleSheet(
+            f"background: transparent; border: none; border-bottom: {'0px' if last else '1px'} solid {divider};"
+        )
+
+        left = QVBoxLayout()
+        left.setContentsMargins(0, 0, 0, 0)
+        left.setSpacing(2)
+        title = QLabel(str(data.get("title") or ""))
+        title.setWordWrap(True)
+        title.setStyleSheet(
+            f"background: transparent; color: {C['text']}; font-size: {F['font_body']}px; font-weight: 650;"
+        )
+        left.addWidget(title)
+        detail_text = str(data.get("detail") or "").strip()
+        if detail_text:
+            detail = QLabel(detail_text)
+            detail.setWordWrap(True)
+            detail.setStyleSheet(
+                f"background: transparent; color: {C['muted']}; font-size: {F['font_caption']}px; font-weight: 500;"
+            )
+            left.addWidget(detail)
+        box.addLayout(left, 1)
+
+        right_wrap = QWidget()
+        right_box = QVBoxLayout(right_wrap)
+        right_box.setContentsMargins(0, 0, 0, 0)
+        right_box.setSpacing(2)
+        right = QLabel(str(data.get("right") or ""))
+        right.setWordWrap(True)
+        right.setAlignment(Qt.AlignRight | Qt.AlignTop)
+        right.setStyleSheet(
+            f"background: transparent; color: {C['text']}; font-size: {F['font_body']}px; font-weight: 650;"
+        )
+        right_box.addWidget(right, 0, Qt.AlignRight | Qt.AlignTop)
+        right_detail_text = str(data.get("right_detail") or "").strip()
+        if right_detail_text:
+            right_detail = QLabel(right_detail_text)
+            right_detail.setWordWrap(True)
+            right_detail.setAlignment(Qt.AlignRight | Qt.AlignTop)
+            right_detail.setStyleSheet(
+                f"background: transparent; color: {C['muted']}; font-size: {F['font_caption']}px; font-weight: 500;"
+            )
+            right_box.addWidget(right_detail, 0, Qt.AlignRight | Qt.AlignTop)
+        box.addWidget(right_wrap, 0)
+        return row
+
+    def _usage_stack_card(self, title, desc, items, *, empty_text="暂无数据"):
+        card = self._panel_card()
+        box = QVBoxLayout(card)
+        box.setContentsMargins(12, 11, 12, 11)
+        box.setSpacing(8)
+        head = QLabel(title)
+        head.setObjectName("cardTitle")
+        box.addWidget(head)
+        if desc:
+            self._usage_add_line(box, desc, object_name="cardDesc")
+        rows = list(items or [])
+        if rows:
+            list_wrap = QWidget()
+            list_wrap.setStyleSheet("background: transparent;")
+            list_box = QVBoxLayout(list_wrap)
+            list_box.setContentsMargins(0, 0, 0, 0)
+            list_box.setSpacing(0)
+            for idx, item in enumerate(rows):
+                list_box.addWidget(self._usage_stack_row(item, last=(idx == len(rows) - 1)))
+            box.addWidget(list_wrap)
         else:
             self._usage_add_line(box, empty_text, object_name="mutedText")
         return card
 
-    def _usage_chart_card(self, title, desc="", *, chart_pixmap=None, empty_text="暂无可视化数据"):
+    def _usage_inline_stat(self, title, value, detail=""):
+        card = QFrame()
+        card.setStyleSheet(
+            f"background: {self._usage_qss_rgba(C['text'], 7)}; border: none; border-radius: {F['radius_md']}px;"
+        )
+        box = QVBoxLayout(card)
+        box.setContentsMargins(10, 7, 10, 7)
+        box.setSpacing(2)
+        head = QLabel(str(title or ""))
+        head.setStyleSheet(
+            f"background: transparent; color: {C['muted']}; font-size: {F['font_caption']}px; font-weight: 600;"
+        )
+        box.addWidget(head)
+        body = QLabel(str(value or ""))
+        body.setWordWrap(True)
+        body.setStyleSheet(
+            f"background: transparent; color: {C['text']}; font-size: {F['font_body']}px; font-weight: 700;"
+        )
+        box.addWidget(body)
+        if detail:
+            tail = QLabel(str(detail or ""))
+            tail.setWordWrap(True)
+            tail.setStyleSheet(
+                f"background: transparent; color: {C['muted']}; font-size: {F['font_caption']}px; font-weight: 500;"
+            )
+            box.addWidget(tail)
+        return card
+
+    def _usage_chart_card(self, title, desc="", *, chart_pixmap=None, empty_text="暂无可视化数据", summary_items=None, footnote=""):
         card = self._panel_card()
         box = QVBoxLayout(card)
-        box.setContentsMargins(14, 12, 14, 12)
+        box.setContentsMargins(12, 11, 12, 11)
         box.setSpacing(8)
         head = QLabel(title)
         head.setObjectName("cardTitle")
@@ -3455,11 +3788,31 @@ class PersonalUsageMixin:
         if chart_pixmap is None or chart_pixmap.isNull():
             self._usage_add_line(box, empty_text, object_name="mutedText")
             return card
-        chart = QLabel()
-        chart.setObjectName("cardInset")
-        chart.setAlignment(Qt.AlignCenter)
-        chart.setPixmap(chart_pixmap)
+        chart = _ResponsivePixmapLabel(max_width=430)
+        chart.setStyleSheet(
+            f"background: {C['layer1']}; border: 1px solid {C['stroke_default']}; "
+            f"border-radius: {F['radius_md']}px; padding: 6px;"
+        )
+        chart.set_source_pixmap(chart_pixmap)
         box.addWidget(chart)
+        items = [item for item in (summary_items or []) if item]
+        if items:
+            summary_grid = QGridLayout()
+            summary_grid.setSpacing(6)
+            summary_cols = 2 if len(items) > 1 else 1
+            for idx, item in enumerate(items[:3]):
+                summary_grid.addWidget(
+                    self._usage_inline_stat(
+                        item.get("label") or "",
+                        item.get("value") or "",
+                        item.get("detail") or "",
+                    ),
+                    int(idx / summary_cols),
+                    idx % summary_cols,
+                )
+            box.addLayout(summary_grid)
+        if footnote:
+            self._usage_add_line(box, footnote, object_name="softTextSmall")
         return card
 
     def _usage_chart_pixmap(self, width=540, height=220):
@@ -3468,109 +3821,248 @@ class PersonalUsageMixin:
         return canvas
 
     def _usage_line_chart_pixmap(self, rows, *, width=540, height=220):
-        items = [(str(row.get("label") or "").strip(), max(0.0, float(row.get("value") or 0))) for row in (rows or []) if str(row.get("label") or "").strip()]
+        items = [
+            (
+                str(row.get("label") or "").strip(),
+                max(0.0, float(row.get("value") or 0)),
+                str(row.get("value_label") or "").strip(),
+            )
+            for row in (rows or [])
+            if str(row.get("label") or "").strip()
+        ]
         if not items:
             return QPixmap()
         canvas = self._usage_chart_pixmap(width=width, height=height)
         painter = QPainter(canvas)
         try:
             painter.setRenderHint(QPainter.Antialiasing, True)
-            muted = QColor(str(C["stroke_default"]))
-            muted.setAlpha(140)
-            text_color = QColor(str(C["text"]))
-            accent = QColor(str(C["accent_text"]))
-            accent_fill = QColor(accent)
-            accent_fill.setAlpha(56)
             w = canvas.width()
             h = canvas.height()
-            left = 42
-            top = 18
-            right = 12
-            bottom = 34
-            plot_w = max(1, w - left - right)
-            plot_h = max(1, h - top - bottom)
-            max_value = max(value for _, value in items)
-            baseline = top + plot_h
-            painter.setPen(QPen(muted, 1))
-            painter.drawLine(left, top, left, baseline)
-            painter.drawLine(left, baseline, left + plot_w, baseline)
+            panel_rect = QRectF(10.0, 8.0, float(w - 20), float(h - 16))
+            plot_rect = QRectF(panel_rect.left() + 34.0, panel_rect.top() + 22.0, panel_rect.width() - 52.0, panel_rect.height() - 52.0)
+            painter.setPen(QPen(self._usage_qcolor(C["stroke_default"], alpha=180), 1))
+            painter.setBrush(self._usage_qcolor(C["layer1"]))
+            painter.drawRoundedRect(panel_rect, 12.0, 12.0)
+            painter.setPen(QPen(self._usage_qcolor(C["stroke_default"], alpha=160), 1))
+            painter.setBrush(self._usage_qcolor(C["bg_subtle"], alpha=210))
+            painter.drawRoundedRect(plot_rect, 10.0, 10.0)
+
+            max_value = max(value for _, value, _ in items)
             if max_value <= 0:
-                painter.setPen(text_color)
-                painter.drawText(left + 8, top + 24, "暂无 usage 数据")
+                painter.setPen(self._usage_qcolor(C["text"]))
+                painter.drawText(plot_rect.adjusted(18, 18, -18, -18), Qt.AlignCenter, "暂无 usage 数据")
                 return canvas
-            painter.setPen(QPen(muted, 1, Qt.DashLine))
-            for ratio in (0.25, 0.5, 0.75):
-                y = int(top + plot_h * (1.0 - ratio))
-                painter.drawLine(left, y, left + plot_w, y)
-            step = plot_w / max(1, len(items) - 1)
+
+            if max_value >= 1:
+                magnitude = 10 ** int(math.floor(math.log10(max_value)))
+                normalized = max_value / magnitude
+                if normalized <= 1:
+                    nice_max = 1 * magnitude
+                elif normalized <= 2:
+                    nice_max = 2 * magnitude
+                elif normalized <= 5:
+                    nice_max = 5 * magnitude
+                else:
+                    nice_max = 10 * magnitude
+            else:
+                nice_max = 1.0
+
+            baseline = plot_rect.bottom()
+            tick_count = 4
+            grid_pen = QPen(self._usage_qcolor(C["stroke_default"], alpha=130), 1, Qt.DashLine)
+            text_color = self._usage_qcolor(C["text"])
+            soft_text = self._usage_qcolor(C["text_soft"])
+            accent = self._usage_qcolor(C["accent_text"])
+            label_font = painter.font()
+            label_font.setPointSize(max(9, F["font_caption"] - 1))
+            painter.setFont(label_font)
+            for tick in range(tick_count + 1):
+                ratio = tick / tick_count
+                y = baseline - (plot_rect.height() * ratio)
+                painter.setPen(grid_pen)
+                painter.drawLine(QPointF(plot_rect.left(), y), QPointF(plot_rect.right(), y))
+                value_text = self._usage_num(int(round(nice_max * ratio)))
+                painter.setPen(soft_text)
+                painter.drawText(
+                    QRectF(panel_rect.left() + 2.0, y - 9.0, 28.0, 18.0),
+                    Qt.AlignRight | Qt.AlignVCenter,
+                    value_text,
+                )
+
+            avg_value = sum(value for _, value, _ in items) / max(1, len(items))
+            if avg_value > 0:
+                y_avg = baseline - (avg_value / nice_max) * plot_rect.height()
+                painter.setPen(QPen(self._usage_qcolor(C["accent"], alpha=90), 1, Qt.DashLine))
+                painter.drawLine(QPointF(plot_rect.left(), y_avg), QPointF(plot_rect.right(), y_avg))
+                painter.setPen(soft_text)
+                painter.drawText(
+                    QRectF(plot_rect.left() + 10.0, y_avg - 16.0, 72.0, 14.0),
+                    Qt.AlignLeft | Qt.AlignVCenter,
+                    f"均值 {self._usage_num(int(round(avg_value)))}",
+                )
+
+            step = plot_rect.width() / max(1, len(items) - 1)
             points = []
-            for idx, (label, value) in enumerate(items):
-                x = int(left + idx * step)
-                y = int(baseline - (value / max_value) * plot_h)
-                points.append((x, y, label, value))
-            painter.setPen(QPen(accent_fill, 2))
-            for idx in range(1, len(points)):
-                x1, y1, _, _ = points[idx - 1]
-                x2, y2, _, _ = points[idx]
-                painter.drawLine(x1, y1, x2, y2)
-                painter.drawLine(x1, baseline, x1, y1)
-                painter.drawLine(x2, baseline, x2, y2)
-            painter.setPen(QPen(accent, 2))
-            for idx in range(1, len(points)):
-                x1, y1, _, _ = points[idx - 1]
-                x2, y2, _, _ = points[idx]
-                painter.drawLine(x1, y1, x2, y2)
-            painter.setBrush(accent)
-            painter.setPen(QPen(accent, 1))
-            for x, y, label, value in points:
-                painter.drawEllipse(x - 3, y - 3, 6, 6)
-                painter.drawText(x - 16, baseline + 18, label[-5:])
-            painter.setPen(text_color)
-            painter.drawText(left, top - 2 + 12, self._usage_num(int(max_value)))
+            path = QPainterPath()
+            for idx, (label, value, value_label) in enumerate(items):
+                x = plot_rect.center().x() if len(items) == 1 else plot_rect.left() + idx * step
+                y = baseline - (value / nice_max) * plot_rect.height()
+                point = QPointF(x, y)
+                points.append((point, label, value, value_label or self._usage_num(int(round(value)))))
+                if idx == 0:
+                    path.moveTo(point)
+                else:
+                    path.lineTo(point)
+
+            fill_path = QPainterPath(path)
+            fill_path.lineTo(points[-1][0].x(), baseline)
+            fill_path.lineTo(points[0][0].x(), baseline)
+            fill_path.closeSubpath()
+            fill = QLinearGradient(plot_rect.left(), plot_rect.top(), plot_rect.left(), baseline)
+            fill.setColorAt(0.0, self._usage_qcolor(C["accent"], alpha=96))
+            fill.setColorAt(1.0, self._usage_qcolor(C["accent"], alpha=0))
+            painter.fillPath(fill_path, fill)
+
+            painter.setPen(QPen(self._usage_qcolor(C["accent"], alpha=56), 5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            painter.drawPath(path)
+            painter.setPen(QPen(accent, 2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            painter.drawPath(path)
+
+            peak_idx = max(range(len(points)), key=lambda idx: points[idx][2])
+            last_idx = len(points) - 1
+            for idx, (point, _label, _value, _value_label) in enumerate(points):
+                tone = accent if idx in {peak_idx, last_idx} else self._usage_qcolor(C["accent"], alpha=196)
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(self._usage_qcolor(C["panel"]))
+                painter.drawEllipse(point, 5.5, 5.5)
+                painter.setBrush(tone)
+                painter.drawEllipse(point, 3.0, 3.0)
+
+            x_indices = set(range(len(points))) if len(points) <= 7 else {0, len(points) // 2, len(points) - 1}
+            painter.setPen(soft_text)
+            for idx, (point, label, _value, _value_label) in enumerate(points):
+                if idx not in x_indices:
+                    continue
+                painter.drawText(
+                    QRectF(point.x() - 24.0, baseline + 10.0, 48.0, 18.0),
+                    Qt.AlignHCenter | Qt.AlignTop,
+                    label,
+                )
+
+            meta_font = painter.font()
+            meta_font.setPointSize(F["font_caption"])
+            meta_font.setBold(True)
+            painter.setFont(meta_font)
+            painter.setPen(accent)
+            painter.drawText(
+                QRectF(plot_rect.left() + 12.0, panel_rect.top() + 4.0, plot_rect.width() - 24.0, 16.0),
+                Qt.AlignLeft | Qt.AlignVCenter,
+                f"峰值 {points[peak_idx][1]} · {points[peak_idx][3]}",
+            )
+            painter.setPen(soft_text)
+            painter.drawText(
+                QRectF(plot_rect.left() + 12.0, panel_rect.top() + 4.0, plot_rect.width() - 24.0, 16.0),
+                Qt.AlignRight | Qt.AlignVCenter,
+                f"最新 {points[last_idx][1]} · {points[last_idx][3]}",
+            )
         finally:
             painter.end()
         return canvas
 
     def _usage_bar_chart_pixmap(self, rows, *, width=540, height=220):
-        items = [(str(row.get("label") or "").strip(), max(0.0, float(row.get("value") or 0))) for row in (rows or []) if str(row.get("label") or "").strip()]
+        items = [
+            {
+                "label": str(row.get("label") or "").strip(),
+                "value": max(0.0, float(row.get("value") or 0)),
+                "value_label": str(row.get("value_label") or "").strip(),
+                "detail": str(row.get("detail") or "").strip(),
+            }
+            for row in (rows or [])
+            if str(row.get("label") or "").strip()
+        ]
         if not items:
             return QPixmap()
-        items = items[:6]
+        items = items[:4]
         canvas = self._usage_chart_pixmap(width=width, height=height)
         painter = QPainter(canvas)
         try:
             painter.setRenderHint(QPainter.Antialiasing, True)
-            axis = QColor(str(C["stroke_default"]))
-            axis.setAlpha(140)
-            text_color = QColor(str(C["text"]))
-            accent = QColor(str(C["accent_text"]))
             w = canvas.width()
             h = canvas.height()
-            left = 120
-            top = 18
-            right = 18
-            bottom = 18
-            plot_w = max(1, w - left - right)
-            row_h = max(22, int((h - top - bottom) / max(1, len(items))))
-            max_value = max(value for _, value in items)
-            painter.setPen(QPen(axis, 1))
-            painter.drawLine(left, top, left, h - bottom)
+            panel_rect = QRectF(10.0, 8.0, float(w - 20), float(h - 16))
+            painter.setPen(QPen(self._usage_qcolor(C["stroke_default"], alpha=180), 1))
+            painter.setBrush(self._usage_qcolor(C["layer1"]))
+            painter.drawRoundedRect(panel_rect, 12.0, 12.0)
+
+            left = panel_rect.left() + 20.0
+            top = panel_rect.top() + 20.0
+            right = panel_rect.right() - 14.0
+            label_w = 148.0
+            value_w = 84.0
+            plot_left = left + label_w
+            plot_right = right - value_w
+            plot_w = max(1.0, plot_right - plot_left)
+            row_h = max(36.0, (panel_rect.height() - 36.0) / max(1, len(items)))
+            max_value = max(item["value"] for item in items)
+            total_value = sum(item["value"] for item in items)
             if max_value <= 0:
-                painter.setPen(text_color)
-                painter.drawText(left + 8, top + 24, "暂无 usage 数据")
+                painter.setPen(self._usage_qcolor(C["text"]))
+                painter.drawText(panel_rect.adjusted(18, 18, -18, -18), Qt.AlignCenter, "暂无 usage 数据")
                 return canvas
-            for idx, (label, value) in enumerate(items):
+
+            painter.setPen(self._usage_qcolor(C["text_soft"]))
+            painter.drawText(
+                QRectF(plot_left, panel_rect.top() + 4.0, plot_w + value_w, 16.0),
+                Qt.AlignRight | Qt.AlignVCenter,
+                f"Top 3 占比 {self._usage_share_text(sum(item['value'] for item in items[:3]), total_value, empty='0%').replace('占比 ', '')}",
+            )
+
+            title_font = painter.font()
+            title_font.setPointSize(F["font_body"])
+            title_font.setBold(True)
+            detail_font = painter.font()
+            detail_font.setPointSize(F["font_caption"])
+
+            for idx, item in enumerate(items):
                 y = top + idx * row_h
-                bar_w = int((value / max_value) * plot_w)
-                painter.setPen(text_color)
-                painter.drawText(8, y + 15, label[:14])
-                fill = QColor(accent)
-                fill.setAlpha(170)
-                painter.fillRect(left + 8, y + 4, max(4, bar_w), max(10, row_h - 10), fill)
-                painter.setPen(QPen(axis, 1))
-                painter.drawRect(left + 8, y + 4, plot_w - 8, max(10, row_h - 10))
-                painter.setPen(text_color)
-                painter.drawText(left + 14 + min(bar_w, plot_w - 40), y + 15, self._usage_num(int(value)))
+                rank_text = str(idx + 1)
+                painter.setFont(detail_font)
+                painter.setPen(self._usage_qcolor(C["muted"]))
+                painter.drawText(QRectF(left - 8.0, y + 2.0, 18.0, 14.0), Qt.AlignCenter, rank_text)
+
+                painter.setFont(title_font)
+                painter.setPen(self._usage_qcolor(C["text"]))
+                left_label = self._usage_elided_text(painter, item["label"], label_w - 18.0)
+                painter.drawText(QRectF(left + 8.0, y + 1.0, label_w - 18.0, 18.0), Qt.AlignLeft | Qt.AlignVCenter, left_label)
+                painter.setFont(detail_font)
+                painter.setPen(self._usage_qcolor(C["muted"]))
+                detail = self._usage_share_text(item["value"], total_value)
+                painter.drawText(QRectF(left + 8.0, y + 18.0, label_w - 18.0, 14.0), Qt.AlignLeft | Qt.AlignVCenter, detail)
+
+                track_rect = QRectF(plot_left, y + 8.0, plot_w, 12.0)
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(self._usage_qcolor(C["bg_subtle"], alpha=220))
+                painter.drawRoundedRect(track_rect, 6.0, 6.0)
+                bar_w = max(10.0, (item["value"] / max_value) * plot_w) if item["value"] > 0 else 0.0
+                fill_rect = QRectF(plot_left, y + 8.0, bar_w, 12.0)
+                fill = QLinearGradient(fill_rect.left(), 0.0, fill_rect.right(), 0.0)
+                fill.setColorAt(0.0, self._usage_qcolor(C["accent"], alpha=210))
+                fill.setColorAt(1.0, self._usage_qcolor(C["accent_hover"], alpha=186))
+                painter.setBrush(fill)
+                painter.drawRoundedRect(fill_rect, 6.0, 6.0)
+
+                painter.setFont(title_font)
+                painter.setPen(self._usage_qcolor(C["text"]))
+                value_label = item["value_label"] or self._usage_num(int(round(item["value"])))
+                right_label = self._usage_elided_text(painter, value_label, value_w - 10.0)
+                painter.drawText(QRectF(plot_right + 10.0, y + 1.0, value_w - 10.0, 18.0), Qt.AlignRight | Qt.AlignVCenter, right_label)
+                painter.setFont(detail_font)
+                painter.setPen(self._usage_qcolor(C["muted"]))
+                painter.drawText(
+                    QRectF(plot_right + 10.0, y + 18.0, value_w - 10.0, 14.0),
+                    Qt.AlignRight | Qt.AlignVCenter,
+                    self._usage_share_text(item["value"], total_value, empty="0%"),
+                )
         finally:
             painter.end()
         return canvas
@@ -3578,86 +4070,124 @@ class PersonalUsageMixin:
     def _usage_token_cost_card(self, stats):
         card = self._panel_card()
         box = QVBoxLayout(card)
-        box.setContentsMargins(14, 12, 14, 12)
-        box.setSpacing(10)
+        box.setContentsMargins(12, 11, 12, 11)
+        box.setSpacing(8)
         head = QLabel("Token / 费用")
         head.setObjectName("cardTitle")
         box.addWidget(head)
-        self._usage_add_line(box, "把 token 和费用集中放在一张卡片里看，避免与其它活跃度统计混在一起。图表使用启动器内自绘方案，避免额外依赖。", object_name="cardDesc")
+        self._usage_add_line(box, "把总量、波动趋势和渠道集中度放在同一张卡片里看，先判断最近是不是抬升，再判断消耗是不是集中在少数入口。", object_name="cardDesc")
 
-        metric_grid = QGridLayout()
-        metric_grid.setSpacing(10)
-        metric_grid.addWidget(
+        activity = stats.get("activity") or {}
+        metric_grid = self._usage_metric_grid([
             self._usage_metric_card(
                 "今天",
                 self._usage_num((stats.get("today") or {}).get("total_tokens")),
                 f"费用 {self._usage_cost_label(stats.get('today') or {})}",
                 accent=True,
             ),
-            0,
-            0,
-        )
-        metric_grid.addWidget(
             self._usage_metric_card(
                 "近 7 天",
                 self._usage_num((stats.get("recent") or {}).get("total_tokens")),
                 f"费用 {self._usage_cost_label(stats.get('recent') or {})}",
             ),
-            0,
-            1,
-        )
-        metric_grid.addWidget(
             self._usage_metric_card(
                 "累计",
                 self._usage_num((stats.get("all") or {}).get("total_tokens")),
                 f"费用 {self._usage_cost_label(stats.get('all') or {})}",
             ),
-            0,
-            2,
-        )
-        activity = stats.get("activity") or {}
-        metric_grid.addWidget(
             self._usage_metric_card(
                 "已计价事件",
                 self._usage_num(activity.get("priced_events")),
                 f"估算计价 {self._usage_num(activity.get('estimated_priced_events'))}  · legacy {self._usage_num(activity.get('legacy_unpriced_events'))}",
             ),
-            0,
-            3,
-        )
+        ], columns=2, spacing=8)
         box.addLayout(metric_grid)
 
         days = list(reversed(stats.get("days") or []))
-        trend_rows = [{"label": str(row.get("date") or "")[5:], "value": row.get("total_tokens", 0)} for row in days]
-        channel_rows = list(stats.get("channels") or [])
-        use_cost = any(float(row.get("cost_total", 0) or 0) > 0 for row in channel_rows)
-        composition_rows = [
-            {"label": row.get("label") or row.get("channel_id") or "未知渠道", "value": row.get("cost_total" if use_cost else "total_tokens", 0)}
-            for row in channel_rows[:6]
+        trend_rows = [
+            {
+                "label": str(row.get("date") or "")[5:],
+                "value": row.get("total_tokens", 0),
+                "value_label": self._usage_num(row.get("total_tokens", 0)),
+            }
+            for row in days
         ]
-        chart_grid = QGridLayout()
-        chart_grid.setSpacing(10)
-        chart_grid.addWidget(
+        channel_rows = list(stats.get("channels") or [])
+        use_cost = bool(channel_rows) and (not bool((stats.get("activity") or {}).get("mixed_currency"))) and any(
+            float(row.get("cost_total", 0) or 0) > 0 for row in channel_rows
+        )
+        composition_rows = [
+            {
+                "label": row.get("label") or row.get("channel_id") or "未知渠道",
+                "value": row.get("cost_total" if use_cost else "total_tokens", 0),
+                "value_label": self._usage_cost_label(row) if use_cost else self._usage_num(row.get("total_tokens", 0)),
+                "detail": " · ".join(
+                    part
+                    for part in (
+                        lz._usage_mode_label(row.get("mode")),
+                        str(row.get("api_card_label") or "").strip(),
+                    )
+                    if part
+                ),
+            }
+            for row in channel_rows[:5]
+        ]
+        trend_total = sum(max(0, int(row.get("value") or 0)) for row in trend_rows)
+        peak_trend = max(trend_rows, key=lambda row: float(row.get("value") or 0), default={})
+        top_composition = composition_rows[0] if composition_rows else {}
+        composition_total = sum(max(0.0, float(row.get("value") or 0)) for row in composition_rows)
+        box.addWidget(
             self._usage_chart_card(
                 "7 日 Token 趋势",
-                "折线图按天观察 token 波动，适合判断最近是不是突然抬升。",
-                chart_pixmap=self._usage_line_chart_pixmap(trend_rows),
+                "先看整体波动，再看峰值落在哪一天，适合判断是否出现突然抬升。",
+                chart_pixmap=self._usage_line_chart_pixmap(trend_rows, width=460, height=226),
                 empty_text="最近几天还没有足够的 token 数据。",
+                summary_items=[
+                    {"label": "7 日总量", "value": self._usage_num(trend_total)},
+                    {
+                        "label": "日均",
+                        "value": self._usage_num(int(round(trend_total / max(1, len(trend_rows))))),
+                    },
+                    {
+                        "label": "峰值日",
+                        "value": peak_trend.get("value_label") or self._usage_num(peak_trend.get("value", 0)),
+                        "detail": str(peak_trend.get("label") or ""),
+                    },
+                ],
             ),
-            0,
-            0,
         )
-        chart_grid.addWidget(
+        box.addWidget(
             self._usage_chart_card(
                 "渠道费用结构" if use_cost else "渠道 Token 结构",
-                "优先按渠道看消耗结构；如果历史还没计价，就回退到 token 结构。",
-                chart_pixmap=self._usage_bar_chart_pixmap(composition_rows),
+                "看消耗是否过度集中在少数入口；存在多币种历史时，会自动回退到 token 结构，避免误读费用。",
+                chart_pixmap=self._usage_bar_chart_pixmap(composition_rows, width=460, height=226),
                 empty_text="当前还没有可分解的渠道结构数据。",
+                summary_items=[
+                    {
+                        "label": "主渠道",
+                        "value": str(top_composition.get("label") or "暂无"),
+                        "detail": str(top_composition.get("value_label") or ""),
+                    },
+                    {
+                        "label": "最高占比",
+                        "value": self._usage_share_text(
+                            top_composition.get("value", 0),
+                            composition_total,
+                            empty="0%",
+                        ).replace("占比 ", ""),
+                    },
+                    {
+                        "label": "Top 3 集中度",
+                        "value": self._usage_share_text(
+                            sum(float(row.get("value") or 0) for row in composition_rows[:3]),
+                            composition_total,
+                            empty="0%",
+                        ).replace("占比 ", ""),
+                    },
+                ],
+                footnote="" if use_cost else "当前优先按 token 展示结构；如果后续冻结了统一币种费用，结构图会自动切到费用视角。",
             ),
-            0,
-            1,
         )
-        box.addLayout(chart_grid)
         return card
 
     def _load_langfuse_status(self):
@@ -3666,6 +4196,8 @@ class PersonalUsageMixin:
             "enabled": False,
             "plugin_exists": False,
             "llmcore_hook": False,
+            "agent_hook_loader": False,
+            "hook_registry": False,
             "host": "",
             "public_key_set": False,
             "secret_key_set": False,
@@ -3678,9 +4210,20 @@ class PersonalUsageMixin:
             return status
 
         plugin_fp = os.path.join(self.agent_dir, "plugins", "langfuse_tracing.py")
+        hooks_fp = os.path.join(self.agent_dir, "plugins", "hooks.py")
+        agentmain_fp = os.path.join(self.agent_dir, "agentmain.py")
         llmcore_fp = os.path.join(self.agent_dir, "llmcore.py")
-        mykey_fp = os.path.join(self.agent_dir, "mykey.py")
+        mykey_fp = lz.resolve_mykey_source_path(self.agent_dir)
         status["plugin_exists"] = os.path.isfile(plugin_fp)
+        status["hook_registry"] = os.path.isfile(hooks_fp)
+
+        if os.path.isfile(agentmain_fp):
+            try:
+                with open(agentmain_fp, "r", encoding="utf-8") as f:
+                    agentmain_src = f.read()
+                status["agent_hook_loader"] = ("plugins.hooks" in agentmain_src) and ("discover_and_load" in agentmain_src)
+            except Exception:
+                status["agent_hook_loader"] = False
 
         if os.path.isfile(llmcore_fp):
             try:
@@ -3690,7 +4233,7 @@ class PersonalUsageMixin:
             except Exception:
                 status["llmcore_hook"] = False
 
-        parsed = lz.parse_mykey_py(mykey_fp)
+        parsed = lz.parse_mykey_source(mykey_fp)
         if parsed.get("error"):
             status["parse_error"] = str(parsed.get("error"))
         cfg = (parsed.get("extras") or {}).get("langfuse_config")
@@ -3711,10 +4254,15 @@ class PersonalUsageMixin:
                 "host": self._LANGFUSE_DEFAULT_HOST,
             }
 
-        if status["configured"] and status["plugin_exists"] and status["llmcore_hook"]:
+        modern_chain = status["plugin_exists"] and status["hook_registry"] and status["agent_hook_loader"]
+        legacy_chain = status["plugin_exists"] and status["llmcore_hook"]
+        if status["configured"] and (modern_chain or legacy_chain):
             if status["public_key_set"] and status["secret_key_set"]:
                 status["enabled"] = True
-                status["summary"] = "已接好 Langfuse 追踪链路。GenericAgent 运行时读取 mykey.py 后，会在 llmcore 中按需 import 插件并上报 trace。"
+                if modern_chain:
+                    status["summary"] = "已接好 Langfuse 追踪链路。GenericAgent 启动时会通过 agentmain 的 hooks 自动发现插件，并在运行中上报 trace。"
+                else:
+                    status["summary"] = "已接好 Langfuse 追踪链路。当前上游仍在使用 llmcore 里的旧式插件挂钩。"
             else:
                 status["summary"] = "检测到 langfuse_config，但 key 还没填完整。"
         elif status["configured"]:
@@ -3729,7 +4277,13 @@ class PersonalUsageMixin:
         else:
             status["notes"].append("mykey.py 里还没有 langfuse_config；目前界面只能展示本地日志。")
         status["notes"].append(f"插件文件：{'存在' if status['plugin_exists'] else '缺失'}")
-        status["notes"].append(f"llmcore 挂钩：{'已发现' if status['llmcore_hook'] else '未发现'}")
+        status["notes"].append(f"Hook 注册器：{'存在' if status['hook_registry'] else '缺失'}")
+        if status["agent_hook_loader"]:
+            status["notes"].append("启动链路：已发现 agentmain 的 hooks 自动加载入口。")
+        elif status["llmcore_hook"]:
+            status["notes"].append("启动链路：已发现 llmcore 的旧式 Langfuse 直连挂钩。")
+        else:
+            status["notes"].append("启动链路：未发现 Langfuse 插件加载入口。")
         if status["parse_error"]:
             status["notes"].append(f"mykey.py 解析状态：{status['parse_error']}")
         return status
@@ -3924,6 +4478,13 @@ class PersonalUsageMixin:
                 "mixed_currency": False,
             }
 
+        def finalize_cost_metrics(target):
+            row = target if isinstance(target, dict) else {}
+            row["input_side_tokens"] = lz.usage_input_side_tokens(row)
+            row["usage_total_tokens"] = lz.usage_total_consumed_tokens(row)
+            row["cache_hit_rate"] = lz.usage_cache_hit_rate(row)
+            return row
+
         today_total = make_total()
         recent_total = make_total()
         all_total = make_total()
@@ -3954,6 +4515,7 @@ class PersonalUsageMixin:
         if not lz.is_valid_agent_dir(self.agent_dir):
             for item in (today_total, recent_total, all_total):
                 item["mode"] = lz._usage_mode_from_sources(item.get("sources"))
+                finalize_cost_metrics(item)
             return {
                 "today": today_total,
                 "recent": recent_total,
@@ -4300,9 +4862,21 @@ class PersonalUsageMixin:
         for item in (today_total, recent_total, all_total):
             item["mode"] = lz._usage_mode_from_sources(item.get("sources"))
             item["cost_total"] = round(float(item.get("cost_total", 0) or 0), 8)
+            finalize_cost_metrics(item)
         for row in days:
             row["mode"] = lz._usage_mode_from_sources(row.get("sources"))
             row["cost_total"] = round(float(row.get("cost_total", 0) or 0), 8)
+            finalize_cost_metrics(row)
+        for row in channels:
+            finalize_cost_metrics(row)
+        for row in models:
+            finalize_cost_metrics(row)
+        for row in sources:
+            finalize_cost_metrics(row)
+        for row in sessions:
+            finalize_cost_metrics(row)
+        for row in timeline:
+            finalize_cost_metrics(row)
         activity["cost_total"] = round(float(activity.get("cost_total", 0) or 0), 8)
 
         if activity["event_count"] <= 0:
@@ -4395,7 +4969,16 @@ class PersonalUsageMixin:
                 self._settings_usage_local_loading = False
                 self._settings_usage_local_loading_context = None
                 self._clear_layout(self.settings_usage_list_layout)
-                self._render_usage_panel_content(stats, target, langfuse)
+                try:
+                    self._render_usage_panel_content(stats, target, langfuse)
+                except Exception as e:
+                    self._clear_layout(self.settings_usage_list_layout)
+                    self.settings_usage_notice.setText(f"使用日志渲染失败：{e}")
+                    fallback = QLabel("当前使用日志面板渲染失败，请稍后重试。若问题持续出现，请反馈这个错误。")
+                    fallback.setWordWrap(True)
+                    fallback.setObjectName("mutedText")
+                    self.settings_usage_list_layout.addWidget(fallback)
+                    self._set_status(f"使用日志渲染失败：{e}")
 
             poster = getattr(self, "_api_on_ui_thread", None)
             if callable(poster):
@@ -4445,44 +5028,28 @@ class PersonalUsageMixin:
         self.settings_usage_list_layout.addWidget(self._usage_pricing_card(stats, target))
         self.settings_usage_list_layout.addWidget(self._usage_token_cost_card(stats))
 
-        stats_grid = QGridLayout()
-        stats_grid.setSpacing(10)
-        stats_grid.addWidget(
+        stats_grid = self._usage_metric_grid([
             self._usage_metric_card(
                 "活跃概览",
                 self._usage_num(stats["activity"]["sessions_with_events"]),
                 f"有日志会话 / 全部 {self._usage_num(stats['activity']['session_count'])}  ·  最近活动 {self._usage_time_label(stats['activity']['last_event_ts'])}",
             ),
-            0,
-            0,
-        )
-        stats_grid.addWidget(
             self._usage_metric_card(
                 "渠道数",
                 self._usage_num(len(stats["activity"]["channels"])),
                 "出现过 usage 的聊天渠道",
             ),
-            0,
-            1,
-        )
-        stats_grid.addWidget(
             self._usage_metric_card(
                 "来源模式",
                 lz._usage_mode_label((stats.get("recent") or {}).get("mode")),
                 f"今天 {lz._usage_mode_label((stats.get('today') or {}).get('mode'))}  ·  累计 {lz._usage_mode_label((stats.get('all') or {}).get('mode'))}",
             ),
-            0,
-            2,
-        )
-        stats_grid.addWidget(
             self._usage_metric_card(
                 "未计价历史",
                 self._usage_num(stats["activity"]["legacy_unpriced_events"]),
                 "legacy/unpriced 事件",
             ),
-            0,
-            3,
-        )
+        ], columns=2, spacing=8)
         self.settings_usage_list_layout.addLayout(stats_grid)
 
         warnings = stats.get("warnings") or []
@@ -4510,13 +5077,40 @@ class PersonalUsageMixin:
                 warning_box.addWidget(row)
             self.settings_usage_list_layout.addWidget(warning_card)
 
+        source_total_tokens = sum(int(row.get("total_tokens", 0) or 0) for row in (stats.get("sources") or []))
+        source_total_events = sum(int(row.get("events", 0) or 0) for row in (stats.get("sources") or []))
         source_rows = [
             [
-                self._usage_source_label(row["source"]),
-                self._usage_num(row["total_tokens"]),
-                self._usage_cost_label(row),
-                self._usage_num(row["events"]),
-                self._usage_num(row["sessions"]),
+                {
+                    "text": self._usage_source_label(row["source"]),
+                    "detail": self._usage_source_detail_label(row["source"]),
+                    "accent": row.get("source") == "provider",
+                },
+                {
+                    "text": self._usage_num(row["total_tokens"]),
+                    "detail": self._usage_share_text(row["total_tokens"], source_total_tokens),
+                    "align": "right",
+                    "mono": True,
+                },
+                {
+                    "text": self._usage_cost_label(row),
+                    "detail": f"API {self._usage_num(row.get('api_calls'))}",
+                    "align": "right",
+                    "mono": True,
+                    "accent": row.get("source") == "provider",
+                },
+                {
+                    "text": self._usage_num(row["events"]),
+                    "detail": self._usage_share_text(row["events"], source_total_events),
+                    "align": "right",
+                    "mono": True,
+                },
+                {
+                    "text": self._usage_num(row["sessions"]),
+                    "detail": f"轮次 {self._usage_num(row.get('turns'))}",
+                    "align": "right",
+                    "mono": True,
+                },
             ]
             for row in (stats.get("sources") or [])
         ]
@@ -4534,9 +5128,10 @@ class PersonalUsageMixin:
         quality_row.setContentsMargins(12, 10, 12, 10)
         quality_row.setSpacing(12)
         for text in (
-            f"API 调用 {self._usage_num(stats['activity']['api_calls'])}",
-            f"缓存读取 {self._usage_cache_label(stats['activity']['cache_read_input_tokens'])}",
-            f"缓存写入 {self._usage_cache_label(stats['activity']['cache_creation_input_tokens'])}",
+            f"/cost 总量 {self._usage_num((stats.get('all') or {}).get('usage_total_tokens'))}",
+            f"命中率 {self._usage_hit_rate_label(stats.get('all') or {})}",
+            f"API {self._usage_num(stats['activity']['api_calls'])}",
+            f"缓存读 {self._usage_cache_label(stats['activity']['cache_read_input_tokens'])} / 写 {self._usage_cache_label(stats['activity']['cache_creation_input_tokens'])}",
         ):
             label = QLabel(text)
             label.setObjectName("softTextSmall")
@@ -4546,102 +5141,170 @@ class PersonalUsageMixin:
             quality_layout.addWidget(quality_extra)
         self.settings_usage_list_layout.addWidget(quality_card)
 
-        mid_grid = QGridLayout()
-        mid_grid.setSpacing(10)
-        mid_grid.addWidget(
+        channel_total_tokens = sum(int(row.get("total_tokens", 0) or 0) for row in (stats.get("channels") or []))
+        model_total_tokens = sum(int(row.get("total_tokens", 0) or 0) for row in (stats.get("models") or []))
+        self.settings_usage_list_layout.addWidget(
             self._usage_table_card(
                 "按渠道",
                 "看问题集中在哪个入口，主聊天区和外部通讯前端能一眼区分。",
                 ["渠道", "总 token", "费用", "轮次", "会话", "最近活动"],
                 [
                     [
-                        row["label"],
-                        self._usage_num(row["total_tokens"]),
-                        self._usage_cost_label(row),
-                        self._usage_num(row["turns"]),
-                        self._usage_num(row["sessions"]),
-                        self._usage_time_label(row["last_active"]),
+                        {
+                            "text": row["label"],
+                            "detail": " · ".join(
+                                part
+                                for part in (
+                                    lz._usage_mode_label(row.get("mode")),
+                                    str(row.get("api_card_label") or "").strip(),
+                                )
+                                if part
+                            ),
+                        },
+                        {
+                            "text": self._usage_num(row["total_tokens"]),
+                            "detail": self._usage_share_text(row["total_tokens"], channel_total_tokens),
+                            "align": "right",
+                            "mono": True,
+                        },
+                        {
+                            "text": self._usage_cost_label(row),
+                            "detail": f"缓存读 {self._usage_cache_label(row.get('cache_read_input_tokens'))}",
+                            "align": "right",
+                            "mono": True,
+                        },
+                        {
+                            "text": self._usage_num(row["turns"]),
+                            "detail": f"API {self._usage_num(row.get('api_calls'))}",
+                            "align": "right",
+                            "mono": True,
+                        },
+                        {
+                            "text": self._usage_num(row["sessions"]),
+                            "detail": "有日志会话",
+                            "align": "right",
+                            "mono": True,
+                        },
+                        {
+                            "text": self._usage_time_label(row["last_active"]),
+                            "detail": "最近一次活跃",
+                            "align": "right",
+                        },
                     ]
                     for row in (stats.get("channels") or [])[:8]
                 ],
                 stretches=[3, 2, 2, 2, 2, 3],
                 empty_text="暂无可统计的渠道日志。",
-            ),
-            0,
-            0,
+            )
         )
-        mid_grid.addWidget(
+        self.settings_usage_list_layout.addWidget(
             self._usage_table_card(
                 "按模型",
                 "模型维度更适合看消耗结构，尤其能看出是不是某一个模型异常偏高。",
                 ["模型", "总 token", "费用", "会话", "调用", "最近活动"],
                 [
                     [
-                        row["model"],
-                        self._usage_num(row["total_tokens"]),
-                        self._usage_cost_label(row),
-                        self._usage_num(row["sessions"]),
-                        self._usage_num(row["api_calls"]),
-                        self._usage_time_label(row["last_active"]),
+                        {
+                            "text": row["model"],
+                            "detail": " · ".join(
+                                part
+                                for part in (
+                                    lz._usage_mode_label(row.get("mode")),
+                                    str(row.get("api_card_label") or "").strip(),
+                                )
+                                if part
+                            ),
+                        },
+                        {
+                            "text": self._usage_num(row["total_tokens"]),
+                            "detail": self._usage_share_text(row["total_tokens"], model_total_tokens),
+                            "align": "right",
+                            "mono": True,
+                        },
+                        {
+                            "text": self._usage_cost_label(row),
+                            "detail": f"输出占比 {self._usage_share_text(row.get('output_tokens'), row.get('total_tokens'), empty='--').replace('占比 ', '')}",
+                            "align": "right",
+                            "mono": True,
+                        },
+                        {
+                            "text": self._usage_num(row["sessions"]),
+                            "detail": f"轮次 {self._usage_num(row.get('turns'))}",
+                            "align": "right",
+                            "mono": True,
+                        },
+                        {
+                            "text": self._usage_num(row["api_calls"]),
+                            "detail": f"缓存读 {self._usage_cache_label(row.get('cache_read_input_tokens'))}",
+                            "align": "right",
+                            "mono": True,
+                        },
+                        {
+                            "text": self._usage_time_label(row["last_active"]),
+                            "detail": "最近一次活跃",
+                            "align": "right",
+                        },
                     ]
                     for row in (stats.get("models") or [])[:8]
                 ],
                 stretches=[4, 2, 2, 2, 2, 3],
                 empty_text="暂无可统计的模型日志。",
-            ),
-            0,
-            1,
+            )
         )
-        self.settings_usage_list_layout.addLayout(mid_grid)
 
-        lower_grid = QGridLayout()
-        lower_grid.setSpacing(10)
-        lower_grid.addWidget(
-            self._usage_table_card(
+        self.settings_usage_list_layout.addWidget(
+            self._usage_stack_card(
                 "最近活动",
                 "按时间倒序展示，适合快速复盘最近几次请求发生在哪里、用了什么模型。",
-                ["时间", "渠道", "会话", "模型", "token", "费用"],
                 [
-                    [
-                        self._usage_time_label(row["ts"]),
-                        row["channel_label"],
-                        row["session_title"],
-                        row["model"],
-                        self._usage_num(row["total_tokens"]),
-                        self._usage_cost_label(row),
-                    ]
+                    {
+                        "title": row["session_title"],
+                        "detail": " · ".join(
+                            part
+                            for part in (
+                                self._usage_time_label(row["ts"]),
+                                row["channel_label"],
+                                str(row.get("api_card_label") or "").strip(),
+                                self._usage_source_label(row.get("source")),
+                            )
+                            if part
+                        ),
+                        "right": f"{row['model']} · {self._usage_num(row['total_tokens'])}",
+                        "right_detail": f"{self._usage_cost_label(row)} · API {self._usage_num(row.get('api_calls'))}",
+                    }
                     for row in (stats.get("timeline") or [])[:8]
                 ],
-                stretches=[2, 2, 4, 4, 2, 2],
                 empty_text="最近还没有 usage 事件。",
-            ),
-            0,
-            0,
+            )
         )
-        lower_grid.addWidget(
-            self._usage_table_card(
+        self.settings_usage_list_layout.addWidget(
+            self._usage_stack_card(
                 "高消耗会话",
                 "挑出 token 累积最高的会话，便于快速定位最值得排查的对象。",
-                ["会话", "渠道", "总 token", "费用", "最近模型", "最近活动"],
                 [
-                    [
-                        row["title"] + ("  · 已收藏" if row.get("pinned") else ""),
-                        row["channel_label"],
-                        self._usage_num(row["total_tokens"]),
-                        self._usage_cost_label(row),
-                        row["last_model"],
-                        self._usage_time_label(row["last_active"]),
-                    ]
+                    {
+                        "title": row["title"],
+                        "detail": " · ".join(
+                            part
+                            for part in (
+                                "已收藏" if row.get("pinned") else "",
+                                row["channel_label"],
+                                row["last_model"],
+                                str(row.get("api_card_label") or "").strip(),
+                                lz._usage_mode_label(row.get("mode")),
+                            )
+                            if part
+                        ),
+                        "right": f"{self._usage_num(row['total_tokens'])} · {self._usage_cost_label(row)}",
+                        "right_detail": f"{self._usage_time_label(row['last_active'])} · API {self._usage_num(row.get('api_calls'))}",
+                    }
                     for row in (stats.get("sessions") or [])[:8]
                 ],
-                stretches=[4, 2, 2, 2, 3, 3],
                 empty_text="暂无可统计的会话。",
-            ),
-            0,
-            1,
+            )
         )
-        self.settings_usage_list_layout.addLayout(lower_grid)
 
+        recent_day_total_tokens = sum(int(row.get("total_tokens", 0) or 0) for row in (stats.get("days") or []))
         day_rows = []
         for row in (stats.get("days") or []):
             top_channel = ""
@@ -4650,12 +5313,38 @@ class PersonalUsageMixin:
                 top_channel = " / ".join(f"{lz._usage_channel_label(cid)} {self._usage_num(total)}" for cid, total in top_pairs)
             day_rows.append(
                 [
-                    row["date"],
-                    self._usage_num(row["total_tokens"]),
-                    self._usage_cost_label(row),
-                    self._usage_num(row["turns"]),
-                    self._usage_num(row["api_calls"]),
-                    top_channel or "无渠道细分",
+                    {
+                        "text": row["date"],
+                        "detail": self._usage_day_context_label(row["date"]),
+                    },
+                    {
+                        "text": self._usage_num(row["total_tokens"]),
+                        "detail": self._usage_share_text(row["total_tokens"], recent_day_total_tokens),
+                        "align": "right",
+                        "mono": True,
+                    },
+                    {
+                        "text": self._usage_cost_label(row),
+                        "detail": lz._usage_mode_label(row.get("mode")),
+                        "align": "right",
+                        "mono": True,
+                    },
+                    {
+                        "text": self._usage_num(row["turns"]),
+                        "detail": f"API {self._usage_num(row['api_calls'])}",
+                        "align": "right",
+                        "mono": True,
+                    },
+                    {
+                        "text": self._usage_num(row["api_calls"]),
+                        "detail": "",
+                        "align": "right",
+                        "mono": True,
+                    },
+                    {
+                        "text": top_channel or "无渠道细分",
+                        "detail": "当日最重的两个渠道",
+                    },
                 ]
             )
         self.settings_usage_list_layout.addWidget(

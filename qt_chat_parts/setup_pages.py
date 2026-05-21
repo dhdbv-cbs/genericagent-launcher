@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 
 from launcher_app import core as lz
 
+from . import common as chat_common
 from .common import OptionCard, _probe_download_requirements
 
 _SCROLLBAR_STYLE = """
@@ -46,8 +47,11 @@ class SetupPagesMixin:
         brand_row = QHBoxLayout(brand)
         brand_row.setContentsMargins(0, 6, 0, 22)
         brand_row.setSpacing(14)
-        self.welcome_icon = QLabel("⚙")
-        self.welcome_icon.setStyleSheet(f"font-size: 42px; color: #4f8cff; background: transparent;")
+        self.welcome_icon = QLabel()
+        self.welcome_icon.setObjectName("sidebarLogo")
+        self.welcome_icon.setFixedSize(56, 56)
+        self.welcome_icon.setAlignment(Qt.AlignCenter)
+        chat_common.set_label_svg_icon(self.welcome_icon, "welcome_brand", chat_common._SVG_WINDOW, color="accent_text", size=24)
         brand_row.addWidget(self.welcome_icon, 0, Qt.AlignTop)
         title_box = QVBoxLayout()
         title_box.setContentsMargins(0, 0, 0, 0)
@@ -63,12 +67,12 @@ class SetupPagesMixin:
 
         self.recent_card = QFrame()
         self.recent_card.setObjectName("recentCard")
-        self.recent_card.setFixedHeight(74)
+        self.recent_card.setFixedHeight(78)
         recent_row = QHBoxLayout(self.recent_card)
         recent_row.setContentsMargins(18, 12, 16, 12)
         recent_info = QVBoxLayout()
         recent_info.setSpacing(2)
-        recent_title = QLabel("📁  上次使用的目录")
+        recent_title = QLabel("最近使用的目录")
         recent_title.setObjectName("accentLabel")
         self.recent_path_label = QLabel("")
         self.recent_path_label.setObjectName("bodyText")
@@ -88,7 +92,7 @@ class SetupPagesMixin:
         layout.addWidget(choose)
 
         locate_card = OptionCard(
-            "✅",
+            {"key": "welcome_locate", "svg": chat_common._SVG_FOLDER, "color": "accent_text", "size": 18},
             "我已经下载了 GenericAgent",
             "选择本地目录，立即载入内核",
             self._show_locate,
@@ -97,7 +101,7 @@ class SetupPagesMixin:
         layout.addWidget(locate_card)
 
         download_card = OptionCard(
-            "⬇",
+            {"key": "welcome_download", "svg": chat_common._SVG_DOWNLOAD, "color": "accent_text", "size": 18},
             "我还没有，帮我下载",
             "从 GitHub 自动克隆到你指定的位置",
             self._show_download,
@@ -105,10 +109,163 @@ class SetupPagesMixin:
         )
         layout.addWidget(download_card)
 
+        official_card = OptionCard(
+            {"key": "welcome_official", "svg": chat_common._SVG_WINDOW, "color": "accent_text", "size": 18},
+            "或许你想试试官方的？",
+            "直接拉起上游默认 GUI / 官方发布版桌面端",
+            self._show_official_gui_page,
+            page,
+        )
+        layout.addWidget(official_card)
+
         source = QLabel(f"源：{lz.REPO_URL}")
         source.setObjectName("mutedText")
         layout.addStretch(1)
         layout.addWidget(source, 0, Qt.AlignLeft)
+        return page
+
+    def _build_official_gui_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        layout.addWidget(
+            self._build_setup_topbar(
+                "试试官方前端",
+                "这里会直接运行上游自带界面，而不是启动器自己的聊天主区。"
+                "当前同时提供默认 GUI（launch.pyw）和官方发布版桌面端。",
+                back_command=self._show_welcome,
+            )
+        )
+
+        body = QWidget()
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(36, 28, 36, 28)
+        body_layout.setSpacing(16)
+        layout.addWidget(body, 1)
+
+        target_card = self._panel_card()
+        target_box = QVBoxLayout(target_card)
+        target_box.setContentsMargins(20, 18, 20, 18)
+        target_box.setSpacing(10)
+        target_title = QLabel("当前目标目录")
+        target_title.setObjectName("cardTitle")
+        target_box.addWidget(target_title)
+        target_desc = QLabel("默认 GUI 会直接使用当前选中的 GenericAgent 目录；发布版桌面端会按平台检测已安装应用或官方可执行文件。")
+        target_desc.setWordWrap(True)
+        target_desc.setObjectName("cardDesc")
+        target_box.addWidget(target_desc)
+        self.official_gui_path_label = QLabel("")
+        self.official_gui_path_label.setObjectName("pathValue")
+        self.official_gui_path_label.setWordWrap(True)
+        self.official_gui_path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        target_box.addWidget(self.official_gui_path_label)
+        self.official_gui_path_hint_label = QLabel("如果你想改目录或指定 Python，可先回到“我已经下载了 GenericAgent”页面调整。")
+        self.official_gui_path_hint_label.setWordWrap(True)
+        self.official_gui_path_hint_label.setObjectName("mutedText")
+        target_box.addWidget(self.official_gui_path_hint_label)
+        target_actions = QHBoxLayout()
+        target_actions.setSpacing(8)
+        adjust_btn = QPushButton("调整目录 / Python")
+        adjust_btn.setStyleSheet(self._action_button_style())
+        adjust_btn.clicked.connect(self._show_locate)
+        target_actions.addWidget(adjust_btn, 0)
+        target_actions.addStretch(1)
+        target_box.addLayout(target_actions)
+        body_layout.addWidget(target_card)
+
+        status_card = self._panel_card()
+        status_box = QVBoxLayout(status_card)
+        status_box.setContentsMargins(20, 18, 20, 18)
+        status_box.setSpacing(10)
+        status_title = QLabel("启动环境")
+        status_title.setObjectName("cardTitle")
+        status_box.addWidget(status_title)
+        self.official_gui_status_label = QLabel("")
+        self.official_gui_status_label.setWordWrap(True)
+        self.official_gui_status_label.setObjectName("bodyText")
+        status_box.addWidget(self.official_gui_status_label)
+        body_layout.addWidget(status_card)
+
+        frontend_card = self._panel_card()
+        frontend_box = QVBoxLayout(frontend_card)
+        frontend_box.setContentsMargins(20, 18, 20, 18)
+        frontend_box.setSpacing(14)
+        frontend_title = QLabel("官方入口")
+        frontend_title.setObjectName("cardTitle")
+        frontend_box.addWidget(frontend_title)
+        frontend_desc = QLabel("默认 GUI 会沿用当前目录、Python 解释器和依赖安装策略；发布版桌面端则按平台拉起官方已安装程序。")
+        frontend_desc.setWordWrap(True)
+        frontend_desc.setObjectName("cardDesc")
+        frontend_box.addWidget(frontend_desc)
+
+        default_gui_title = QLabel("官方默认 GUI")
+        default_gui_title.setObjectName("accentLabel")
+        frontend_box.addWidget(default_gui_title)
+        default_gui_desc = QLabel("入口：launch.pyw。适合直接体验上游默认界面。")
+        default_gui_desc.setWordWrap(True)
+        default_gui_desc.setObjectName("mutedText")
+        frontend_box.addWidget(default_gui_desc)
+        self.official_gui_entry_status_label = QLabel("")
+        self.official_gui_entry_status_label.setWordWrap(True)
+        self.official_gui_entry_status_label.setObjectName("bodyText")
+        frontend_box.addWidget(self.official_gui_entry_status_label)
+        self.official_gui_dependency_label = QLabel("")
+        self.official_gui_dependency_label.setWordWrap(True)
+        self.official_gui_dependency_label.setObjectName("mutedText")
+        frontend_box.addWidget(self.official_gui_dependency_label)
+        default_launch_actions = QHBoxLayout()
+        default_launch_actions.setSpacing(10)
+        default_launch_actions.addStretch(1)
+        self.official_gui_launch_btn = QPushButton("拉起官方默认 GUI")
+        self.official_gui_launch_btn.setStyleSheet(self._action_button_style(primary=True))
+        self.official_gui_launch_btn.setFixedHeight(40)
+        self.official_gui_launch_btn.clicked.connect(self._launch_official_gui)
+        default_launch_actions.addWidget(self.official_gui_launch_btn, 0)
+        frontend_box.addLayout(default_launch_actions)
+
+        desktop_separator = QFrame()
+        desktop_separator.setFrameShape(QFrame.HLine)
+        desktop_separator.setObjectName("setupDivider")
+        frontend_box.addWidget(desktop_separator)
+
+        desktop_title = QLabel("官方桌面版（发布版）")
+        desktop_title.setObjectName("accentLabel")
+        frontend_box.addWidget(desktop_title)
+        desktop_desc = QLabel("入口不是源码脚本，而是 GitHub Release 发布的官方桌面客户端。Windows 和 macOS 的安装方式不同。")
+        desktop_desc.setWordWrap(True)
+        desktop_desc.setObjectName("mutedText")
+        frontend_box.addWidget(desktop_desc)
+        self.official_desktop_status_label = QLabel("")
+        self.official_desktop_status_label.setWordWrap(True)
+        self.official_desktop_status_label.setObjectName("bodyText")
+        frontend_box.addWidget(self.official_desktop_status_label)
+        self.official_desktop_dependency_label = QLabel("")
+        self.official_desktop_dependency_label.setWordWrap(True)
+        self.official_desktop_dependency_label.setObjectName("mutedText")
+        frontend_box.addWidget(self.official_desktop_dependency_label)
+        desktop_launch_actions = QHBoxLayout()
+        desktop_launch_actions.setSpacing(10)
+        desktop_launch_actions.addStretch(1)
+        self.official_desktop_release_btn = QPushButton("打开 Release 页面")
+        self.official_desktop_release_btn.setStyleSheet(self._action_button_style())
+        self.official_desktop_release_btn.setFixedHeight(40)
+        self.official_desktop_release_btn.clicked.connect(self._open_official_desktop_release_page)
+        desktop_launch_actions.addWidget(self.official_desktop_release_btn, 0)
+        self.official_desktop_launch_btn = QPushButton("拉起官方桌面版")
+        self.official_desktop_launch_btn.setStyleSheet(self._action_button_style())
+        self.official_desktop_launch_btn.setFixedHeight(40)
+        self.official_desktop_launch_btn.clicked.connect(self._launch_official_desktop_app)
+        desktop_launch_actions.addWidget(self.official_desktop_launch_btn, 0)
+        frontend_box.addLayout(desktop_launch_actions)
+
+        self.official_gui_notice_label = QLabel("这些入口只会新开官方窗口，不会替换启动器自己的聊天主区。")
+        self.official_gui_notice_label.setWordWrap(True)
+        self.official_gui_notice_label.setObjectName("mutedText")
+        frontend_box.addWidget(self.official_gui_notice_label)
+        body_layout.addWidget(frontend_card)
+        body_layout.addStretch(1)
         return page
 
     def _build_setup_topbar(self, title_text: str, subtitle_text: str, *, back_text: str = "←  返回首页", back_command=None):
@@ -177,7 +334,7 @@ class SetupPagesMixin:
         browse_btn.clicked.connect(self._choose_agent_dir)
         row.addWidget(browse_btn, 0)
         card_box.addLayout(row)
-        self.locate_hint_label = QLabel("💡  提示：选择 GenericAgent 项目的根目录")
+        self.locate_hint_label = QLabel("选择 GenericAgent 项目的根目录。")
         self.locate_hint_label.setWordWrap(True)
         self.locate_hint_label.setObjectName("mutedText")
         card_box.addWidget(self.locate_hint_label)
@@ -198,7 +355,7 @@ class SetupPagesMixin:
         py_row.addWidget(py_browse_btn, 0)
         card_box.addLayout(py_row)
         self.locate_python_hint_label = QLabel(
-            "💡  提示：这里建议选择具体的 Python 可执行文件。"
+            "这里建议选择具体的 Python 可执行文件。"
             "如果你用 uv 管理多版本 Python，也请填写 uv 实际创建的解释器路径，而不是 uv 本身。"
         )
         self.locate_python_hint_label.setWordWrap(True)
@@ -220,7 +377,7 @@ class SetupPagesMixin:
         installer_row.addWidget(self.locate_dependency_installer_combo, 1)
         card_box.addLayout(installer_row)
         self.locate_dependency_installer_hint_label = QLabel(
-            "💡  提示：默认自动优先 uv（若可用），失败会自动回退 pip。"
+            "默认会优先尝试 uv；若不可用或失败，再自动回退到 pip。"
         )
         self.locate_dependency_installer_hint_label.setWordWrap(True)
         self.locate_dependency_installer_hint_label.setObjectName("mutedText")
@@ -625,6 +782,11 @@ class SetupPagesMixin:
             ensure()
         self.pages.setCurrentWidget(self._download_page)
         self._refresh_download_state()
+
+    def _show_official_gui_page(self):
+        self.setWindowTitle("GenericAgent 启动器")
+        self.pages.setCurrentWidget(self._official_gui_page)
+        self._refresh_welcome_state()
 
     def _show_welcome(self):
         self.setWindowTitle("GenericAgent 启动器")

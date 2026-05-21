@@ -47,8 +47,16 @@ from launcher_core_parts.upstream_dependencies import (
     resolve_upstream_dependency_manifest,
 )
 from launcher_app import core as lz
-from launcher_app.theme import C, F, preferred_theme_font_families
+from launcher_app.theme import (
+    C,
+    F,
+    normalize_theme_background_mode,
+    preferred_theme_font_families,
+    resolve_theme_visual_preset,
+    theme_visual_preset_options,
+)
 
+from . import common as chat_common
 from .common import (
     invalidate_runtime_bound_state,
     is_auto_remote_agent_dir,
@@ -347,6 +355,30 @@ class SettingsPanelMixin:
     _SETTINGS_LIVE_RELOAD_MIN_INTERVAL_SECONDS = 4.0
     _SETTINGS_SWITCH_RELOAD_DELAY_MS = 24
 
+    def _settings_nav_icon_spec(self, key: str):
+        mapping = {
+            "api": chat_common._SVG_KEY,
+            "channels": chat_common._SVG_MESSAGE,
+            "vps": chat_common._SVG_SERVER,
+            "schedule": chat_common._SVG_CLOCK,
+            "personal": chat_common._SVG_PUZZLE,
+            "theme": chat_common._SVG_SWATCH,
+            "usage": chat_common._SVG_RECEIPT,
+            "about": chat_common._SVG_INFO,
+        }
+        return mapping.get(str(key or "").strip().lower(), chat_common._SVG_INFO)
+
+    def _apply_settings_nav_button_icon(self, key: str, button, *, selected: bool = False) -> None:
+        if button is None:
+            return
+        chat_common.set_button_svg_icon(
+            button,
+            f"settings_nav_{str(key or '').strip().lower() or 'item'}",
+            self._settings_nav_icon_spec(key),
+            color="text" if selected else "text_soft",
+            size=16,
+        )
+
     def _api_add_menu_specs(self):
         return [
             ("claude_native", f"添加 {lz.SIMPLE_FORMAT_LABEL.get('claude_native', 'Claude 原生')}"),
@@ -571,10 +603,11 @@ class SettingsPanelMixin:
         top = QHBoxLayout(top_wrap)
         top.setContentsMargins(24, 14, 24, 14)
         top.setSpacing(10)
-        back_btn = QPushButton("←  返回聊天")
+        back_btn = QPushButton("返回聊天")
         back_btn.setStyleSheet(self._sidebar_button_style(subtle=True))
         back_btn.setCursor(Qt.PointingHandCursor)
         back_btn.clicked.connect(self._show_chat_page)
+        chat_common.set_button_svg_icon(back_btn, "settings_back", chat_common._SVG_CHEVRON_LEFT, color="text_soft", size=16)
         self._settings_top_back_btn = back_btn
         top.addWidget(back_btn, 0)
         title = QLabel("设置")
@@ -628,6 +661,7 @@ class SettingsPanelMixin:
         self.settings_target_refresh_btn = QPushButton("刷新设备")
         self.settings_target_refresh_btn.setStyleSheet(self._action_button_style())
         self.settings_target_refresh_btn.clicked.connect(lambda _=False: self._refresh_settings_target_combo(force=True))
+        chat_common.set_button_svg_icon(self.settings_target_refresh_btn, "settings_target_refresh", chat_common._SVG_REFRESH, color="text_soft", size=16)
         target_row.addWidget(self.settings_target_refresh_btn, 0)
         target_section.addLayout(target_row)
         self.settings_target_notice = QLabel("API 与通讯渠道配置会写入当前选中设备。")
@@ -643,14 +677,14 @@ class SettingsPanelMixin:
         self._settings_pages = {}
         self._settings_loaded_categories = set()
         categories = [
-            ("api", "🔑  API"),
-            ("channels", "💬  通讯渠道"),
-            ("vps", "🖥️  VPS 管理"),
-            ("schedule", "⏰  定时任务"),
-            ("personal", "🧩  个性设置"),
-            ("theme", "🎨  主题设置"),
-            ("usage", "🧾  使用日志"),
-            ("about", "ℹ  关于"),
+            ("api", "API"),
+            ("channels", "通讯渠道"),
+            ("vps", "VPS 管理"),
+            ("schedule", "定时任务"),
+            ("personal", "个性设置"),
+            ("theme", "主题设置"),
+            ("usage", "使用日志"),
+            ("about", "关于"),
         ]
 
         def make_page():
@@ -670,6 +704,7 @@ class SettingsPanelMixin:
             btn.setCursor(Qt.PointingHandCursor)
             btn.setStyleSheet(self._sidebar_button_style(subtle=True))
             btn.clicked.connect(lambda _=False, k=key: self._show_settings_category(k))
+            self._apply_settings_nav_button_icon(key, btn, selected=False)
             nav_col.addWidget(btn)
             self._settings_nav_buttons[key] = btn
 
@@ -698,8 +733,9 @@ class SettingsPanelMixin:
         api_box.addWidget(api_desc)
         api_toolbar = QHBoxLayout()
         api_toolbar.setSpacing(8)
-        api_add_btn = QPushButton("+ 添加 API 卡片")
+        api_add_btn = QPushButton("添加 API 卡片")
         api_add_btn.setStyleSheet(self._action_button_style(primary=True))
+        chat_common.set_button_svg_icon(api_add_btn, "settings_api_add", chat_common._SVG_PLUS, color="selection_fg", size=16)
         self._settings_api_add_menu = self._bind_api_add_button_menu(api_add_btn)
         api_toolbar.addWidget(api_add_btn, 0)
         self.settings_api_add_btn = api_add_btn
@@ -760,6 +796,7 @@ class SettingsPanelMixin:
         channel_refresh_btn = QPushButton("刷新状态")
         channel_refresh_btn.setStyleSheet(self._action_button_style())
         channel_refresh_btn.clicked.connect(self._request_channel_status_refresh)
+        chat_common.set_button_svg_icon(channel_refresh_btn, "settings_channels_refresh", chat_common._SVG_REFRESH, color="text_soft", size=16)
         channel_toolbar.addWidget(channel_refresh_btn, 0)
         self.settings_channels_refresh_btn = channel_refresh_btn
         channel_stop_btn = QPushButton("停止全部")
@@ -805,11 +842,12 @@ class SettingsPanelMixin:
         vps_profile_label.setMinimumWidth(92)
         vps_profile_label.setObjectName("bodyText")
         vps_profile_row.addWidget(vps_profile_label, 0)
-        self.settings_vps_profile_light = QLabel("●")
+        self.settings_vps_profile_light = QLabel()
         self.settings_vps_profile_light.setMinimumWidth(20)
         self.settings_vps_profile_light.setAlignment(Qt.AlignCenter)
         self.settings_vps_profile_light.setObjectName("softTextSmall")
         self.settings_vps_profile_light.setToolTip("服务器健康状态")
+        chat_common.set_label_svg_icon(self.settings_vps_profile_light, "settings_vps_status", chat_common._SVG_DOT, color="#94a3b8", size=12)
         vps_profile_row.addWidget(self.settings_vps_profile_light, 0)
         self.settings_vps_profile_combo = _StablePopupComboBox()
         self._apply_theme_combo_style(self.settings_vps_profile_combo)
@@ -1271,6 +1309,13 @@ class SettingsPanelMixin:
         self.settings_personal_target_refresh_btn = QPushButton("刷新设备")
         self.settings_personal_target_refresh_btn.setStyleSheet(self._action_button_style())
         self.settings_personal_target_refresh_btn.clicked.connect(lambda _=False: self._refresh_settings_target_combo(force=True))
+        chat_common.set_button_svg_icon(
+            self.settings_personal_target_refresh_btn,
+            "settings_personal_target_refresh",
+            chat_common._SVG_REFRESH,
+            color="text_soft",
+            size=16,
+        )
         personal_target_row.addWidget(self.settings_personal_target_refresh_btn, 0)
         personal_box.addLayout(personal_target_row)
         self.settings_personal_scope_hint = QLabel("")
@@ -1401,7 +1446,7 @@ class SettingsPanelMixin:
         theme_layout.addWidget(
             self._settings_intro(
                 "主题设置",
-                "这里可以单独设置界面字体、字重和背景样式。背景支持自定义图片，并可设置居中、拉伸或平铺。",
+                "这里可以单独设置界面字体、字重、主体预设和背景模式。主体预设会整套影响主界面、侧边栏、卡片和按钮层级，背景支持自定义图片，并可设置居中、拉伸或平铺。",
             )
         )
         theme_card = self._panel_card()
@@ -1467,17 +1512,27 @@ class SettingsPanelMixin:
         size_row.addWidget(self.settings_theme_size_combo, 1)
         theme_box.addLayout(size_row)
 
+        visual_row = QHBoxLayout()
+        visual_row.setSpacing(8)
+        visual_label = QLabel("主体预设")
+        visual_label.setMinimumWidth(92)
+        visual_label.setObjectName("bodyText")
+        visual_row.addWidget(visual_label, 0)
+        self.settings_theme_visual_combo = _StablePopupComboBox()
+        for preset_key, preset_label in theme_visual_preset_options():
+            self.settings_theme_visual_combo.addItem(str(preset_label), str(preset_key))
+        self._apply_theme_combo_style(self.settings_theme_visual_combo)
+        visual_row.addWidget(self.settings_theme_visual_combo, 1)
+        theme_box.addLayout(visual_row)
+
         bg_row = QHBoxLayout()
         bg_row.setSpacing(8)
-        bg_label = QLabel("背景预设")
+        bg_label = QLabel("背景模式")
         bg_label.setMinimumWidth(92)
         bg_label.setObjectName("bodyText")
         bg_row.addWidget(bg_label, 0)
         self.settings_theme_bg_combo = _StablePopupComboBox()
-        self.settings_theme_bg_combo.addItem("跟随主题默认", "default")
-        self.settings_theme_bg_combo.addItem("雾蓝", "mist")
-        self.settings_theme_bg_combo.addItem("暖米", "warm")
-        self.settings_theme_bg_combo.addItem("石墨", "graphite")
+        self.settings_theme_bg_combo.addItem("跟随主体色面", "default")
         self.settings_theme_bg_combo.addItem("图片背景", "image")
         self._apply_theme_combo_style(self.settings_theme_bg_combo)
         bg_row.addWidget(self.settings_theme_bg_combo, 1)
@@ -1535,11 +1590,67 @@ class SettingsPanelMixin:
         fade_row.addWidget(self.settings_theme_fade_value, 0)
         theme_box.addLayout(fade_row)
 
+        avatar_sep = QFrame()
+        avatar_sep.setObjectName("divider")
+        avatar_sep.setFixedHeight(1)
+        theme_box.addWidget(avatar_sep)
+
+        avatar_title = QLabel("聊天头像")
+        avatar_title.setObjectName("cardTitle")
+        theme_box.addWidget(avatar_title)
+        avatar_desc = QLabel("默认使用内敛的线性 SVG 头像；也可以分别为你和 AI 选择本地图片，保存后会立即刷新现有聊天消息。")
+        avatar_desc.setWordWrap(True)
+        avatar_desc.setObjectName("cardDesc")
+        theme_box.addWidget(avatar_desc)
+
+        user_avatar_row = QHBoxLayout()
+        user_avatar_row.setSpacing(8)
+        user_avatar_label = QLabel("我的头像")
+        user_avatar_label.setMinimumWidth(92)
+        user_avatar_label.setObjectName("bodyText")
+        user_avatar_row.addWidget(user_avatar_label, 0)
+        self.settings_theme_user_avatar_path = QLineEdit()
+        self.settings_theme_user_avatar_path.setReadOnly(True)
+        self.settings_theme_user_avatar_path.setPlaceholderText("默认极简头像")
+        self._fluent_input(self.settings_theme_user_avatar_path)
+        user_avatar_row.addWidget(self.settings_theme_user_avatar_path, 1)
+        user_avatar_choose_btn = QPushButton("选择图片")
+        user_avatar_choose_btn.setStyleSheet(self._action_button_style())
+        user_avatar_choose_btn.clicked.connect(lambda: self._choose_theme_chat_avatar("user"))
+        user_avatar_row.addWidget(user_avatar_choose_btn, 0)
+        user_avatar_clear_btn = QPushButton("清除")
+        user_avatar_clear_btn.setStyleSheet(self._action_button_style(kind="subtle"))
+        user_avatar_clear_btn.clicked.connect(lambda: self._clear_theme_chat_avatar("user"))
+        user_avatar_row.addWidget(user_avatar_clear_btn, 0)
+        theme_box.addLayout(user_avatar_row)
+
+        ai_avatar_row = QHBoxLayout()
+        ai_avatar_row.setSpacing(8)
+        ai_avatar_label = QLabel("AI 头像")
+        ai_avatar_label.setMinimumWidth(92)
+        ai_avatar_label.setObjectName("bodyText")
+        ai_avatar_row.addWidget(ai_avatar_label, 0)
+        self.settings_theme_ai_avatar_path = QLineEdit()
+        self.settings_theme_ai_avatar_path.setReadOnly(True)
+        self.settings_theme_ai_avatar_path.setPlaceholderText("默认极简头像")
+        self._fluent_input(self.settings_theme_ai_avatar_path)
+        ai_avatar_row.addWidget(self.settings_theme_ai_avatar_path, 1)
+        ai_avatar_choose_btn = QPushButton("选择图片")
+        ai_avatar_choose_btn.setStyleSheet(self._action_button_style())
+        ai_avatar_choose_btn.clicked.connect(lambda: self._choose_theme_chat_avatar("assistant"))
+        ai_avatar_row.addWidget(ai_avatar_choose_btn, 0)
+        ai_avatar_clear_btn = QPushButton("清除")
+        ai_avatar_clear_btn.setStyleSheet(self._action_button_style(kind="subtle"))
+        ai_avatar_clear_btn.clicked.connect(lambda: self._clear_theme_chat_avatar("assistant"))
+        ai_avatar_row.addWidget(ai_avatar_clear_btn, 0)
+        theme_box.addLayout(ai_avatar_row)
+
         theme_toolbar = QHBoxLayout()
         theme_toolbar.setSpacing(8)
         theme_save_btn = QPushButton("保存主题设置")
         theme_save_btn.setStyleSheet(self._action_button_style(primary=True))
         theme_save_btn.clicked.connect(self._save_theme_preferences)
+        chat_common.set_button_svg_icon(theme_save_btn, "settings_theme_save", chat_common._SVG_SWATCH, color="selection_fg", size=16)
         theme_toolbar.addWidget(theme_save_btn, 0)
         theme_toolbar.addStretch(1)
         theme_box.addLayout(theme_toolbar)
@@ -1634,8 +1745,8 @@ class SettingsPanelMixin:
         )
         usage_card = self._panel_card()
         usage_box = QVBoxLayout(usage_card)
-        usage_box.setContentsMargins(20, 18, 20, 18)
-        usage_box.setSpacing(10)
+        usage_box.setContentsMargins(16, 14, 16, 14)
+        usage_box.setSpacing(8)
         usage_title = QLabel("日志总览")
         usage_title.setObjectName("cardTitle")
         usage_box.addWidget(usage_title)
@@ -1858,12 +1969,14 @@ class SettingsPanelMixin:
             if prev_btn is not None:
                 try:
                     prev_btn.setStyleSheet(self._sidebar_button_style(subtle=True))
+                    self._apply_settings_nav_button_icon(previous, prev_btn, selected=False)
                 except Exception:
                     pass
         btn = buttons.get(category)
         if btn is not None:
             try:
                 btn.setStyleSheet(self._sidebar_button_style(selected=True))
+                self._apply_settings_nav_button_icon(category, btn, selected=True)
             except Exception:
                 pass
         self._active_settings_nav_key = category
@@ -2217,8 +2330,10 @@ class SettingsPanelMixin:
         if not bool(ctx.get("is_remote")):
             agent_dir = self.agent_dir
             py_path = os.path.join(agent_dir, "mykey.py")
+            json_path = os.path.join(agent_dir, "mykey.json")
             tpl_path = os.path.join(agent_dir, "mykey_template.py")
-            if os.path.isdir(agent_dir) and not os.path.isfile(py_path):
+            source_path = py_path if os.path.isfile(py_path) else (json_path if os.path.isfile(json_path) else py_path)
+            if os.path.isdir(agent_dir) and source_path == py_path and not os.path.isfile(py_path):
                 if os.path.isfile(tpl_path):
                     try:
                         with open(tpl_path, "r", encoding="utf-8") as src, open(py_path, "w", encoding="utf-8") as dst:
@@ -2231,8 +2346,8 @@ class SettingsPanelMixin:
                             dst.write("# mykey.py\n")
                     except Exception:
                         pass
-            with open(py_path, "r", encoding="utf-8", errors="replace") as f:
-                return True, f.read(), py_path, ""
+            with open(source_path, "r", encoding="utf-8", errors="replace") as f:
+                return True, f.read(), source_path, ""
         dev = ctx.get("device") or {}
         client, err = self._settings_target_open_remote_client(dev, timeout=10)
         if client is None:
@@ -2305,13 +2420,14 @@ class SettingsPanelMixin:
             except Exception:
                 pass
 
-    def _settings_parse_mykey_text(self, text: str):
+    def _settings_parse_mykey_text(self, text: str, source_path: str = ""):
         tmp_fp = ""
         try:
-            with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".py", delete=False) as tmp:
+            suffix = os.path.splitext(str(source_path or "").strip())[1].lower() or ".py"
+            with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=suffix, delete=False) as tmp:
                 tmp.write(str(text or ""))
                 tmp_fp = tmp.name
-            parsed = lz.parse_mykey_py(tmp_fp)
+            parsed = lz.parse_mykey_source(tmp_fp)
             return parsed if isinstance(parsed, dict) else {"error": "解析返回为空", "configs": [], "extras": {}, "passthrough": []}
         finally:
             if tmp_fp:
@@ -2358,7 +2474,7 @@ class SettingsPanelMixin:
                 "passthrough": [],
                 "load_failed": True,
             }
-        parsed = self._settings_parse_mykey_text(text)
+        parsed = self._settings_parse_mykey_text(text, display_path)
         return display_path, parsed
 
     def _settings_reload(self, *, categories=None, force=False):
@@ -3536,7 +3652,8 @@ class SettingsPanelMixin:
         if light is not None:
             code, tip = self._vps_profile_health(profile or {})
             color = {"ok": "#16a34a", "error": "#dc2626", "pending": "#d97706", "idle": "#94a3b8"}.get(code, "#94a3b8")
-            light.setStyleSheet(f"color: {color}; font-size: 16px;")
+            chat_common.set_label_svg_icon(light, "settings_vps_status", chat_common._SVG_DOT, color=color, size=12)
+            light.setStyleSheet("background: transparent;")
             light.setToolTip(tip)
         if payload.get("host") and payload.get("username"):
             auth_text = "认证方式："
@@ -5469,6 +5586,33 @@ class SettingsPanelMixin:
                 return QSize(max(360, fw), max(460, fh))
         return QSize(480, 760)
 
+    def _theme_avatar_target_size(self) -> QSize:
+        return QSize(256, 256)
+
+    def _theme_avatar_meta(self, role: str) -> dict[str, str]:
+        role_key = "user" if str(role or "").strip().lower() == "user" else "assistant"
+        if role_key == "user":
+            return {
+                "role": "user",
+                "label": "我的头像",
+                "cfg_prefix": "theme_user_avatar",
+                "path_attr": "settings_theme_user_avatar_path",
+                "source_attr": "_theme_user_avatar_source_selected_path",
+                "crop_attr": "_theme_user_avatar_crop_selected",
+                "clear_attr": "_theme_user_avatar_force_clear",
+                "asset_tag": "user_avatar",
+            }
+        return {
+            "role": "assistant",
+            "label": "AI 头像",
+            "cfg_prefix": "theme_ai_avatar",
+            "path_attr": "settings_theme_ai_avatar_path",
+            "source_attr": "_theme_ai_avatar_source_selected_path",
+            "crop_attr": "_theme_ai_avatar_crop_selected",
+            "clear_attr": "_theme_ai_avatar_force_clear",
+            "asset_tag": "ai_avatar",
+        }
+
     def _refresh_theme_background_assets_for_mode(self) -> bool:
         cfg = self.cfg if isinstance(getattr(self, "cfg", None), dict) else None
         if cfg is None:
@@ -5532,6 +5676,43 @@ class SettingsPanelMixin:
             cfg[sig_key] = sig
             changed = True
 
+        avatar_render_schema = "v1"
+
+        def _avatar_signature(source_rel: str, crop_data) -> str:
+            crop = self._normalize_theme_crop_data(crop_data) or {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}
+            return (
+                f"{avatar_render_schema}|{source_rel}|"
+                f"{crop['x']:.6f},{crop['y']:.6f},{crop['w']:.6f},{crop['h']:.6f}"
+            )
+
+        def _regen_avatar(role: str):
+            nonlocal changed
+            meta = self._theme_avatar_meta(role)
+            prefix = str(meta["cfg_prefix"])
+            source_key = f"{prefix}_source"
+            image_key = f"{prefix}_image"
+            crop_key = f"{prefix}_crop"
+            sig_key = f"{prefix}_render_sig"
+            source_rel = str(cfg.get(source_key) or cfg.get(image_key) or "").strip()
+            source_abs = lz._resolve_config_path(source_rel) if source_rel else ""
+            if not source_abs or not os.path.isfile(source_abs):
+                return
+            crop_data = cfg.get(crop_key)
+            sig = _avatar_signature(source_rel, crop_data)
+            current_sig = str(cfg.get(sig_key) or "")
+            current_rel = str(cfg.get(image_key) or "").strip()
+            current_abs = lz._resolve_config_path(current_rel) if current_rel else ""
+            if current_sig == sig and current_abs and os.path.isfile(current_abs):
+                return
+            generated_abs = self._render_theme_avatar_asset(
+                source_abs,
+                crop_data,
+                asset_tag=str(meta["asset_tag"] or "chat_avatar"),
+            )
+            cfg[image_key] = lz._make_config_relative_path(generated_abs)
+            cfg[sig_key] = sig
+            changed = True
+
         try:
             _regen(
                 preset_key="theme_bg_preset",
@@ -5557,6 +5738,8 @@ class SettingsPanelMixin:
                 target_size=self._theme_floating_target_size(),
                 enforce_launcher_min=False,
             )
+            _regen_avatar("user")
+            _regen_avatar("assistant")
         except Exception:
             return False
         if changed:
@@ -5652,6 +5835,47 @@ class SettingsPanelMixin:
             raise ValueError("背景图片写入失败，请检查目录权限。")
         return out_path
 
+    def _render_theme_avatar_asset(
+        self,
+        source_path: str,
+        crop_data,
+        *,
+        asset_tag: str = "chat_avatar",
+    ) -> str:
+        src = str(source_path or "").strip()
+        if not src or not os.path.isfile(src):
+            raise ValueError("头像源图不存在，请重新选择。")
+        image = QImage(src)
+        if image.isNull():
+            raise ValueError("无法读取头像图片，请更换文件格式后重试。")
+        crop = self._normalize_theme_crop_data(crop_data) or {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}
+        sw = int(image.width())
+        sh = int(image.height())
+        x = int(round(crop["x"] * sw))
+        y = int(round(crop["y"] * sh))
+        w = int(round(crop["w"] * sw))
+        h = int(round(crop["h"] * sh))
+        x = max(0, min(sw - 1, x))
+        y = max(0, min(sh - 1, y))
+        w = max(1, min(sw - x, w))
+        h = max(1, min(sh - y, h))
+        cropped = image.copy(x, y, w, h)
+        out_size = self._theme_avatar_target_size()
+        rendered = cropped.scaled(out_size, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+        if rendered.width() != out_size.width() or rendered.height() != out_size.height():
+            ox = max(0, int((rendered.width() - out_size.width()) / 2))
+            oy = max(0, int((rendered.height() - out_size.height()) / 2))
+            rendered = rendered.copy(ox, oy, int(out_size.width()), int(out_size.height()))
+        out_dir = lz.launcher_data_path("theme_avatar")
+        os.makedirs(out_dir, exist_ok=True)
+        safe_tag = "".join(ch for ch in str(asset_tag or "chat_avatar") if ch.isalnum() or ch in ("_", "-")).strip("_-")
+        if not safe_tag:
+            safe_tag = "chat_avatar"
+        out_path = os.path.join(out_dir, f"{safe_tag}_{int(time.time() * 1000)}.png")
+        if not rendered.save(out_path, "PNG"):
+            raise ValueError("头像图片写入失败，请检查目录权限。")
+        return out_path
+
     def _ensure_theme_font_options(self):
         combo = getattr(self, "settings_theme_font_combo", None)
         if combo is None:
@@ -5692,21 +5916,25 @@ class SettingsPanelMixin:
         font_combo = getattr(self, "settings_theme_font_combo", None)
         weight_combo = getattr(self, "settings_theme_weight_combo", None)
         size_combo = getattr(self, "settings_theme_size_combo", None)
+        visual_combo = getattr(self, "settings_theme_visual_combo", None)
         bg_combo = getattr(self, "settings_theme_bg_combo", None)
         mode_combo = getattr(self, "settings_theme_bg_mode_combo", None)
         fade_slider = getattr(self, "settings_theme_fade_slider", None)
         floating_bg_combo = getattr(self, "settings_theme_floating_bg_combo", None)
         floating_mode_combo = getattr(self, "settings_theme_floating_bg_mode_combo", None)
         floating_fade_slider = getattr(self, "settings_theme_floating_fade_slider", None)
-        for combo in (font_combo, weight_combo, size_combo, bg_combo, mode_combo, floating_bg_combo, floating_mode_combo):
+        for combo in (font_combo, weight_combo, size_combo, visual_combo, bg_combo, mode_combo, floating_bg_combo, floating_mode_combo):
             self._apply_theme_combo_style(combo)
         path_edit = getattr(self, "settings_theme_bg_image_path", None)
         floating_path_edit = getattr(self, "settings_theme_floating_bg_image_path", None)
+        user_avatar_edit = getattr(self, "settings_theme_user_avatar_path", None)
+        ai_avatar_edit = getattr(self, "settings_theme_ai_avatar_path", None)
         current_font = str(self.cfg.get("theme_font_family") or "").strip()
         self._select_combo_data(font_combo, current_font, default_index=0)
         self._select_combo_data(weight_combo, str(self.cfg.get("theme_font_weight") or "400"), default_index=0)
         self._select_combo_data(size_combo, str(self.cfg.get("theme_font_size") or "14"), default_index=3)
-        self._select_combo_data(bg_combo, str(self.cfg.get("theme_bg_preset") or "default"), default_index=0)
+        self._select_combo_data(visual_combo, resolve_theme_visual_preset(self.cfg), default_index=0)
+        self._select_combo_data(bg_combo, normalize_theme_background_mode(self.cfg.get("theme_bg_preset")), default_index=0)
         self._select_combo_data(mode_combo, str(self.cfg.get("theme_bg_image_mode") or "center"), default_index=0)
         self._select_combo_data(floating_bg_combo, str(self.cfg.get("theme_floating_bg_preset") or "follow"), default_index=0)
         self._select_combo_data(
@@ -5743,6 +5971,7 @@ class SettingsPanelMixin:
         crop_data = self._normalize_theme_crop_data(self.cfg.get("theme_bg_crop")) or {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}
         self._theme_bg_source_selected_path = source_abs if os.path.isfile(source_abs) else ""
         self._theme_bg_crop_selected = crop_data
+        self._theme_bg_force_clear = False
         if path_edit is not None:
             path_edit.setText(self._theme_bg_source_selected_path)
         floating_source_rel = str(self.cfg.get("theme_floating_bg_source") or self.cfg.get("theme_floating_bg_image") or "").strip()
@@ -5755,18 +5984,96 @@ class SettingsPanelMixin:
         }
         self._theme_floating_bg_source_selected_path = floating_source_abs if os.path.isfile(floating_source_abs) else ""
         self._theme_floating_bg_crop_selected = floating_crop_data
+        self._theme_floating_bg_force_clear = False
         if floating_path_edit is not None:
             floating_path_edit.setText(self._theme_floating_bg_source_selected_path)
-        if str(self.cfg.get("theme_bg_preset") or "default").strip().lower() == "image" and not os.path.isfile(source_abs):
-            self.settings_theme_notice.setText("当前预设是图片背景，但还没有有效图片文件；界面会回退到默认背景。")
-        elif str(self.cfg.get("theme_bg_preset") or "default").strip().lower() == "image":
-            self.settings_theme_notice.setText("当前图片背景已配置裁切。可重新选图进行拖动/缩放后裁切。")
+        user_avatar_source_rel = str(self.cfg.get("theme_user_avatar_source") or self.cfg.get("theme_user_avatar_image") or "").strip()
+        user_avatar_source_abs = lz._resolve_config_path(user_avatar_source_rel) if user_avatar_source_rel else ""
+        user_avatar_crop_data = self._normalize_theme_crop_data(self.cfg.get("theme_user_avatar_crop")) or {
+            "x": 0.0,
+            "y": 0.0,
+            "w": 1.0,
+            "h": 1.0,
+        }
+        self._theme_user_avatar_source_selected_path = user_avatar_source_abs if os.path.isfile(user_avatar_source_abs) else ""
+        self._theme_user_avatar_crop_selected = user_avatar_crop_data
+        self._theme_user_avatar_force_clear = False
+        if user_avatar_edit is not None:
+            user_avatar_edit.setText(self._theme_user_avatar_source_selected_path)
+        ai_avatar_source_rel = str(self.cfg.get("theme_ai_avatar_source") or self.cfg.get("theme_ai_avatar_image") or "").strip()
+        ai_avatar_source_abs = lz._resolve_config_path(ai_avatar_source_rel) if ai_avatar_source_rel else ""
+        ai_avatar_crop_data = self._normalize_theme_crop_data(self.cfg.get("theme_ai_avatar_crop")) or {
+            "x": 0.0,
+            "y": 0.0,
+            "w": 1.0,
+            "h": 1.0,
+        }
+        self._theme_ai_avatar_source_selected_path = ai_avatar_source_abs if os.path.isfile(ai_avatar_source_abs) else ""
+        self._theme_ai_avatar_crop_selected = ai_avatar_crop_data
+        self._theme_ai_avatar_force_clear = False
+        if ai_avatar_edit is not None:
+            ai_avatar_edit.setText(self._theme_ai_avatar_source_selected_path)
+        bg_mode = normalize_theme_background_mode(self.cfg.get("theme_bg_preset"))
+        visual_preset = resolve_theme_visual_preset(self.cfg)
+        visual_label = ""
+        if visual_combo is not None:
+            idx = visual_combo.findData(visual_preset)
+            if idx >= 0:
+                visual_label = str(visual_combo.itemText(idx) or "").strip()
+        if bg_mode == "image" and not os.path.isfile(source_abs):
+            self.settings_theme_notice.setText("当前背景模式是图片背景，但还没有有效图片文件；界面会回退到主体预设默认底色。")
+        elif bg_mode == "image":
+            self.settings_theme_notice.setText("当前图片背景已配置裁切。主体预设仍会控制侧边栏、卡片、按钮和文本层级。")
         elif str(self.cfg.get("theme_floating_bg_preset") or "follow").strip().lower() == "image" and not os.path.isfile(floating_source_abs):
             self.settings_theme_notice.setText("悬浮窗预设是图片背景，但还没有有效图片文件；当前会跟随主背景。")
         elif str(self.cfg.get("theme_floating_bg_preset") or "follow").strip().lower() == "image":
             self.settings_theme_notice.setText("悬浮窗图片背景已配置裁切。点击“保存主题设置”后生效。")
         else:
-            self.settings_theme_notice.setText("修改后点击“保存主题设置”即可立即应用。")
+            preset_text = f"当前主体预设：{visual_label}。" if visual_label else ""
+            self.settings_theme_notice.setText(preset_text + "修改后点击“保存主题设置”即可立即应用。")
+
+    def _choose_theme_chat_avatar(self, role: str):
+        meta = self._theme_avatar_meta(role)
+        current = str(getattr(self, meta["source_attr"], "") or "").strip()
+        start_dir = os.path.dirname(current) if current else os.path.expanduser("~")
+        selected, _ = QFileDialog.getOpenFileName(
+            self,
+            f"选择{meta['label']}",
+            start_dir,
+            "图片文件 (*.png *.jpg *.jpeg *.bmp *.webp *.gif);;全部文件 (*.*)",
+        )
+        if not selected:
+            return
+        resolved = os.path.abspath(selected)
+        try:
+            dialog = _ThemeCropDialog(resolved, self._theme_avatar_target_size(), self)
+        except Exception as e:
+            QMessageBox.warning(self, "无法加载图片", str(e))
+            return
+        if dialog.exec() != QDialog.Accepted:
+            return
+        crop_data = self._normalize_theme_crop_data(dialog.crop_norm()) or {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}
+        setattr(self, meta["source_attr"], resolved)
+        setattr(self, meta["crop_attr"], crop_data)
+        setattr(self, meta["clear_attr"], False)
+        edit = getattr(self, meta["path_attr"], None)
+        if edit is not None:
+            edit.setText(resolved)
+        notice = getattr(self, "settings_theme_notice", None)
+        if notice is not None:
+            notice.setText(f"已完成{meta['label']}裁切。点击“保存主题设置”后会立即刷新现有聊天头像。")
+
+    def _clear_theme_chat_avatar(self, role: str):
+        meta = self._theme_avatar_meta(role)
+        setattr(self, meta["source_attr"], "")
+        setattr(self, meta["crop_attr"], {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0})
+        setattr(self, meta["clear_attr"], True)
+        edit = getattr(self, meta["path_attr"], None)
+        if edit is not None:
+            edit.clear()
+        notice = getattr(self, "settings_theme_notice", None)
+        if notice is not None:
+            notice.setText(f"{meta['label']}已清空；保存后会恢复默认极简头像。")
 
     def _choose_theme_background_image(self):
         current = str(getattr(self, "_theme_bg_source_selected_path", "") or "").strip()
@@ -5790,6 +6097,7 @@ class SettingsPanelMixin:
         crop_data = self._normalize_theme_crop_data(dialog.crop_norm()) or {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}
         self._theme_bg_source_selected_path = resolved
         self._theme_bg_crop_selected = crop_data
+        self._theme_bg_force_clear = False
         edit = getattr(self, "settings_theme_bg_image_path", None)
         if edit is not None:
             edit.setText(resolved)
@@ -5800,17 +6108,18 @@ class SettingsPanelMixin:
                 bg_combo.setCurrentIndex(idx)
         notice = getattr(self, "settings_theme_notice", None)
         if notice is not None:
-            notice.setText("已完成裁切，并自动切换到“图片背景”预设；点击“保存主题设置”后生效。")
+            notice.setText("已完成裁切，并自动切换到“图片背景”模式；点击“保存主题设置”后生效。")
 
     def _clear_theme_background_image(self):
         self._theme_bg_source_selected_path = ""
         self._theme_bg_crop_selected = {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}
+        self._theme_bg_force_clear = True
         edit = getattr(self, "settings_theme_bg_image_path", None)
         if edit is not None:
             edit.clear()
         notice = getattr(self, "settings_theme_notice", None)
         if notice is not None:
-            notice.setText("背景图片已清空，点击“保存主题设置”后生效。")
+            notice.setText("背景图片已清空；若保持“图片背景”模式，界面会回退到主体预设底色。")
 
     def _choose_theme_floating_background_image(self):
         current = str(getattr(self, "_theme_floating_bg_source_selected_path", "") or "").strip()
@@ -5834,6 +6143,7 @@ class SettingsPanelMixin:
         crop_data = self._normalize_theme_crop_data(dialog.crop_norm()) or {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}
         self._theme_floating_bg_source_selected_path = resolved
         self._theme_floating_bg_crop_selected = crop_data
+        self._theme_floating_bg_force_clear = False
         edit = getattr(self, "settings_theme_floating_bg_image_path", None)
         if edit is not None:
             edit.setText(resolved)
@@ -5849,6 +6159,7 @@ class SettingsPanelMixin:
     def _clear_theme_floating_background_image(self):
         self._theme_floating_bg_source_selected_path = ""
         self._theme_floating_bg_crop_selected = {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}
+        self._theme_floating_bg_force_clear = True
         edit = getattr(self, "settings_theme_floating_bg_image_path", None)
         if edit is not None:
             edit.clear()
@@ -5860,6 +6171,7 @@ class SettingsPanelMixin:
         font_combo = getattr(self, "settings_theme_font_combo", None)
         weight_combo = getattr(self, "settings_theme_weight_combo", None)
         size_combo = getattr(self, "settings_theme_size_combo", None)
+        visual_combo = getattr(self, "settings_theme_visual_combo", None)
         bg_combo = getattr(self, "settings_theme_bg_combo", None)
         mode_combo = getattr(self, "settings_theme_bg_mode_combo", None)
         fade_slider = getattr(self, "settings_theme_fade_slider", None)
@@ -5869,7 +6181,8 @@ class SettingsPanelMixin:
         font_family = str(font_combo.itemData(font_combo.currentIndex()) or "").strip() if font_combo is not None else ""
         font_weight = str(weight_combo.itemData(weight_combo.currentIndex()) or "400").strip() if weight_combo is not None else "400"
         font_size = str(size_combo.itemData(size_combo.currentIndex()) or "14").strip() if size_combo is not None else "14"
-        bg_preset = str(bg_combo.itemData(bg_combo.currentIndex()) or "default").strip() if bg_combo is not None else "default"
+        visual_preset = str(visual_combo.itemData(visual_combo.currentIndex()) or "graphite").strip() if visual_combo is not None else "graphite"
+        bg_preset = normalize_theme_background_mode(bg_combo.itemData(bg_combo.currentIndex()) if bg_combo is not None else "default")
         bg_mode = str(mode_combo.itemData(mode_combo.currentIndex()) or "center").strip() if mode_combo is not None else "center"
         floating_bg_preset = str(floating_bg_combo.itemData(floating_bg_combo.currentIndex()) or "follow").strip() if floating_bg_combo is not None else "follow"
         floating_bg_mode = str(floating_mode_combo.itemData(floating_mode_combo.currentIndex()) or "center").strip() if floating_mode_combo is not None else "center"
@@ -5889,8 +6202,11 @@ class SettingsPanelMixin:
                 ),
             ),
         )
-        source_path = str(getattr(self, "_theme_bg_source_selected_path", "") or "").strip()
-        if not source_path:
+        bg_force_clear = bool(getattr(self, "_theme_bg_force_clear", False))
+        source_path = ""
+        if not bg_force_clear:
+            source_path = str(getattr(self, "_theme_bg_source_selected_path", "") or "").strip()
+        if (not bg_force_clear) and (not source_path):
             source_rel_cfg = str(self.cfg.get("theme_bg_source") or self.cfg.get("theme_bg_image") or "").strip()
             source_path = lz._resolve_config_path(source_rel_cfg) if source_rel_cfg else ""
         crop_data = self._normalize_theme_crop_data(getattr(self, "_theme_bg_crop_selected", None))
@@ -5898,8 +6214,11 @@ class SettingsPanelMixin:
             crop_data = self._normalize_theme_crop_data(self.cfg.get("theme_bg_crop"))
         if crop_data is None:
             crop_data = {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}
-        floating_source_path = str(getattr(self, "_theme_floating_bg_source_selected_path", "") or "").strip()
-        if not floating_source_path:
+        floating_bg_force_clear = bool(getattr(self, "_theme_floating_bg_force_clear", False))
+        floating_source_path = ""
+        if not floating_bg_force_clear:
+            floating_source_path = str(getattr(self, "_theme_floating_bg_source_selected_path", "") or "").strip()
+        if (not floating_bg_force_clear) and (not floating_source_path):
             floating_source_rel_cfg = str(self.cfg.get("theme_floating_bg_source") or self.cfg.get("theme_floating_bg_image") or "").strip()
             floating_source_path = lz._resolve_config_path(floating_source_rel_cfg) if floating_source_rel_cfg else ""
         floating_crop_data = self._normalize_theme_crop_data(getattr(self, "_theme_floating_bg_crop_selected", None))
@@ -5907,21 +6226,51 @@ class SettingsPanelMixin:
             floating_crop_data = self._normalize_theme_crop_data(self.cfg.get("theme_floating_bg_crop"))
         if floating_crop_data is None:
             floating_crop_data = {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}
+        user_avatar_force_clear = bool(getattr(self, "_theme_user_avatar_force_clear", False))
+        user_avatar_source_path = ""
+        if not user_avatar_force_clear:
+            user_avatar_source_path = str(getattr(self, "_theme_user_avatar_source_selected_path", "") or "").strip()
+            if not user_avatar_source_path:
+                user_avatar_source_rel_cfg = str(
+                    self.cfg.get("theme_user_avatar_source") or self.cfg.get("theme_user_avatar_image") or ""
+                ).strip()
+                user_avatar_source_path = lz._resolve_config_path(user_avatar_source_rel_cfg) if user_avatar_source_rel_cfg else ""
+        user_avatar_crop_data = self._normalize_theme_crop_data(getattr(self, "_theme_user_avatar_crop_selected", None))
+        if user_avatar_crop_data is None:
+            user_avatar_crop_data = self._normalize_theme_crop_data(self.cfg.get("theme_user_avatar_crop"))
+        if user_avatar_crop_data is None:
+            user_avatar_crop_data = {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}
+        ai_avatar_force_clear = bool(getattr(self, "_theme_ai_avatar_force_clear", False))
+        ai_avatar_source_path = ""
+        if not ai_avatar_force_clear:
+            ai_avatar_source_path = str(getattr(self, "_theme_ai_avatar_source_selected_path", "") or "").strip()
+            if not ai_avatar_source_path:
+                ai_avatar_source_rel_cfg = str(
+                    self.cfg.get("theme_ai_avatar_source") or self.cfg.get("theme_ai_avatar_image") or ""
+                ).strip()
+                ai_avatar_source_path = lz._resolve_config_path(ai_avatar_source_rel_cfg) if ai_avatar_source_rel_cfg else ""
+        ai_avatar_crop_data = self._normalize_theme_crop_data(getattr(self, "_theme_ai_avatar_crop_selected", None))
+        if ai_avatar_crop_data is None:
+            ai_avatar_crop_data = self._normalize_theme_crop_data(self.cfg.get("theme_ai_avatar_crop"))
+        if ai_avatar_crop_data is None:
+            ai_avatar_crop_data = {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}
 
         generated_abs = ""
         if bg_preset == "image":
             if not source_path or not os.path.isfile(source_path):
-                QMessageBox.warning(self, "图片无效", "当前未选择可用的背景图片，请先点“选择图片”完成裁切。")
-                return
+                if not bg_force_clear:
+                    QMessageBox.warning(self, "图片无效", "当前未选择可用的背景图片，请先点“选择图片”完成裁切。")
+                    return
             try:
-                generated_abs = self._render_theme_background_asset(
-                    source_path,
-                    crop_data,
-                    self._theme_target_size(),
-                    fade_value,
-                    asset_tag="launcher_bg",
-                    enforce_launcher_min=True,
-                )
+                if source_path and os.path.isfile(source_path):
+                    generated_abs = self._render_theme_background_asset(
+                        source_path,
+                        crop_data,
+                        self._theme_target_size(),
+                        fade_value,
+                        asset_tag="launcher_bg",
+                        enforce_launcher_min=True,
+                    )
             except Exception as e:
                 QMessageBox.warning(self, "生成背景失败", str(e))
                 return
@@ -5929,36 +6278,75 @@ class SettingsPanelMixin:
         floating_generated_abs = ""
         if floating_bg_preset == "image":
             if not floating_source_path or not os.path.isfile(floating_source_path):
-                QMessageBox.warning(self, "图片无效", "当前未选择可用的悬浮窗背景图片，请先点“选择图片”完成裁切。")
-                return
+                if not floating_bg_force_clear:
+                    QMessageBox.warning(self, "图片无效", "当前未选择可用的悬浮窗背景图片，请先点“选择图片”完成裁切。")
+                    return
             try:
-                floating_generated_abs = self._render_theme_background_asset(
-                    floating_source_path,
-                    floating_crop_data,
-                    self._theme_floating_target_size(),
-                    floating_fade_value,
-                    asset_tag="floating_bg",
-                    enforce_launcher_min=False,
-                )
+                if floating_source_path and os.path.isfile(floating_source_path):
+                    floating_generated_abs = self._render_theme_background_asset(
+                        floating_source_path,
+                        floating_crop_data,
+                        self._theme_floating_target_size(),
+                        floating_fade_value,
+                        asset_tag="floating_bg",
+                        enforce_launcher_min=False,
+                    )
             except Exception as e:
                 QMessageBox.warning(self, "生成悬浮窗背景失败", str(e))
                 return
 
-        generated_rel = lz._make_config_relative_path(generated_abs) if generated_abs else str(self.cfg.get("theme_bg_image") or "").strip()
-        source_rel = lz._make_config_relative_path(source_path) if source_path else ""
-        floating_generated_rel = (
-            lz._make_config_relative_path(floating_generated_abs)
-            if floating_generated_abs
-            else str(self.cfg.get("theme_floating_bg_image") or "").strip()
+        user_avatar_generated_abs = ""
+        if user_avatar_source_path and os.path.isfile(user_avatar_source_path):
+            try:
+                user_avatar_generated_abs = self._render_theme_avatar_asset(
+                    user_avatar_source_path,
+                    user_avatar_crop_data,
+                    asset_tag="user_avatar",
+                )
+            except Exception as e:
+                QMessageBox.warning(self, "生成我的头像失败", str(e))
+                return
+
+        ai_avatar_generated_abs = ""
+        if ai_avatar_source_path and os.path.isfile(ai_avatar_source_path):
+            try:
+                ai_avatar_generated_abs = self._render_theme_avatar_asset(
+                    ai_avatar_source_path,
+                    ai_avatar_crop_data,
+                    asset_tag="ai_avatar",
+                )
+            except Exception as e:
+                QMessageBox.warning(self, "生成 AI 头像失败", str(e))
+                return
+
+        generated_rel = (
+            ""
+            if bg_force_clear
+            else (lz._make_config_relative_path(generated_abs) if generated_abs else str(self.cfg.get("theme_bg_image") or "").strip())
         )
-        floating_source_rel = lz._make_config_relative_path(floating_source_path) if floating_source_path else ""
+        source_rel = "" if bg_force_clear else (lz._make_config_relative_path(source_path) if source_path else "")
+        floating_generated_rel = (
+            ""
+            if floating_bg_force_clear
+            else (
+                lz._make_config_relative_path(floating_generated_abs)
+                if floating_generated_abs
+                else str(self.cfg.get("theme_floating_bg_image") or "").strip()
+            )
+        )
+        floating_source_rel = "" if floating_bg_force_clear else (lz._make_config_relative_path(floating_source_path) if floating_source_path else "")
+        user_avatar_generated_rel = lz._make_config_relative_path(user_avatar_generated_abs) if user_avatar_generated_abs else ""
+        user_avatar_source_rel = lz._make_config_relative_path(user_avatar_source_path) if user_avatar_source_path else ""
+        ai_avatar_generated_rel = lz._make_config_relative_path(ai_avatar_generated_abs) if ai_avatar_generated_abs else ""
+        ai_avatar_source_rel = lz._make_config_relative_path(ai_avatar_source_path) if ai_avatar_source_path else ""
         self.cfg["theme_font_family"] = font_family
         self.cfg["theme_font_weight"] = font_weight
         self.cfg["theme_font_size"] = font_size
+        self.cfg["theme_visual_preset"] = visual_preset
         self.cfg["theme_bg_preset"] = bg_preset
         self.cfg["theme_bg_image"] = generated_rel
         self.cfg["theme_bg_source"] = source_rel
-        self.cfg["theme_bg_crop"] = crop_data
+        self.cfg["theme_bg_crop"] = crop_data if source_rel else {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}
         self.cfg["theme_bg_fade"] = fade_value
         self.cfg["theme_bg_blur"] = fade_value
         self.cfg["theme_bg_render_sig"] = ""
@@ -5966,23 +6354,39 @@ class SettingsPanelMixin:
         self.cfg["theme_floating_bg_preset"] = floating_bg_preset
         self.cfg["theme_floating_bg_image"] = floating_generated_rel
         self.cfg["theme_floating_bg_source"] = floating_source_rel
-        self.cfg["theme_floating_bg_crop"] = floating_crop_data
+        self.cfg["theme_floating_bg_crop"] = floating_crop_data if floating_source_rel else {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}
         self.cfg["theme_floating_bg_fade"] = floating_fade_value
         self.cfg["theme_floating_bg_blur"] = floating_fade_value
         self.cfg["theme_floating_bg_render_sig"] = ""
         self.cfg["theme_floating_bg_image_mode"] = floating_bg_mode
+        self.cfg["theme_user_avatar_image"] = user_avatar_generated_rel
+        self.cfg["theme_user_avatar_source"] = user_avatar_source_rel
+        self.cfg["theme_user_avatar_crop"] = user_avatar_crop_data if user_avatar_source_rel else {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}
+        self.cfg["theme_user_avatar_render_sig"] = ""
+        self.cfg["theme_ai_avatar_image"] = ai_avatar_generated_rel
+        self.cfg["theme_ai_avatar_source"] = ai_avatar_source_rel
+        self.cfg["theme_ai_avatar_crop"] = ai_avatar_crop_data if ai_avatar_source_rel else {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}
+        self.cfg["theme_ai_avatar_render_sig"] = ""
         lz.save_config(self.cfg)
         mode = self._normalize_appearance_mode(self.cfg.get("appearance_mode", "light"))
         self._apply_theme(mode)
         self._reload_theme_panel()
+        visual_label = ""
+        if visual_combo is not None:
+            visual_label = str(visual_combo.currentText() or "").strip()
+        avatars_updated = bool(user_avatar_generated_abs or ai_avatar_generated_abs or user_avatar_force_clear or ai_avatar_force_clear)
         if bg_preset == "image" and not generated_abs:
-            self.settings_theme_notice.setText("主题已保存。你选择了图片背景，但还没有图片文件，当前会使用默认背景。")
+            self.settings_theme_notice.setText("主题已保存。你选择了图片背景，但还没有图片文件，当前会使用主体预设默认底色。")
         elif floating_bg_preset == "image" and not floating_generated_abs:
             self.settings_theme_notice.setText("主题已保存。悬浮窗选择了图片背景，但图片无效，当前会跟随主背景。")
         elif bg_preset == "image":
-            self.settings_theme_notice.setText("主题设置已保存并应用。当前显示的是裁切后背景图。")
+            tail = " 聊天头像也已同步刷新。" if avatars_updated else ""
+            self.settings_theme_notice.setText("主题设置已保存并应用。当前显示的是裁切后背景图，主体预设层级也已同步刷新。" + tail)
         elif floating_bg_preset == "image":
-            self.settings_theme_notice.setText("主题设置已保存并应用。悬浮窗将使用单独背景图。")
+            tail = " 聊天头像也已同步刷新。" if avatars_updated else ""
+            self.settings_theme_notice.setText("主题设置已保存并应用。悬浮窗将使用单独背景图。" + tail)
         else:
-            self.settings_theme_notice.setText("主题设置已保存并应用。")
+            suffix = f"当前默认主体预设：{visual_label}。" if visual_label else ""
+            avatar_suffix = "聊天头像也已同步刷新。" if avatars_updated else ""
+            self.settings_theme_notice.setText("主题设置已保存并应用。" + suffix + avatar_suffix)
         self._set_status("主题设置已保存。")

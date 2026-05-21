@@ -1312,6 +1312,38 @@ class LauncherCoreFacadeTests(unittest.TestCase):
         self.assertEqual(dummy.sync_calls, 1)
         self.assertNotIn("reasoning_effort", dummy.persisted[-1])
 
+    def test_apply_state_to_session_persists_context_window_metrics(self):
+        class DummyBridge(BridgeRuntimeMixin):
+            _apply_state_to_session = BridgeRuntimeMixin._apply_state_to_session
+            _normalize_reasoning_effort_value = BridgeRuntimeMixin._normalize_reasoning_effort_value
+            _session_snapshot_reasoning_effort_source = BridgeRuntimeMixin._session_snapshot_reasoning_effort_source
+
+            def __init__(self):
+                self.agent_dir = "C:\\demo"
+                self.current_session = {"id": "sess-ctx", "snapshot": {}}
+                self._bridge_reasoning_effort = ""
+                self.persisted = []
+
+            def _sync_reasoning_effort_combo(self):
+                return None
+
+            def _persist_session(self, session):
+                self.persisted.append(dict(session))
+
+        dummy = DummyBridge()
+        dummy._apply_state_to_session(
+            "sess-ctx",
+            [{"role": "user", "content": "hi"}],
+            [],
+            context_window_chars=1200,
+            current_input_chars=300,
+        )
+
+        self.assertEqual(dummy.current_session["snapshot"]["context_window_chars"], 1200)
+        self.assertEqual(dummy.current_session["snapshot"]["current_input_chars"], 300)
+        self.assertEqual(dummy.current_session["snapshot"]["context_window_left_pct"], 75.0)
+        self.assertEqual(dummy.persisted[-1]["snapshot"]["context_window_left_pct"], 75.0)
+
     def test_handle_event_reasoning_effort_switched_persists_current_session(self):
         class DummyBridge(BridgeRuntimeMixin):
             _handle_event = BridgeRuntimeMixin._handle_event
@@ -1924,7 +1956,7 @@ class LauncherCoreFacadeTests(unittest.TestCase):
         self.assertEqual(dummy._pending_input_attachments_data, [])
         self.assertEqual(dummy.attachment_refreshes, 1)
 
-    def test_handle_local_slash_continue_restores_recent_session_silently(self):
+    def test_handle_local_slash_continue_no_longer_intercepts_launcher_restore(self):
         class DummyEditor:
             def __init__(self):
                 self.cleared = 0
@@ -1977,15 +2009,15 @@ class LauncherCoreFacadeTests(unittest.TestCase):
         ) as warning_box:
             consumed = dummy._handle_local_slash_command("/continue", source_editor=editor)
 
-        self.assertTrue(consumed)
-        self.assertEqual(editor.cleared, 1)
-        self.assertEqual(dummy.request, ("launcher", "local", "local"))
-        self.assertEqual(dummy.loaded, ["sess-older"])
+        self.assertFalse(consumed)
+        self.assertEqual(editor.cleared, 0)
+        self.assertFalse(hasattr(dummy, "request"))
+        self.assertEqual(dummy.loaded, [])
         self.assertEqual(dummy.statuses, [])
         info_box.assert_not_called()
         warning_box.assert_not_called()
 
-    def test_handle_local_slash_continue_restores_nth_recent_session(self):
+    def test_handle_local_slash_continue_n_no_longer_intercepts_launcher_restore(self):
         class DummyEditor:
             def __init__(self):
                 self.cleared = 0
@@ -2033,10 +2065,78 @@ class LauncherCoreFacadeTests(unittest.TestCase):
 
         consumed = dummy._handle_local_slash_command("/continue 2", source_editor=editor)
 
+        self.assertFalse(consumed)
+        self.assertEqual(editor.cleared, 0)
+        self.assertEqual(dummy.loaded, [])
+        self.assertEqual(dummy.statuses, [])
+
+    def test_handle_local_slash_cost_formats_current_session_summary(self):
+        class DummyEditor:
+            def __init__(self):
+                self.cleared = 0
+
+            def clear(self):
+                self.cleared += 1
+
+        class DummyBridge(BridgeRuntimeMixin):
+            _handle_local_slash_command = BridgeRuntimeMixin._handle_local_slash_command
+            _local_slash_clear_input = BridgeRuntimeMixin._local_slash_clear_input
+            _local_slash_cost_number = BridgeRuntimeMixin._local_slash_cost_number
+            _local_slash_cost_time_label = BridgeRuntimeMixin._local_slash_cost_time_label
+            _local_slash_cost_context_metrics = BridgeRuntimeMixin._local_slash_cost_context_metrics
+            _local_slash_cost_section_lines = BridgeRuntimeMixin._local_slash_cost_section_lines
+            _handle_local_slash_cost = BridgeRuntimeMixin._handle_local_slash_cost
+            _show_local_slash_feedback = BridgeRuntimeMixin._show_local_slash_feedback
+
+            def __init__(self):
+                self.current_session = {
+                    "id": "sess-cost",
+                    "title": "Graphite",
+                    "backend_history": [{"role": "user", "content": "hello"}],
+                    "snapshot": {"context_window_chars": 1200, "current_input_chars": 300},
+                    "token_usage": {
+                        "events": [
+                            {
+                                "input_tokens": 100,
+                                "output_tokens": 90,
+                                "total_tokens": 190,
+                                "cache_creation_input_tokens": 20,
+                                "cache_read_input_tokens": 50,
+                                "api_calls": 3,
+                                "usage_source": "provider",
+                            }
+                        ],
+                        "last_model": "gpt-5.4",
+                    },
+                }
+                self._pending_input_attachments_data = []
+                self.rows = []
+                self.statuses = []
+
+            def _refresh_input_attachment_bar(self):
+                return None
+
+            def _sync_draft_to_floating(self, *, force=False):
+                return None
+
+            def _add_message_row(self, role, text, *, finished, auto_scroll):
+                self.rows.append((str(role), str(text), bool(finished), bool(auto_scroll)))
+                return object()
+
+            def _set_status(self, text):
+                self.statuses.append(str(text))
+
+        dummy = DummyBridge()
+        editor = DummyEditor()
+
+        consumed = dummy._handle_local_slash_command("/cost", source_editor=editor)
+
         self.assertTrue(consumed)
         self.assertEqual(editor.cleared, 1)
-        self.assertEqual(dummy.loaded, ["sess-second"])
-        self.assertEqual(dummy.statuses, [])
+        self.assertEqual(dummy.statuses, ["已显示当前会话的 /cost 统计。"])
+        self.assertIn("Token usage: 260 total (170 input + 90 output)", dummy.rows[-1][1])
+        self.assertIn("Cache: 50 read · 20 created · 29.4% hit", dummy.rows[-1][1])
+        self.assertIn("Context window: 75% left (300 chars used / 1.2K cap)", dummy.rows[-1][1])
 
     def test_handle_local_slash_llm_switches_by_llm_idx(self):
         class DummyEditor:
@@ -2739,6 +2839,30 @@ class LauncherCoreFacadeTests(unittest.TestCase):
         self.assertTrue(parsed.get("load_failed"))
         self.assertEqual(parsed.get("error"), "SSH 连接失败")
         self.assertEqual(parsed.get("configs"), [])
+
+    def test_load_mykey_source_parses_json_when_reader_returns_mykey_json(self):
+        class DummySettings(SettingsPanelMixin):
+            _load_mykey_source = SettingsPanelMixin._load_mykey_source
+            _settings_parse_mykey_text = SettingsPanelMixin._settings_parse_mykey_text
+
+            def _settings_target_read_mykey_text(self):
+                payload = {
+                    "native_oai_config": {
+                        "name": "primary",
+                        "apikey": "sk-demo",
+                        "apibase": "https://api.example/v1",
+                        "model": "gpt-5.4",
+                    }
+                }
+                return True, json.dumps(payload, ensure_ascii=False), "C:\\demo\\mykey.json", ""
+
+        dummy = DummySettings()
+        py_path, parsed = dummy._load_mykey_source()
+
+        self.assertEqual(py_path, "C:\\demo\\mykey.json")
+        self.assertEqual(parsed.get("error"), None)
+        self.assertEqual(len(parsed.get("configs") or []), 1)
+        self.assertEqual(parsed["configs"][0]["data"]["name"], "primary")
 
     def test_settings_target_read_mykey_text_reads_legacy_docker_target_via_direct_ssh_path(self):
         class DummyRemoteFile:
@@ -4031,6 +4155,327 @@ class LauncherCoreFacadeTests(unittest.TestCase):
         self.assertTrue(dummy.enter_chat_btn.enabled)
         self.assertEqual(dummy.enter_chat_btn.tooltip, "进入聊天页并开始准备当前内核环境。")
 
+    def test_refresh_official_gui_state_sets_launch_button_tooltips(self):
+        class DummyButton:
+            def __init__(self):
+                self.enabled = None
+                self.tooltip = ""
+
+            def setEnabled(self, enabled):
+                self.enabled = bool(enabled)
+
+            def setToolTip(self, text):
+                self.tooltip = str(text)
+
+        class DummyLabel:
+            def __init__(self):
+                self.text = ""
+
+            def setText(self, text):
+                self.text = str(text)
+
+        class DummyNav(NavigationMixin):
+            _apply_navigation_widget_state = NavigationMixin._apply_navigation_widget_state
+            _refresh_official_gui_state = NavigationMixin._refresh_official_gui_state
+            _refresh_official_frontend_entry = NavigationMixin._refresh_official_frontend_entry
+            _refresh_official_desktop_release_state = NavigationMixin._refresh_official_desktop_release_state
+            _official_frontend_extra_packages = NavigationMixin._official_frontend_extra_packages
+            _official_gui_extra_packages = NavigationMixin._official_gui_extra_packages
+            _official_frontend_script_path = NavigationMixin._official_frontend_script_path
+            _official_desktop_release_page_url = NavigationMixin._official_desktop_release_page_url
+            _official_desktop_release_candidates = NavigationMixin._official_desktop_release_candidates
+
+            def __init__(self):
+                self.agent_dir = ""
+                self.cfg = {}
+                self.official_gui_launch_btn = DummyButton()
+                self.official_desktop_launch_btn = DummyButton()
+                self.official_gui_path_label = DummyLabel()
+                self.official_gui_path_hint_label = DummyLabel()
+                self.official_gui_status_label = DummyLabel()
+                self.official_gui_entry_status_label = DummyLabel()
+                self.official_gui_dependency_label = DummyLabel()
+                self.official_desktop_status_label = DummyLabel()
+                self.official_desktop_dependency_label = DummyLabel()
+
+        dummy = DummyNav()
+        groups = [
+            {
+                "id": "launch_web_ui",
+                "items": [
+                    {"package": "streamlit>=1.28"},
+                    {"package": "pywebview>=4.0"},
+                ],
+            },
+        ]
+        with mock.patch.object(lz, "resolve_upstream_frontend_dependency_groups", return_value=groups), mock.patch.object(
+            lz, "is_valid_agent_dir", return_value=False
+        ), mock.patch.object(
+            navigation.os, "name", "nt"
+        ):
+            dummy._refresh_official_gui_state()
+        self.assertFalse(dummy.official_gui_launch_btn.enabled)
+        self.assertFalse(dummy.official_desktop_launch_btn.enabled)
+        self.assertEqual(dummy.official_gui_launch_btn.tooltip, "请先选择有效的 GenericAgent 目录。")
+        self.assertEqual(dummy.official_desktop_launch_btn.tooltip, "请先选择有效的 GenericAgent 目录，并把发布版 exe 放到 frontends/。")
+        self.assertIn("streamlit>=1.28", dummy.official_gui_dependency_label.text)
+        self.assertIn("pywebview>=4.0", dummy.official_gui_dependency_label.text)
+        self.assertIn("GenericAgent-windows-x64.exe", dummy.official_desktop_dependency_label.text)
+        self.assertIn("frontends/GenericAgent.exe", dummy.official_desktop_status_label.text)
+
+        dummy.agent_dir = "C:\\demo"
+        with mock.patch.object(lz, "resolve_upstream_frontend_dependency_groups", return_value=groups), mock.patch.object(
+            lz, "is_valid_agent_dir", return_value=True
+        ), mock.patch.object(
+            navigation.os, "name", "nt"
+        ), mock.patch.object(
+            navigation.os.path,
+            "isfile",
+            side_effect=lambda path: os.path.normcase(os.path.normpath(path))
+            in {
+                os.path.normcase(os.path.normpath(os.path.join("C:\\demo", "launch.pyw"))),
+                os.path.normcase(os.path.normpath(os.path.join("C:\\demo", "frontends", "GenericAgent.exe"))),
+            },
+        ):
+            dummy._refresh_official_gui_state()
+        self.assertTrue(dummy.official_gui_launch_btn.enabled)
+        self.assertTrue(dummy.official_desktop_launch_btn.enabled)
+        self.assertEqual(dummy.official_gui_launch_btn.tooltip, "检查依赖后拉起上游 launch.pyw。")
+        self.assertEqual(dummy.official_desktop_launch_btn.tooltip, "拉起当前目录 frontends/ 下的官方发布版桌面客户端。")
+        self.assertIn("C:\\demo", dummy.official_gui_status_label.text)
+        self.assertIn("GenericAgent.exe", dummy.official_desktop_status_label.text)
+
+        with mock.patch.object(lz, "resolve_upstream_frontend_dependency_groups", return_value=groups), mock.patch.object(
+            lz, "is_valid_agent_dir", return_value=True
+        ), mock.patch.object(
+            navigation.os, "name", "nt"
+        ), mock.patch.object(
+            navigation.os.path,
+            "isfile",
+            side_effect=lambda path: os.path.normcase(os.path.normpath(path))
+            == os.path.normcase(os.path.normpath(os.path.join("C:\\demo", "launch.pyw"))),
+        ):
+            dummy._refresh_official_gui_state()
+        self.assertFalse(dummy.official_desktop_launch_btn.enabled)
+        self.assertEqual(dummy.official_desktop_launch_btn.tooltip, "当前目录未找到官方发布版桌面客户端，可先打开 Release 页面下载。")
+
+    def test_launch_official_gui_checks_dependencies_and_spawns_launch_pyw(self):
+        class DummyLabel:
+            def __init__(self):
+                self.text = ""
+
+            def setText(self, text):
+                self.text = str(text)
+
+        class DummyProc:
+            pid = 1234
+
+        class DummyNav(NavigationMixin):
+            _launch_official_gui = NavigationMixin._launch_official_gui
+            _launch_official_frontend = NavigationMixin._launch_official_frontend
+            _official_frontend_extra_packages = NavigationMixin._official_frontend_extra_packages
+            _official_gui_extra_packages = NavigationMixin._official_gui_extra_packages
+            _official_frontend_script_path = NavigationMixin._official_frontend_script_path
+
+            def __init__(self, agent_dir, python_exe):
+                self.agent_dir = agent_dir
+                self.cfg = {}
+                self.python_exe = python_exe
+                self.notice = DummyLabel()
+                self.official_gui_notice_label = self.notice
+                self.check_calls = []
+                self.statuses = []
+                self.remembered = []
+
+            def _check_runtime_dependencies(self, **kwargs):
+                self.check_calls.append(dict(kwargs))
+                return True
+
+            def _resolve_bridge_python(self):
+                return self.python_exe, None
+
+            def _remember_bridge_python(self, py_path):
+                self.remembered.append(str(py_path))
+
+            def _set_status(self, text):
+                self.statuses.append(str(text))
+
+        with tempfile.TemporaryDirectory() as td:
+            launch_path = os.path.join(td, "launch.pyw")
+            python_exe = os.path.join(td, "python.exe")
+            with open(launch_path, "w", encoding="utf-8") as f:
+                f.write("# launch")
+            with open(python_exe, "w", encoding="utf-8") as f:
+                f.write("# python")
+
+            dummy = DummyNav(td, python_exe)
+            groups = [{"id": "launch_web_ui", "items": [{"package": "streamlit>=1.28"}, {"package": "pywebview>=4.0"}]}]
+            with mock.patch.object(lz, "is_valid_agent_dir", return_value=True), mock.patch.object(
+                lz, "_ensure_mykey_file", return_value={"ok": True, "created": False}
+            ), mock.patch.object(
+                lz, "resolve_upstream_frontend_dependency_groups", return_value=groups
+            ), mock.patch.object(
+                lz, "_external_subprocess_env", return_value={"GA_TEST": "1"}
+            ), mock.patch.object(
+                lz, "_popen_external_subprocess", return_value=DummyProc()
+            ) as popen_mock, mock.patch.object(
+                navigation.QMessageBox, "information"
+            ) as info_box, mock.patch.object(
+                navigation.QMessageBox, "warning"
+            ) as warning_box, mock.patch.object(
+                navigation.QMessageBox, "critical"
+            ) as critical_box:
+                dummy._launch_official_gui()
+
+        self.assertEqual(len(dummy.check_calls), 1)
+        self.assertEqual(dummy.check_calls[0]["purpose"], "启动官方 GUI")
+        self.assertEqual(dummy.check_calls[0]["extra_packages"], ["streamlit>=1.28", "pywebview>=4.0"])
+        self.assertEqual(dummy.remembered, [python_exe])
+        popen_args, popen_kwargs = popen_mock.call_args
+        self.assertEqual(popen_args[0], [python_exe, launch_path])
+        self.assertEqual(popen_kwargs["cwd"], td)
+        self.assertEqual(popen_kwargs["env"], {"GA_TEST": "1"})
+        self.assertIs(popen_kwargs["stdin"], subprocess.DEVNULL)
+        self.assertIs(popen_kwargs["stdout"], subprocess.DEVNULL)
+        self.assertIs(popen_kwargs["stderr"], subprocess.DEVNULL)
+        self.assertIn("已拉起官方 GUI。", dummy.statuses)
+        self.assertIn("launch.pyw", dummy.notice.text)
+        info_box.assert_not_called()
+        warning_box.assert_not_called()
+        critical_box.assert_not_called()
+
+    def test_launch_official_desktop_app_spawns_windows_release_exe(self):
+        class DummyLabel:
+            def __init__(self):
+                self.text = ""
+
+            def setText(self, text):
+                self.text = str(text)
+
+        class DummyProc:
+            pid = 4321
+
+        class DummyNav(NavigationMixin):
+            _launch_official_desktop_app = NavigationMixin._launch_official_desktop_app
+            _official_desktop_release_page_url = NavigationMixin._official_desktop_release_page_url
+            _official_desktop_release_candidates = NavigationMixin._official_desktop_release_candidates
+
+            def __init__(self, agent_dir):
+                self.agent_dir = agent_dir
+                self.cfg = {}
+                self.notice = DummyLabel()
+                self.official_gui_notice_label = self.notice
+                self.statuses = []
+
+            def _set_status(self, text):
+                self.statuses.append(str(text))
+
+        with tempfile.TemporaryDirectory() as td:
+            desktop_path = os.path.join(td, "frontends", "GenericAgent.exe")
+            os.makedirs(os.path.dirname(desktop_path), exist_ok=True)
+            with open(desktop_path, "w", encoding="utf-8") as f:
+                f.write("# exe")
+
+            dummy = DummyNav(td)
+            with mock.patch.object(
+                navigation.os, "name", "nt"
+            ), mock.patch.object(
+                lz, "is_valid_agent_dir", return_value=True
+            ), mock.patch.object(
+                lz, "_external_subprocess_env", return_value={"GA_TEST": "1"}
+            ), mock.patch.object(
+                lz, "_popen_external_subprocess", return_value=DummyProc()
+            ) as popen_mock, mock.patch.object(
+                navigation.QMessageBox, "critical"
+            ) as critical_box:
+                dummy._launch_official_desktop_app()
+
+        popen_args, popen_kwargs = popen_mock.call_args
+        self.assertEqual(popen_args[0], [desktop_path])
+        self.assertEqual(popen_kwargs["cwd"], os.path.dirname(desktop_path))
+        self.assertEqual(popen_kwargs["env"], {"GA_TEST": "1"})
+        self.assertIs(popen_kwargs["stdin"], subprocess.DEVNULL)
+        self.assertIs(popen_kwargs["stdout"], subprocess.DEVNULL)
+        self.assertIs(popen_kwargs["stderr"], subprocess.DEVNULL)
+        self.assertIn("已拉起官方桌面版。", dummy.statuses)
+        self.assertIn("GenericAgent.exe", dummy.notice.text)
+        critical_box.assert_not_called()
+
+    def test_launch_official_desktop_app_spawns_macos_release_app(self):
+        class DummyLabel:
+            def __init__(self):
+                self.text = ""
+
+            def setText(self, text):
+                self.text = str(text)
+
+        class DummyProc:
+            pid = 8642
+
+        class DummyNav(NavigationMixin):
+            _launch_official_desktop_app = NavigationMixin._launch_official_desktop_app
+            _official_desktop_release_page_url = NavigationMixin._official_desktop_release_page_url
+            _official_desktop_release_candidates = NavigationMixin._official_desktop_release_candidates
+
+            def __init__(self):
+                self.agent_dir = ""
+                self.cfg = {}
+                self.notice = DummyLabel()
+                self.official_gui_notice_label = self.notice
+                self.statuses = []
+
+            def _set_status(self, text):
+                self.statuses.append(str(text))
+
+        dummy = DummyNav()
+        app_path = os.path.join("/Applications", "GenericAgent.app")
+        with mock.patch.object(
+            navigation.os, "name", "posix"
+        ), mock.patch.object(
+            lz, "IS_MACOS", True
+        ), mock.patch.object(
+            navigation.os.path, "isdir", side_effect=lambda path: os.path.normpath(path) == os.path.normpath(app_path)
+        ), mock.patch.object(
+            lz, "_external_subprocess_env", return_value={"GA_TEST": "1"}
+        ), mock.patch.object(
+            lz, "_popen_external_subprocess", return_value=DummyProc()
+        ) as popen_mock, mock.patch.object(
+            navigation.QMessageBox, "critical"
+        ) as critical_box:
+            dummy._launch_official_desktop_app()
+
+        popen_args, popen_kwargs = popen_mock.call_args
+        self.assertEqual(popen_args[0], ["open", app_path])
+        self.assertEqual(popen_kwargs["cwd"], os.path.dirname(app_path))
+        self.assertEqual(popen_kwargs["env"], {"GA_TEST": "1"})
+        self.assertIn("已拉起官方桌面版。", dummy.statuses)
+        self.assertIn("GenericAgent.app", dummy.notice.text)
+        critical_box.assert_not_called()
+
+    def test_launch_official_desktop_app_opens_release_page_when_missing(self):
+        class DummyNav(NavigationMixin):
+            _launch_official_desktop_app = NavigationMixin._launch_official_desktop_app
+            _official_desktop_release_page_url = NavigationMixin._official_desktop_release_page_url
+            _official_desktop_release_candidates = NavigationMixin._official_desktop_release_candidates
+
+            def __init__(self):
+                self.agent_dir = ""
+                self.cfg = {}
+                self.opened = 0
+
+            def _open_official_desktop_release_page(self):
+                self.opened += 1
+                return True
+
+        dummy = DummyNav()
+        with mock.patch.object(navigation.os, "name", "posix"), mock.patch.object(lz, "IS_MACOS", True), mock.patch.object(
+            navigation.os.path, "isdir", return_value=False
+        ):
+            ok = dummy._launch_official_desktop_app()
+
+        self.assertFalse(ok)
+        self.assertEqual(dummy.opened, 1)
+
     def test_download_cleanup_removes_invalid_target_directory(self):
         class DummyDownload(DownloadMixin):
             pass
@@ -4283,6 +4728,77 @@ class LauncherCoreFacadeTests(unittest.TestCase):
         ) as terminator:
             self.assertTrue(dummy._terminate_pid_force(456))
         terminator.assert_called_once_with(456, terminate_timeout=0.8, kill_timeout=0.8)
+
+    def test_local_channel_external_pids_matches_launcher_owned_conductor_runtime(self):
+        class DummyChannel(ChannelRuntimeMixin):
+            def __init__(self):
+                self.agent_dir = "C:\\demo"
+                self._channel_procs = {}
+
+            def _iter_local_channel_processes(self, *, force=False):
+                return [
+                    {
+                        "pid": 202,
+                        "cmdline": 'python.exe C:\\launcher\\runtime\\conductor\\conductor.py',
+                        "norm_cmd": 'python.exe c:/launcher/runtime/conductor/conductor.py',
+                        "cwd": "",
+                        "cwd_real": "",
+                    }
+                ]
+
+        dummy = DummyChannel()
+        spec = {"id": "conductor", "script": "conductor.py"}
+        with mock.patch.object(channel_runtime.lz, "COMM_CHANNEL_SPECS", [spec]), mock.patch.object(
+            channel_runtime.lz, "channel_script_path", return_value="C:\\launcher\\runtime\\conductor\\conductor.py"
+        ):
+            detected = dummy._local_channel_external_pids()
+        self.assertEqual(detected, {"conductor": [202]})
+
+    def test_takeover_local_external_conductor_instances_terminates_matching_pids(self):
+        class DummyChannel(ChannelRuntimeMixin):
+            _takeover_local_external_channel_instances = ChannelRuntimeMixin._takeover_local_external_channel_instances
+            _find_local_channel_external_pids = ChannelRuntimeMixin._find_local_channel_external_pids
+            _channel_allows_local_external_takeover = ChannelRuntimeMixin._channel_allows_local_external_takeover
+            _channel_set_external_running = ChannelRuntimeMixin._channel_set_external_running
+            _channel_external_running = ChannelRuntimeMixin._channel_external_running
+            _scan_local_channel_external_snapshot = ChannelRuntimeMixin._scan_local_channel_external_snapshot
+            _apply_local_channel_external_snapshot = ChannelRuntimeMixin._apply_local_channel_external_snapshot
+
+            def __init__(self):
+                self.agent_dir = "C:\\demo"
+                self.cfg = {"communication_channels": {"conductor": {"external_running": True}}}
+                self._channel_procs = {}
+                self.killed = []
+                self.scan_count = 0
+
+            def _channel_runtime_cfg(self, channel_id):
+                bucket = self.cfg.setdefault("communication_channels", {})
+                return bucket.setdefault(str(channel_id), {})
+
+            def _local_channel_external_pids(self, *, force=False):
+                self.scan_count += 1
+                if self.scan_count == 1:
+                    return {"conductor": [32404]}
+                return {}
+
+            def _wechat_singleton_locked(self):
+                return False
+
+            def _terminate_pid_force(self, pid):
+                self.killed.append(int(pid))
+                return True
+
+        dummy = DummyChannel()
+        with mock.patch.object(channel_runtime.lz, "COMM_CHANNEL_SPECS", [{"id": "conductor"}]), mock.patch.object(
+            channel_runtime.lz, "save_config", return_value=None
+        ), mock.patch.object(channel_runtime.time, "sleep", return_value=None):
+            ok, killed, failed = dummy._takeover_local_external_channel_instances("conductor")
+
+        self.assertTrue(ok)
+        self.assertEqual(killed, [32404])
+        self.assertEqual(failed, [])
+        self.assertEqual(dummy.killed, [32404])
+        self.assertFalse(dummy._channel_external_running("conductor"))
 
     def test_start_wechat_health_watch_drops_stale_runtime_before_ui_callback(self):
         class DummyProc:
@@ -4678,7 +5194,8 @@ class LauncherCoreFacadeTests(unittest.TestCase):
         terminal_spec = {
             "id": "tui",
             "label": "终端 TUI",
-            "script": "tuiapp.py",
+            "script": "tuiapp_v2.py",
+            "script_candidates": ["tuiapp_v2.py", "tuiapp.py"],
             "pip": "textual",
             "fields": [],
             "launch_mode": "terminal",
@@ -4688,7 +5205,11 @@ class LauncherCoreFacadeTests(unittest.TestCase):
         ), mock.patch.object(
             channel_runtime.lz, "is_valid_agent_dir", return_value=True
         ), mock.patch.object(
-            channel_runtime.os.path, "isfile", return_value=True
+            channel_runtime.lz, "channel_script_path", return_value="C:\\demo\\frontends\\tuiapp.py"
+        ), mock.patch.object(
+            channel_runtime.os.path,
+            "isfile",
+            side_effect=lambda path: str(path) in ("python", "C:\\demo\\frontends\\tuiapp.py"),
         ), mock.patch.object(
             channel_runtime.lz, "_resolve_configured_python_exe", return_value="python"
         ), mock.patch.object(
@@ -4717,6 +5238,201 @@ class LauncherCoreFacadeTests(unittest.TestCase):
         self.assertNotIn("refresh_sessions", dummy.calls)
         open_mock.assert_not_called()
         self.assertTrue(any("新终端" in status for status in dummy.statuses))
+
+    def test_open_channel_web_page_falls_back_to_browser_when_desktop_services_fails(self):
+        class DummyChannel(ChannelRuntimeMixin):
+            _open_channel_web_page = ChannelRuntimeMixin._open_channel_web_page
+
+            def _remote_channel_label_text(self, channel_id):
+                return "Conductor 总管台"
+
+            def _channel_web_url(self, channel_id):
+                return "http://127.0.0.1:8900/"
+
+        dummy = DummyChannel()
+        with mock.patch.object(channel_runtime.QDesktopServices, "openUrl", return_value=False) as desktop_open, mock.patch.object(
+            channel_runtime.webbrowser, "open", return_value=True
+        ) as browser_open:
+            self.assertTrue(dummy._open_channel_web_page("conductor", show_errors=False))
+
+        desktop_open.assert_called_once()
+        browser_open.assert_called_once_with("http://127.0.0.1:8900/")
+
+    def test_start_remote_channel_process_rejects_local_only_channel(self):
+        class DummyChannel(ChannelRuntimeMixin):
+            _start_remote_channel_process = ChannelRuntimeMixin._start_remote_channel_process
+
+            def __init__(self):
+                self.agent_dir = "C:\\demo"
+                self.cfg = {}
+                self._qt_channel_py_path = "C:\\demo\\mykey.py"
+                self._qt_channel_extras = {}
+                self.statuses = []
+                self.warnings = []
+
+            def _channel_is_local_only(self, channel_id):
+                return True
+
+            def _remote_channel_label_text(self, channel_id):
+                return "Conductor 总管台"
+
+            def _set_status(self, text):
+                self.statuses.append(str(text))
+
+            def _channel_warning(self, title, text, detail=""):
+                self.warnings.append((str(title), str(text), str(detail)))
+
+        dummy = DummyChannel()
+        with mock.patch.object(channel_runtime.lz, "COMM_CHANNEL_INDEX", {"conductor": {"id": "conductor", "label": "Conductor 总管台"}}):
+            self.assertFalse(dummy._start_remote_channel_process("conductor", show_errors=True))
+
+        self.assertTrue(any("只支持在启动器本机运行" in text for text in dummy.statuses))
+        self.assertTrue(any("只支持在启动器本机运行" in text for _title, text, _detail in dummy.warnings))
+
+    def test_local_slash_command_items_include_optional_upstream_export_continue_rename_review_commands_when_available(self):
+        class DummyBridge(BridgeRuntimeMixin):
+            _local_slash_command_items = BridgeRuntimeMixin._local_slash_command_items
+            _upstream_optional_slash_command_items = BridgeRuntimeMixin._upstream_optional_slash_command_items
+
+            def __init__(self, agent_dir):
+                self.agent_dir = agent_dir
+
+        with tempfile.TemporaryDirectory() as td:
+            frontends = os.path.join(td, "frontends")
+            os.makedirs(frontends, exist_ok=True)
+            for filename in ("continue_cmd.py", "btw_cmd.py", "review_cmd.py", "export_cmd.py", "session_names.py"):
+                with open(os.path.join(frontends, filename), "w", encoding="utf-8") as f:
+                    f.write("# demo\n")
+
+            with mock.patch.object(bridge_runtime.lz, "is_valid_agent_dir", return_value=True):
+                items = DummyBridge(td)._local_slash_command_items()
+
+        commands = [str(item.get("command") or "") for item in items]
+        self.assertIn("/cost", commands)
+        self.assertIn("/cost all", commands)
+        self.assertIn("/continue", commands)
+        self.assertIn("/continue N", commands)
+        self.assertIn("/continue <name>", commands)
+        self.assertIn("/rename <name>", commands)
+        self.assertIn("/export", commands)
+        self.assertIn("/export clip", commands)
+        self.assertIn("/export all", commands)
+        self.assertIn("/export <file>", commands)
+        self.assertIn("/btw <q>", commands)
+        self.assertIn("/review [scope]", commands)
+
+    def test_install_optional_upstream_frontend_slash_patches_loads_continue_btw_review_modules(self):
+        class DummyAgent:
+            installs = []
+
+        with tempfile.TemporaryDirectory() as td:
+            frontends = os.path.join(td, "frontends")
+            os.makedirs(frontends, exist_ok=True)
+            file_specs = {
+                "continue_cmd.py": "_ga_launcher_continue_cmd",
+                "btw_cmd.py": "_ga_launcher_btw_cmd",
+                "review_cmd.py": "_ga_launcher_review_cmd",
+            }
+            for filename, module_name in file_specs.items():
+                with open(os.path.join(frontends, filename), "w", encoding="utf-8") as f:
+                    f.write(
+                        "def install(cls):\n"
+                        "    cls.installs.append(__name__)\n"
+                    )
+
+            bridge._install_optional_upstream_frontend_slash_patches(td, DummyAgent)
+
+        self.assertEqual(
+            DummyAgent.installs,
+            ["_ga_launcher_continue_cmd", "_ga_launcher_btw_cmd", "_ga_launcher_review_cmd"],
+        )
+
+    def test_install_optional_upstream_frontend_slash_patches_adds_export_rename_and_named_continue_handlers(self):
+        queue_mod = __import__("queue")
+
+        class DummyAgent:
+            def __init__(self):
+                self.log_path = os.path.join("C:\\demo", "temp", "model_responses", "model_responses_123.txt")
+                self.llmclient = types.SimpleNamespace(log_path=self.log_path, backend=types.SimpleNamespace(history=[{"role": "user", "content": "hi"}]))
+
+            def _handle_slash_cmd(self, raw_query, display_queue):
+                return raw_query
+
+        with tempfile.TemporaryDirectory() as td:
+            frontends = os.path.join(td, "frontends")
+            os.makedirs(frontends, exist_ok=True)
+            with open(os.path.join(frontends, "continue_cmd.py"), "w", encoding="utf-8") as f:
+                f.write(
+                    "calls = []\n"
+                    "def install(cls):\n"
+                    "    return None\n"
+                    "def list_sessions(exclude_pid=None):\n"
+                    "    return [('C:/demo/temp/model_responses/model_responses_999.txt', 1710000000.0, 'preview text', 2)]\n"
+                    "def reset_conversation(agent, message=None):\n"
+                    "    calls.append(('reset', message))\n"
+                    "def restore(agent, path):\n"
+                    "    calls.append(('restore', path))\n"
+                    "    return ('✅ restored', True)\n"
+                    "def _rel_time(_mtime):\n"
+                    "    return '1分钟前'\n"
+                    "def _escape_md(text):\n"
+                    "    return str(text)\n"
+                )
+            with open(os.path.join(frontends, "export_cmd.py"), "w", encoding="utf-8") as f:
+                f.write(
+                    "calls = []\n"
+                    "def last_assistant_text(agent):\n"
+                    "    calls.append(('last', getattr(agent, 'log_path', '')))\n"
+                    "    return 'assistant body'\n"
+                    "def wrap_for_clipboard(text, language='markdown'):\n"
+                    "    return f'WRAPPED:{text}'\n"
+                    "def export_to_temp(text, name):\n"
+                    "    calls.append(('file', text, name))\n"
+                    "    return f'C:/demo/temp/{name}'\n"
+                )
+            with open(os.path.join(frontends, "session_names.py"), "w", encoding="utf-8") as f:
+                f.write(
+                    "calls = []\n"
+                    "def name_for(path):\n"
+                    "    if path.endswith('model_responses_999.txt'):\n"
+                    "        return 'demo-name'\n"
+                    "    if path.endswith('model_responses_123.txt'):\n"
+                    "        return 'current-name'\n"
+                    "    return ''\n"
+                    "def path_for(name, exclude_basename=None):\n"
+                    "    calls.append(('path_for', name, exclude_basename))\n"
+                    "    if str(name).lower() == 'demo-name':\n"
+                    "        return 'C:/demo/temp/model_responses/model_responses_999.txt'\n"
+                    "    return None\n"
+                    "def has_name(name, exclude_basename=None):\n"
+                    "    return False\n"
+                    "def set_name(path, name):\n"
+                    "    calls.append(('set_name', path, name))\n"
+                    "def migrate(old_path, new_path):\n"
+                    "    calls.append(('migrate', old_path, new_path))\n"
+                )
+
+            bridge._install_optional_upstream_frontend_slash_patches(td, DummyAgent)
+            agent = DummyAgent()
+
+            export_queue = queue_mod.Queue()
+            continue_queue = queue_mod.Queue()
+            rename_queue = queue_mod.Queue()
+
+            export_result = agent._handle_slash_cmd("/export clip", export_queue)
+            continue_result = agent._handle_slash_cmd("/continue demo-name", continue_queue)
+            rename_result = agent._handle_slash_cmd("/rename graphite", rename_queue)
+
+            export_item = export_queue.get_nowait()
+            continue_item = continue_queue.get_nowait()
+            rename_item = rename_queue.get_nowait()
+
+        self.assertIsNone(export_result)
+        self.assertEqual(export_item["done"], "📋 最后一轮回复:\n\nWRAPPED:assistant body")
+        self.assertIsNone(continue_result)
+        self.assertEqual(continue_item["done"], "✅ restored")
+        self.assertIsNone(rename_result)
+        self.assertEqual(rename_item["done"], "✅ 已重命名为 'graphite'")
 
     def test_start_channel_process_restarts_managed_local_channel_instead_of_reusing_proc(self):
         class DummyProc:
@@ -5490,6 +6206,55 @@ class LauncherCoreFacadeTests(unittest.TestCase):
         self.assertEqual(dummy._autostart_channel_pending_ids, set())
         self.assertEqual(dummy._autostart_channel_current, "")
 
+    def test_autostart_queue_takes_over_external_conductor(self):
+        class DummyChannel(ChannelRuntimeMixin):
+            _start_autostart_channels = ChannelRuntimeMixin._start_autostart_channels
+
+            def __init__(self):
+                self.agent_dir = "C:\\demo"
+                self.cfg = {}
+                self._channel_procs = {}
+                self._autostart_channels_run_id = 0
+                self._autostart_channels_running = False
+                self._autostart_channel_pending_ids = set()
+                self._autostart_channel_current = ""
+                self.started = []
+                self.callbacks = {}
+                self.status_refreshes = 0
+
+            def _channel_is_auto_start(self, channel_id):
+                return str(channel_id) == "conductor"
+
+            def _channel_proc_alive(self, _channel_id):
+                return False
+
+            def _channel_external_running(self, channel_id):
+                return str(channel_id) == "conductor"
+
+            def _request_local_channel_external_running_refresh(self, **_kwargs):
+                return False
+
+            def _refresh_channels_runtime_status_labels(self):
+                self.status_refreshes += 1
+
+            def _channel_post_ui(self, fn, action_name=""):
+                fn()
+
+            def _start_channel_process_autostart(self, channel_id, done=None):
+                self.started.append(str(channel_id))
+                self.callbacks[str(channel_id)] = done
+
+        dummy = DummyChannel()
+        with mock.patch.object(channel_runtime.lz, "is_valid_agent_dir", return_value=True), mock.patch.object(
+            channel_runtime.lz, "COMM_CHANNEL_SPECS", [{"id": "conductor"}]
+        ):
+            dummy._start_autostart_channels()
+
+        self.assertEqual(dummy.started, ["conductor"])
+        self.assertTrue(dummy._autostart_channels_running)
+        self.assertEqual(dummy._autostart_channel_pending_ids, {"conductor"})
+        self.assertEqual(dummy._autostart_channel_current, "conductor")
+
     def test_remote_channel_start_drops_stale_context_before_ui_refresh(self):
         class ImmediateThread:
             def __init__(self, target=None, name=None, daemon=None):
@@ -6094,6 +6859,336 @@ class LauncherCoreFacadeTests(unittest.TestCase):
         self.assertEqual(dummy.calls[0][1], "API 配置无效")
         self.assertIn("gpt-native", dummy.calls[0][3])
 
+    def test_start_channel_process_blocks_conductor_without_runnable_llm_config(self):
+        class DummyChannel(ChannelRuntimeMixin):
+            _start_channel_process = ChannelRuntimeMixin._start_channel_process
+
+            def __init__(self):
+                self.agent_dir = "C:\\demo"
+                self.cfg = {}
+                self._qt_channel_py_path = "C:\\demo\\mykey.py"
+                self._qt_channel_configs = []
+                self._qt_channel_passthrough = []
+                self._qt_channel_extras = {}
+                self.calls = []
+                self.statuses = []
+
+            def _channel_target_context(self):
+                return False, {}, {"is_remote": False}
+
+            def _qt_channels_save(self, silent=True, apply_running=False):
+                raise AssertionError("conductor readiness must block before save")
+
+            def _set_status(self, text):
+                self.statuses.append(str(text))
+
+            def _channel_warning(self, title, text, detail=""):
+                self.calls.append(("warning", str(title), str(text), str(detail)))
+
+        dummy = DummyChannel()
+        spec = {"id": "conductor", "label": "Conductor 总管台", "script": "conductor.py", "fields": []}
+        with mock.patch.object(channel_runtime.lz, "COMM_CHANNEL_INDEX", {"conductor": spec}), mock.patch.object(
+            channel_runtime.os.path, "isfile", side_effect=lambda path: str(path).replace("/", "\\") == "C:\\demo\\mykey.py"
+        ), mock.patch.object(
+            channel_runtime.lz, "parse_mykey_source", return_value={"configs": [], "extras": {}, "passthrough": [], "error": None}
+        ):
+            self.assertFalse(dummy._start_channel_process("conductor", show_errors=True))
+
+        self.assertEqual(dummy.statuses, ["当前没有可直接运行的非 mixin API 会话。请先填写至少一条模型配置。"])
+        self.assertEqual(dummy.calls[0][0], "warning")
+        self.assertEqual(dummy.calls[0][1], "Conductor 未就绪")
+        self.assertIn("至少一条模型配置", dummy.calls[0][2])
+
+    def test_start_channel_process_seeds_conductor_from_loaded_api_state(self):
+        class DummyChannel(ChannelRuntimeMixin, ApiEditorMixin):
+            _start_channel_process = ChannelRuntimeMixin._start_channel_process
+
+            def __init__(self):
+                self.agent_dir = "C:\\demo"
+                self.cfg = {}
+                self._channel_procs = {}
+                self._qt_channel_py_path = ""
+                self._qt_channel_configs = []
+                self._qt_channel_passthrough = []
+                self._qt_channel_extras = {}
+                self._qt_api_hidden_configs = []
+                self._qt_api_state = [
+                    {
+                        "var": "native_oai_config",
+                        "format": "oai_chat",
+                        "tpl_key": "openai",
+                        "apibase": "https://api.example/v1",
+                        "apikey": "sk-demo",
+                        "model": "gpt-5.4",
+                        "advanced_values": {},
+                        "advanced_expanded": False,
+                        "raw_extra": {},
+                        "model_choices": [],
+                        "model_status": "",
+                        "model_fetching": False,
+                        "name": "primary",
+                    }
+                ]
+                self._qt_api_extras = {}
+                self._qt_api_passthrough = []
+                self.saved_text = ""
+                self.statuses = []
+
+            def _channel_target_context(self):
+                return False, {}, {"is_remote": False}
+
+            def _qt_channels_save(self, silent=True, apply_running=False):
+                return True
+
+            def _channel_proc_alive(self, _channel_id):
+                return False
+
+            def _channel_conflict_message(self, _channel_id):
+                return ""
+
+            def _channel_extra_packages(self, _spec):
+                return []
+
+            def _check_runtime_dependencies(self, **_kwargs):
+                return True
+
+            def _settings_target_write_mykey_text(self, text):
+                self.saved_text = str(text)
+                return True, "C:\\demo\\mykey.py", ""
+
+            def _set_status(self, text):
+                self.statuses.append(str(text))
+
+            def _create_channel_process_session(self, channel_id, proc, log_path):
+                return "sess-1"
+
+            def _channel_set_external_running(self, channel_id, enabled, *, persist=False):
+                return None
+
+            def _sync_channel_process_session(self, channel_id, final=False, exit_code=None):
+                return None
+
+            def _reload_channels_editor_state(self):
+                return None
+
+            def _refresh_sessions(self):
+                return None
+
+        class DummyProc:
+            def __init__(self):
+                self.returncode = None
+                self.pid = 1234
+
+            def poll(self):
+                return None
+
+        dummy = DummyChannel()
+        spec = {"id": "conductor", "label": "Conductor 总管台", "script": "conductor.py", "fields": []}
+        with mock.patch.object(channel_runtime.lz, "COMM_CHANNEL_INDEX", {"conductor": spec}), mock.patch.object(
+            channel_runtime.lz, "is_valid_agent_dir", return_value=True
+        ), mock.patch.object(
+            channel_runtime.QTimer, "singleShot", side_effect=lambda *_args, **_kwargs: None
+        ), mock.patch.object(
+            channel_runtime.lz, "_resolve_configured_python_exe", return_value="python"
+        ), mock.patch.object(
+            channel_runtime.lz, "_find_system_python", return_value="python"
+        ), mock.patch.object(
+            channel_runtime.lz, "_external_subprocess_env", return_value={}
+        ), mock.patch.object(
+            channel_runtime.lz, "_popen_external_subprocess", return_value=DummyProc()
+        ), mock.patch(
+            "builtins.open", mock.mock_open()
+        ), mock.patch.object(
+            channel_runtime.lz, "channel_script_path", return_value="C:\\launcher\\runtime\\conductor.py"
+        ), mock.patch.object(
+            channel_runtime.os.path, "isfile", side_effect=lambda path: str(path).replace("/", "\\") in {"C:\\launcher\\runtime\\conductor.py", "python"}
+        ):
+            ok = dummy._start_channel_process("conductor", show_errors=False)
+
+        self.assertTrue(ok)
+        self.assertIn("'apikey': 'sk-demo'", dummy.saved_text)
+        self.assertIn("'apibase': 'https://api.example/v1'", dummy.saved_text)
+        self.assertEqual(dummy._qt_channel_py_path, "C:\\demo\\mykey.py")
+        self.assertEqual(dummy._qt_channel_configs[0]["data"]["name"], "primary")
+
+    def test_start_channel_process_takes_over_external_conductor_before_launch(self):
+        class DummyChannel(ChannelRuntimeMixin):
+            _start_channel_process = ChannelRuntimeMixin._start_channel_process
+
+            def __init__(self):
+                self.agent_dir = "C:\\demo"
+                self.cfg = {}
+                self._channel_procs = {}
+                self._qt_channel_py_path = "C:\\demo\\mykey.py"
+                self._qt_channel_configs = []
+                self._qt_channel_passthrough = []
+                self._qt_channel_extras = {}
+                self.statuses = []
+                self.takeover_calls = []
+                self.external_running = True
+
+            def _channel_target_context(self):
+                return False, {}, {"is_remote": False}
+
+            def _channel_api_reference_errors(self):
+                return []
+
+            def _channel_prepare_launch_configs(self, _channel_id):
+                return True, []
+
+            def _channel_launch_config_errors(self, _channel_id):
+                return []
+
+            def _qt_channels_save(self, silent=True, apply_running=False):
+                return True
+
+            def _channel_proc_alive(self, _channel_id):
+                return False
+
+            def _channel_external_running(self, _channel_id):
+                return bool(self.external_running)
+
+            def _channel_set_external_running(self, channel_id, enabled, *, persist=False):
+                self.external_running = bool(enabled)
+
+            def _channel_conflict_message(self, _channel_id):
+                return ""
+
+            def _channel_extra_packages(self, _spec):
+                return []
+
+            def _check_runtime_dependencies(self, **_kwargs):
+                return True
+
+            def _set_status(self, text):
+                self.statuses.append(str(text))
+
+            def _takeover_local_external_channel_instances(self, channel_id):
+                self.takeover_calls.append(str(channel_id))
+                self.external_running = False
+                return True, [32404], []
+
+            def _create_channel_process_session(self, channel_id, proc, log_path):
+                return "sess-1"
+
+            def _sync_channel_process_session(self, channel_id, final=False, exit_code=None):
+                return None
+
+            def _reload_channels_editor_state(self):
+                return None
+
+            def _refresh_sessions(self):
+                return None
+
+        class DummyProc:
+            def __init__(self):
+                self.returncode = None
+                self.pid = 4321
+
+            def poll(self):
+                return None
+
+        dummy = DummyChannel()
+        spec = {"id": "conductor", "label": "Conductor 总管台", "script": "conductor.py", "fields": []}
+        with mock.patch.object(channel_runtime.lz, "COMM_CHANNEL_INDEX", {"conductor": spec}), mock.patch.object(
+            channel_runtime.lz, "is_valid_agent_dir", return_value=True
+        ), mock.patch.object(
+            channel_runtime.QTimer, "singleShot", side_effect=lambda *_args, **_kwargs: None
+        ), mock.patch.object(
+            channel_runtime.lz, "_resolve_configured_python_exe", return_value="python"
+        ), mock.patch.object(
+            channel_runtime.lz, "_find_system_python", return_value="python"
+        ), mock.patch.object(
+            channel_runtime.lz, "_external_subprocess_env", return_value={}
+        ), mock.patch.object(
+            channel_runtime.lz, "_popen_external_subprocess", return_value=DummyProc()
+        ) as popen_mock, mock.patch(
+            "builtins.open", mock.mock_open()
+        ), mock.patch.object(
+            channel_runtime.lz, "channel_script_path", return_value="C:\\launcher\\runtime\\conductor.py"
+        ), mock.patch.object(
+            channel_runtime.os.path, "isfile", side_effect=lambda path: str(path).replace("/", "\\") in {"C:\\launcher\\runtime\\conductor.py", "python"}
+        ):
+            ok = dummy._start_channel_process("conductor", show_errors=False)
+
+        self.assertTrue(ok)
+        self.assertEqual(dummy.takeover_calls, ["conductor"])
+        self.assertIn("已关闭 1 个外部 Conductor 总管台 进程", dummy.statuses[0])
+        popen_mock.assert_called_once()
+        env = dict(popen_mock.call_args.kwargs.get("env") or {})
+        self.assertEqual(env.get("GA_LAUNCHER_AGENT_DIR"), "C:\\demo")
+
+    def test_stop_channel_process_stops_external_conductor_when_unmanaged(self):
+        class DummyChannel(ChannelRuntimeMixin):
+            _stop_channel_process = ChannelRuntimeMixin._stop_channel_process
+
+            def __init__(self):
+                self.cfg = {}
+                self._channel_procs = {}
+                self.external_running = True
+                self.calls = []
+
+            def _channel_target_context(self):
+                return False, {}, {"is_remote": False}
+
+            def _channel_external_running(self, _channel_id):
+                return bool(self.external_running)
+
+            def _channel_set_external_running(self, channel_id, enabled, *, persist=False):
+                self.external_running = bool(enabled)
+
+            def _takeover_local_external_channel_instances(self, channel_id):
+                self.calls.append(("takeover", str(channel_id)))
+                self.external_running = False
+                return True, [32404], []
+
+            def _reload_channels_editor_state(self):
+                self.calls.append("reload")
+
+            def _refresh_sessions(self):
+                self.calls.append("refresh_sessions")
+
+        dummy = DummyChannel()
+        self.assertTrue(dummy._stop_channel_process("conductor"))
+        self.assertEqual(dummy.calls[0], ("takeover", "conductor"))
+        self.assertIn("reload", dummy.calls)
+        self.assertIn("refresh_sessions", dummy.calls)
+
+    def test_channel_start_disabled_reason_reports_conductor_missing_mykey(self):
+        class DummyChannel(ChannelRuntimeMixin):
+            _channel_start_disabled_reason = ChannelRuntimeMixin._channel_start_disabled_reason
+
+            def __init__(self):
+                self.agent_dir = "C:\\demo"
+                self.cfg = {}
+                self._qt_channel_configs = []
+                self._qt_channel_extras = {}
+
+            def _channel_target_context(self):
+                return False, {}, {"is_remote": False}
+
+            def _channel_proc_alive(self, _channel_id):
+                return False
+
+            def _channel_external_running(self, _channel_id):
+                return False
+
+            def _channel_conflict_message(self, _channel_id):
+                return ""
+
+            def _channel_missing_required(self, _channel_id, _values):
+                return []
+
+        dummy = DummyChannel()
+        spec = {"id": "conductor", "label": "Conductor 总管台", "script": "conductor.py", "fields": []}
+        with mock.patch.object(channel_runtime.lz, "COMM_CHANNEL_INDEX", {"conductor": spec}), mock.patch.object(
+            channel_runtime.lz, "is_valid_agent_dir", return_value=True
+        ), mock.patch.object(channel_runtime.os.path, "isfile", return_value=False):
+            reason = dummy._channel_start_disabled_reason("conductor", {})
+
+        self.assertIn("mykey.py / mykey.json", reason)
+        self.assertIn("可复用的 API 配置", reason)
+
     def test_remote_start_channel_process_blocking_uses_shared_matcher_for_wechat_probe(self):
         class DummyChannel(ChannelRuntimeMixin):
             _remote_start_channel_process_blocking = ChannelRuntimeMixin._remote_start_channel_process_blocking
@@ -6662,6 +7757,94 @@ class LauncherCoreFacadeTests(unittest.TestCase):
         self.assertEqual(state["status_label"].text, "外部运行中")
         self.assertIn("外部 微信 进程正在运行", state["start_btn"].tooltip)
         self.assertIn("启动器无法直接停止", state["stop_btn"].tooltip)
+
+    def test_refresh_channel_runtime_status_allows_conductor_takeover_for_external_local_channel(self):
+        class DummyLabel:
+            def __init__(self):
+                self.text = ""
+                self.style = ""
+                self.visible = None
+
+            def setText(self, text):
+                self.text = str(text)
+
+            def setStyleSheet(self, style):
+                self.style = str(style)
+
+            def setVisible(self, visible):
+                self.visible = bool(visible)
+
+        class DummyButton:
+            def __init__(self):
+                self.enabled = None
+                self.tooltip = ""
+                self.text = ""
+
+            def setEnabled(self, enabled):
+                self.enabled = bool(enabled)
+
+            def setToolTip(self, text):
+                self.tooltip = str(text)
+
+            def setText(self, text):
+                self.text = str(text)
+
+        class DummyChannel(ChannelRuntimeMixin):
+            def __init__(self):
+                self.agent_dir = "C:\\demo"
+                self.cfg = {}
+                self._qt_channel_extras = {}
+                self._qt_channel_states = {
+                    "conductor": {
+                        "status_label": DummyLabel(),
+                        "status_hint_label": DummyLabel(),
+                        "start_btn": DummyButton(),
+                        "stop_btn": DummyButton(),
+                    }
+                }
+
+            def _channel_target_context(self):
+                return False, None, {"is_remote": False}
+
+            def _refresh_channel_source_actions(self):
+                return None
+
+            def _request_local_channel_external_running_refresh(self, **_kwargs):
+                return False
+
+            def _channel_status(self, channel_id, values, *, target_ctx=None):
+                return ("外部运行中", "#999999")
+
+            def _channel_proc_alive(self, _channel_id):
+                return False
+
+            def _channel_external_running(self, channel_id):
+                return str(channel_id) == "conductor"
+
+            def _channel_conflict_message(self, _channel_id):
+                return ""
+
+            def _channel_missing_required(self, _channel_id, _values):
+                return []
+
+            def _channel_launch_mode(self, _channel_id):
+                return "web"
+
+            def _channel_is_local_only(self, _channel_id):
+                return False
+
+        dummy = DummyChannel()
+        specs = [{"id": "conductor", "label": "Conductor 总管台", "fields": []}]
+        with mock.patch.object(channel_runtime.lz, "COMM_CHANNEL_SPECS", specs), mock.patch.object(
+            channel_runtime.lz, "is_valid_agent_dir", return_value=True
+        ):
+            dummy._refresh_channels_runtime_status_labels()
+
+        state = dummy._qt_channel_states["conductor"]
+        self.assertTrue(state["start_btn"].enabled)
+        self.assertTrue(state["stop_btn"].enabled)
+        self.assertEqual(state["status_label"].text, "外部运行中")
+        self.assertIn("接管并重启", state["start_btn"].tooltip)
 
     def test_refresh_channel_runtime_status_sets_remote_button_tooltips_when_device_missing(self):
         class DummyLabel:
@@ -7350,6 +8533,90 @@ class LauncherCoreFacadeTests(unittest.TestCase):
 
         self.assertIn("当前展示最近一次缓存结果", dummy.settings_channels_notice.text)
         self.assertIn("SSH reset", dummy.settings_channels_notice.text)
+
+    def test_refresh_channel_runtime_status_disables_local_only_web_channel_for_remote_target(self):
+        class DummyLabel:
+            def __init__(self):
+                self.text = ""
+                self.style = ""
+                self.visible = None
+
+            def setText(self, text):
+                self.text = str(text)
+
+            def setStyleSheet(self, style):
+                self.style = str(style)
+
+            def setVisible(self, visible):
+                self.visible = bool(visible)
+
+        class DummyButton:
+            def __init__(self):
+                self.enabled = None
+                self.tooltip = ""
+
+            def setEnabled(self, enabled):
+                self.enabled = bool(enabled)
+
+            def setToolTip(self, text):
+                self.tooltip = str(text)
+
+        class DummyChannel(ChannelRuntimeMixin):
+            _refresh_channels_runtime_status_labels = ChannelRuntimeMixin._refresh_channels_runtime_status_labels
+
+            def __init__(self):
+                self.agent_dir = "C:\\demo"
+                self.cfg = {}
+                self._qt_channel_extras = {}
+                self.settings_channels_notice = DummyLabel()
+                self._qt_channel_states = {
+                    "conductor": {
+                        "status_label": DummyLabel(),
+                        "status_hint_label": DummyLabel(),
+                        "start_btn": DummyButton(),
+                        "stop_btn": DummyButton(),
+                        "log_btn": DummyButton(),
+                        "detail_btn": DummyButton(),
+                        "open_btn": DummyButton(),
+                    }
+                }
+
+            def _settings_target_context(self):
+                return {"is_remote": True, "device_id": "box-1", "device": {"id": "box-1"}}
+
+            def _refresh_channel_source_actions(self):
+                return None
+
+            def _channel_is_local_only(self, channel_id):
+                return True
+
+            def _channel_status(self, channel_id, values, *, target_ctx=None):
+                return ("仅本机", "#999999")
+
+            def _channel_start_disabled_reason(self, channel_id, values, *, target_ctx=None):
+                return "Conductor 总管台 当前只支持在启动器本机运行，不支持远端托管。"
+
+            def _channel_stop_disabled_reason(self, channel_id, values, *, target_ctx=None):
+                return "Conductor 总管台 当前只支持在启动器本机运行，不支持远端托管。"
+
+            def _channel_remote_aux_disabled_reason(self, channel_id, *, target_ctx=None):
+                return "Conductor 总管台 当前仅支持启动器本机使用。"
+
+            def _channel_open_disabled_reason(self, channel_id, *, target_ctx=None):
+                return "Conductor 总管台 当前仅支持在启动器本机打开网页。"
+
+        dummy = DummyChannel()
+        spec = {"id": "conductor", "label": "Conductor 总管台", "fields": []}
+        with mock.patch.object(channel_runtime.lz, "COMM_CHANNEL_SPECS", [spec]):
+            dummy._refresh_channels_runtime_status_labels()
+
+        state = dummy._qt_channel_states["conductor"]
+        self.assertFalse(state["start_btn"].enabled)
+        self.assertFalse(state["stop_btn"].enabled)
+        self.assertFalse(state["log_btn"].enabled)
+        self.assertFalse(state["detail_btn"].enabled)
+        self.assertFalse(state["open_btn"].enabled)
+        self.assertIn("只支持启动器本机托管", state["status_hint_label"].text)
 
     def test_reload_channels_editor_state_clears_stale_source_when_agent_dir_invalid(self):
         class DummyChannel(ChannelRuntimeMixin):
@@ -9326,6 +10593,130 @@ native_oai_config2 = {
             size = dummy._theme_target_size()
         self.assertEqual((size.width(), size.height()), (1280, 760))
 
+    def test_save_theme_preferences_respects_cleared_background_images(self):
+        class DummyLineEdit:
+            def __init__(self, text=""):
+                self._text = str(text)
+
+            def clear(self):
+                self._text = ""
+
+            def text(self):
+                return self._text
+
+            def setText(self, value):
+                self._text = str(value)
+
+        class DummyLabel:
+            def __init__(self):
+                self.text_value = ""
+
+            def setText(self, value):
+                self.text_value = str(value)
+
+        class DummyCombo:
+            def __init__(self, value, label=""):
+                self._value = value
+                self._label = label or str(value)
+
+            def currentIndex(self):
+                return 0
+
+            def itemData(self, _index):
+                return self._value
+
+            def currentText(self):
+                return self._label
+
+        class DummySlider:
+            def __init__(self, value):
+                self._value = int(value)
+
+            def value(self):
+                return self._value
+
+        class DummySettings(SettingsPanelMixin):
+            _clear_theme_background_image = SettingsPanelMixin._clear_theme_background_image
+            _clear_theme_floating_background_image = SettingsPanelMixin._clear_theme_floating_background_image
+            _save_theme_preferences = SettingsPanelMixin._save_theme_preferences
+            _normalize_theme_crop_data = SettingsPanelMixin._normalize_theme_crop_data
+
+            def __init__(self):
+                self.cfg = {
+                    "appearance_mode": "dark",
+                    "theme_bg_preset": "image",
+                    "theme_bg_image": "assets/old-main.png",
+                    "theme_bg_source": "assets/old-main-source.png",
+                    "theme_bg_crop": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8},
+                    "theme_floating_bg_preset": "image",
+                    "theme_floating_bg_image": "assets/old-floating.png",
+                    "theme_floating_bg_source": "assets/old-floating-source.png",
+                    "theme_floating_bg_crop": {"x": 0.2, "y": 0.2, "w": 0.6, "h": 0.6},
+                }
+                self.settings_theme_font_combo = DummyCombo("", "默认")
+                self.settings_theme_weight_combo = DummyCombo("400", "400")
+                self.settings_theme_size_combo = DummyCombo("14", "14")
+                self.settings_theme_visual_combo = DummyCombo("graphite", "石墨")
+                self.settings_theme_bg_combo = DummyCombo("image", "图片背景")
+                self.settings_theme_bg_mode_combo = DummyCombo("center", "居中裁切")
+                self.settings_theme_fade_slider = DummySlider(18)
+                self.settings_theme_floating_bg_combo = DummyCombo("image", "图片背景")
+                self.settings_theme_floating_bg_mode_combo = DummyCombo("center", "居中裁切")
+                self.settings_theme_floating_fade_slider = DummySlider(18)
+                self.settings_theme_bg_image_path = DummyLineEdit("D:/demo/main.png")
+                self.settings_theme_floating_bg_image_path = DummyLineEdit("D:/demo/floating.png")
+                self.settings_theme_notice = DummyLabel()
+                self._theme_bg_source_selected_path = "D:/demo/main.png"
+                self._theme_bg_crop_selected = {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}
+                self._theme_bg_force_clear = False
+                self._theme_floating_bg_source_selected_path = "D:/demo/floating.png"
+                self._theme_floating_bg_crop_selected = {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}
+                self._theme_floating_bg_force_clear = False
+                self._theme_user_avatar_source_selected_path = ""
+                self._theme_user_avatar_crop_selected = {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}
+                self._theme_user_avatar_force_clear = False
+                self._theme_ai_avatar_source_selected_path = ""
+                self._theme_ai_avatar_crop_selected = {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}
+                self._theme_ai_avatar_force_clear = False
+                self.saved_modes = []
+                self.reload_calls = 0
+                self.statuses = []
+
+            def _normalize_appearance_mode(self, mode):
+                return "light" if str(mode or "").strip().lower() == "light" else "dark"
+
+            def _apply_theme(self, mode):
+                self.saved_modes.append(str(mode))
+
+            def _reload_theme_panel(self):
+                self.reload_calls += 1
+
+            def _set_status(self, text):
+                self.statuses.append(str(text))
+
+        dummy = DummySettings()
+        dummy._clear_theme_background_image()
+        dummy._clear_theme_floating_background_image()
+
+        saved = []
+        with mock.patch.object(lz, "save_config", side_effect=lambda cfg: saved.append(dict(cfg))), mock.patch.object(
+            settings_panel.QMessageBox, "warning"
+        ) as warning_box:
+            dummy._save_theme_preferences()
+
+        self.assertEqual(dummy.cfg["theme_bg_image"], "")
+        self.assertEqual(dummy.cfg["theme_bg_source"], "")
+        self.assertEqual(dummy.cfg["theme_bg_crop"], {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0})
+        self.assertEqual(dummy.cfg["theme_floating_bg_image"], "")
+        self.assertEqual(dummy.cfg["theme_floating_bg_source"], "")
+        self.assertEqual(dummy.cfg["theme_floating_bg_crop"], {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0})
+        self.assertEqual(dummy.saved_modes, ["dark"])
+        self.assertEqual(dummy.reload_calls, 1)
+        self.assertEqual(dummy.statuses, ["主题设置已保存。"])
+        self.assertTrue(saved)
+        self.assertIn("主题已保存", dummy.settings_theme_notice.text_value)
+        warning_box.assert_not_called()
+
     def test_on_vps_deploy_source_changed_refreshes_buttons_and_honors_item_data_fallback(self):
         class DummyWidget:
             def __init__(self):
@@ -10480,7 +11871,7 @@ native_oai_config2 = {
 
         dummy = DummyHost()
         with mock.patch.object(launcher_window.lz, "IS_MACOS", True):
-            self.assertEqual(dummy._functions_menu_floating_action_text(), "◱  打开悬浮窗，主窗口继续保留")
+            self.assertEqual(dummy._functions_menu_floating_action_text(), "打开悬浮窗，主窗口继续保留")
 
     def test_functions_menu_floating_action_text_uses_focus_label_when_floating_visible_without_tray(self):
         class DummyFloating:
@@ -10499,7 +11890,7 @@ native_oai_config2 = {
 
         dummy = DummyHost()
         with mock.patch.object(launcher_window.lz, "IS_MACOS", True):
-            self.assertEqual(dummy._functions_menu_floating_action_text(), "◱  聚焦悬浮窗，主窗口继续保留")
+            self.assertEqual(dummy._functions_menu_floating_action_text(), "聚焦悬浮窗，主窗口继续保留")
 
     def test_handle_functions_menu_floating_action_uses_tray_mode_when_tray_available(self):
         class DummyHost:
@@ -11181,6 +12572,177 @@ native_oai_config2 = {
         self.assertEqual(state_event["reasoning_effort"], "low")
         self.assertEqual(created["agent"].backends[0].reasoning_effort, "low")
         self.assertEqual(created["agent"].backends[1].reasoning_effort, "medium")
+
+    def test_patch_agent_launcher_multimodal_skips_agent_without_task_queue_contract(self):
+        class DummyAgent:
+            def run(self):
+                return None
+
+        agent = DummyAgent()
+        patched = bridge._patch_agent_launcher_multimodal(agent, types.SimpleNamespace())
+
+        self.assertIs(patched, agent)
+        self.assertFalse(getattr(agent, "_ga_launcher_multimodal_patched", False))
+        self.assertNotIn("run", agent.__dict__)
+        self.assertNotIn("put_task", agent.__dict__)
+
+    def test_patch_agent_launcher_multimodal_tracks_new_upstream_turn_metadata_when_supported(self):
+        queue_mod = __import__("queue")
+        threading_mod = __import__("threading")
+        captured = {}
+
+        class DummyBackend:
+            def __init__(self):
+                self.history = []
+                self.extra_sys_prompt = ""
+
+        class DummyLLMClient:
+            def __init__(self):
+                self.backend = DummyBackend()
+                self.log_path = ""
+
+        class DummyHandler:
+            def __init__(self, parent, history, temp_dir):
+                self.parent = parent
+                self.history_info = ["history-updated"]
+                self.working = {}
+
+        class DummyAgent:
+            def __init__(self):
+                self.task_queue = queue_mod.Queue()
+                self.task_dir = None
+                self.history = []
+                self.handler = None
+                self.stop_sig = False
+                self.is_running = False
+                self.inc_out = False
+                self.verbose = True
+                self.llmclient = DummyLLMClient()
+                self.log_path = os.path.join("C:\\demo", "temp", "model_responses", "demo.txt")
+
+            def abort(self):
+                self.stop_sig = True
+
+            def _handle_slash_cmd(self, raw_query, display_queue):
+                return raw_query
+
+        def fake_agent_runner_loop(llmclient, system_prompt, user_input, handler, tools_schema, max_turns=0, verbose=False, initial_user_content=None, yield_info=False):
+            captured["max_turns"] = int(max_turns)
+            captured["yield_info"] = bool(yield_info)
+            captured["user_input"] = str(user_input)
+            captured["initial_user_content"] = initial_user_content
+            yield {"turn": 1}
+            yield "**LLM Running (Turn 1) ...**"
+            yield "turn1-body"
+            yield {"turn": 2}
+            yield "**LLM Running (Turn 2) ...**"
+            yield "turn2-body"
+
+        agentmain = types.SimpleNamespace(
+            smart_format=lambda text, max_str_len=200: text,
+            get_system_prompt=lambda: "system",
+            GenericAgentHandler=DummyHandler,
+            TOOLS_SCHEMA=[],
+            agent_runner_loop=fake_agent_runner_loop,
+            consume_file=lambda *_args, **_kwargs: False,
+            format_error=lambda e: f"ERR:{e}",
+            __file__=os.path.join("C:\\demo", "agentmain.py"),
+        )
+        agent = DummyAgent()
+        bridge._patch_agent_launcher_multimodal(agent, agentmain)
+
+        worker = threading_mod.Thread(target=agent.run, daemon=True)
+        worker.start()
+        dq = agent.put_task("hello")
+        items = []
+        while True:
+            item = dq.get(timeout=2)
+            items.append(item)
+            if "done" in item:
+                break
+
+        done_item = items[-1]
+        self.assertEqual(captured["max_turns"], 80)
+        self.assertTrue(captured["yield_info"])
+        self.assertEqual(agent.llmclient.log_path, agent.log_path)
+        self.assertEqual(done_item["turn"], 2)
+        self.assertEqual(len(done_item["outputs"]), 2)
+        self.assertIn("turn1-body", done_item["outputs"][0])
+        self.assertIn("turn2-body", done_item["outputs"][1])
+        self.assertEqual(agent.history, ["history-updated"])
+
+    def test_patch_agent_launcher_multimodal_falls_back_for_legacy_agent_loop_signature(self):
+        queue_mod = __import__("queue")
+        threading_mod = __import__("threading")
+        captured = {}
+
+        class DummyBackend:
+            def __init__(self):
+                self.history = []
+                self.extra_sys_prompt = ""
+
+        class DummyLLMClient:
+            def __init__(self):
+                self.backend = DummyBackend()
+                self.log_path = ""
+
+        class DummyHandler:
+            def __init__(self, parent, history, temp_dir):
+                self.parent = parent
+                self.history_info = ["legacy-history"]
+                self.working = {}
+
+        class DummyAgent:
+            def __init__(self):
+                self.task_queue = queue_mod.Queue()
+                self.task_dir = None
+                self.history = []
+                self.handler = None
+                self.stop_sig = False
+                self.is_running = False
+                self.inc_out = False
+                self.verbose = True
+                self.llmclient = DummyLLMClient()
+                self.log_path = os.path.join("C:\\demo", "temp", "model_responses", "legacy.txt")
+
+            def abort(self):
+                self.stop_sig = True
+
+            def _handle_slash_cmd(self, raw_query, display_queue):
+                return raw_query
+
+        def fake_agent_runner_loop(llmclient, system_prompt, user_input, handler, tools_schema, max_turns=0, verbose=False, initial_user_content=None):
+            captured["max_turns"] = int(max_turns)
+            captured["user_input"] = str(user_input)
+            captured["initial_user_content"] = initial_user_content
+            yield "**LLM Running (Turn 1) ...**"
+            yield "legacy-body"
+
+        agentmain = types.SimpleNamespace(
+            smart_format=lambda text, max_str_len=200: text,
+            get_system_prompt=lambda: "system",
+            GenericAgentHandler=DummyHandler,
+            TOOLS_SCHEMA=[],
+            agent_runner_loop=fake_agent_runner_loop,
+            consume_file=lambda *_args, **_kwargs: False,
+            format_error=lambda e: f"ERR:{e}",
+            __file__=os.path.join("C:\\demo", "agentmain.py"),
+        )
+        agent = DummyAgent()
+        bridge._patch_agent_launcher_multimodal(agent, agentmain)
+
+        worker = threading_mod.Thread(target=agent.run, daemon=True)
+        worker.start()
+        dq = agent.put_task("hello")
+        while True:
+            item = dq.get(timeout=2)
+            if "done" in item:
+                break
+
+        self.assertEqual(captured["max_turns"], 70)
+        self.assertEqual(item["turn"], 1)
+        self.assertEqual(item["outputs"], ["**LLM Running (Turn 1) ...**legacy-body"])
+        self.assertEqual(agent.history, ["legacy-history"])
 
     def test_load_remote_session_without_saved_reasoning_keeps_combo_on_follow_config(self):
         class DummyCombo:
@@ -12581,6 +14143,54 @@ native_oai_config2 = {
         self.assertTrue(any("/proc/" in cmd and "/cwd" in cmd for cmd in dummy.commands))
         self.assertFalse(any("    })\nfor cid, proc_info in scan_external_processes()" in cmd for cmd in dummy.commands))
 
+    def test_fetch_remote_channel_snapshots_skips_local_only_channels(self):
+        class DummyClient:
+            def __init__(self):
+                self.closed = False
+
+            def close(self):
+                self.closed = True
+
+        class DummySidebar(SidebarSessionsMixin):
+            _fetch_remote_channel_snapshots = SidebarSessionsMixin._fetch_remote_channel_snapshots
+
+            def __init__(self):
+                self.commands = []
+                self.client = DummyClient()
+
+            def _remote_device_auto_ssh_enabled(self, device):
+                return True
+
+            def _remote_device_ssh_payload(self, device):
+                return {"host": "10.0.0.12"}
+
+            def _open_vps_ssh_client(self, payload, timeout=8):
+                return self.client, "", "", False
+
+            def _vps_exec_remote(self, client, cmd, timeout=0):
+                self.commands.append(str(cmd))
+                return 0, json.dumps({"rows": []}, ensure_ascii=False), ""
+
+        dummy = DummySidebar()
+        device = {
+            "id": "box-5",
+            "host": "10.0.0.12",
+            "username": "root",
+            "agent_dir": "/opt/agant",
+            "python_cmd": "python3",
+        }
+        specs = [
+            {"id": "telegram", "label": "Telegram / 纸飞机", "script": "tgapp.py"},
+            {"id": "conductor", "label": "Conductor 总管台", "script": "conductor.py", "local_only": True},
+        ]
+        with mock.patch.object(sidebar_sessions.lz, "COMM_CHANNEL_SPECS", specs):
+            ok, _rows, err = dummy._fetch_remote_channel_snapshots(device)
+
+        self.assertTrue(ok, msg=err)
+        self.assertTrue(dummy.client.closed)
+        self.assertTrue(any("frontends/tgapp.py" in cmd for cmd in dummy.commands))
+        self.assertFalse(any("frontends/conductor.py" in cmd for cmd in dummy.commands))
+
     def test_fetch_remote_channel_snapshots_includes_wechat_lock_probe_for_unmatched_instances(self):
         class DummyClient:
             def __init__(self):
@@ -12678,7 +14288,9 @@ native_oai_config2 = {
         self.assertTrue(dummy.client.closed)
         self.assertTrue(any("matched = matched_process_info(cid, pid) if alive and pid > 0 else None" in cmd for cmd in dummy.commands))
         self.assertTrue(any("candidate_specs = []" in cmd for cmd in dummy.commands))
-        self.assertTrue(any("process_cmdline_has_script(cmd, script_rel)" in cmd for cmd in dummy.commands))
+        self.assertTrue(
+            any("any(process_cmdline_has_script(cmd, rel) for rel in script_rel_candidates)" in cmd for cmd in dummy.commands)
+        )
 
     def test_generated_remote_channel_snapshot_script_ignores_stale_managed_session_rows(self):
         class DummyClient:

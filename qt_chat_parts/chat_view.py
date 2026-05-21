@@ -5,7 +5,7 @@ from PySide6.QtWidgets import QLabel
 
 from launcher_app import core as lz
 
-from .common import MessageRow, _session_source_label
+from .common import MessageRow, _session_source_label, build_message_row
 
 
 class ChatViewMixin:
@@ -96,7 +96,14 @@ class ChatViewMixin:
 
     def _add_message_row(self, role: str, text: str, finished: bool = True, *, auto_scroll: bool = True):
         on_resend = self._regenerate_from_row if role == "assistant" else None
-        row = MessageRow(text, role, self.msg_root, on_resend=on_resend)
+        row = build_message_row(
+            text,
+            role,
+            self.msg_root,
+            on_resend=on_resend,
+            avatar_cfg=getattr(self, "cfg", None),
+            row_cls=MessageRow,
+        )
         row.set_finished(finished)
         self.msg_layout.insertWidget(self._message_row_insert_index(), row)
         self._rendered_message_rows.append(row)

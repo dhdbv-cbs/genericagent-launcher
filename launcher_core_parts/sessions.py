@@ -838,6 +838,96 @@ def _fallback_token_events_from_bubbles(bubbles, base_ts=0, channel_id="unknown"
     return events
 
 
+def usage_input_side_tokens(item):
+    row = item if isinstance(item, dict) else {}
+    if "input_side_tokens" in row:
+        return _safe_int(row.get("input_side_tokens"))
+    return (
+        _safe_int(row.get("input_tokens"))
+        + _safe_int(row.get("cache_creation_input_tokens"))
+        + _safe_int(row.get("cache_read_input_tokens"))
+    )
+
+
+def usage_total_consumed_tokens(item):
+    row = item if isinstance(item, dict) else {}
+    if "usage_total_tokens" in row:
+        return _safe_int(row.get("usage_total_tokens"))
+    return usage_input_side_tokens(row) + _safe_int(row.get("output_tokens"))
+
+
+def usage_cache_hit_rate(item):
+    row = item if isinstance(item, dict) else {}
+    try:
+        if "cache_hit_rate" in row:
+            return max(0.0, float(row.get("cache_hit_rate") or 0.0))
+    except Exception:
+        pass
+    input_side = usage_input_side_tokens(row)
+    if input_side <= 0:
+        return 0.0
+    return round((_safe_int(row.get("cache_read_input_tokens")) / float(input_side)) * 100.0, 4)
+
+
+def summarize_usage_rows(rows):
+    summary = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "input_side_tokens": 0,
+        "usage_total_tokens": 0,
+        "cached_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "api_calls": 0,
+        "event_count": 0,
+    }
+    for row in list(rows or []):
+        if not isinstance(row, dict):
+            continue
+        summary["input_tokens"] += _safe_int(row.get("input_tokens"))
+        summary["output_tokens"] += _safe_int(row.get("output_tokens"))
+        summary["total_tokens"] += _safe_int(row.get("total_tokens"))
+        summary["input_side_tokens"] += usage_input_side_tokens(row)
+        summary["usage_total_tokens"] += usage_total_consumed_tokens(row)
+        summary["cached_tokens"] += _safe_int(row.get("cached_tokens"))
+        summary["cache_creation_input_tokens"] += _safe_int(row.get("cache_creation_input_tokens"))
+        summary["cache_read_input_tokens"] += _safe_int(row.get("cache_read_input_tokens"))
+        summary["api_calls"] += _safe_int(row.get("api_calls"))
+        summary["event_count"] += 1
+    summary["cache_hit_rate"] = usage_cache_hit_rate(summary)
+    return summary
+
+
+def summarize_session_usage(session):
+    data = session if isinstance(session, dict) else {}
+    usage = data.get("token_usage") if isinstance(data.get("token_usage"), dict) else {}
+    events = list(usage.get("events") or [])
+    if not events:
+        events = _fallback_token_events_from_bubbles(
+            data.get("bubbles") or [],
+            base_ts=data.get("updated_at") or data.get("created_at") or time.time(),
+            channel_id=_normalize_usage_channel_id(data.get("channel_id"), "launcher"),
+            model_name=str(usage.get("last_model") or "").strip(),
+        )
+    summary = summarize_usage_rows(events)
+    summary["turns"] = sum(1 for ev in events if _safe_int((ev or {}).get("input_tokens")) > 0)
+    summary["mode"] = _usage_mode_from_sources(
+        {
+            str((ev or {}).get("usage_source") or "estimate").strip().lower() or "estimate"
+            for ev in events
+            if isinstance(ev, dict)
+        }
+    )
+    summary["last_model"] = str(usage.get("last_model") or "").strip()
+    summary["channel_id"] = _normalize_usage_channel_id(data.get("channel_id") or usage.get("channel_id"), "launcher")
+    summary["channel_label"] = _usage_channel_label(summary["channel_id"])
+    summary["session_id"] = str(data.get("id") or "").strip()
+    summary["title"] = str(data.get("title") or "").strip()
+    summary["last_active"] = float(data.get("updated_at") or data.get("created_at") or 0)
+    return summary
+
+
 def _normalize_token_usage_inplace(session):
     if not isinstance(session, dict):
         return session
@@ -923,6 +1013,9 @@ def _normalize_token_usage_inplace(session):
             row["currency"] = normalize_usage_currency(row.get("currency") or usage_currency)
         else:
             row["billing_mode"] = row.get("billing_mode") or "legacy_unpriced"
+        row["input_side_tokens"] = usage_input_side_tokens(row)
+        row["usage_total_tokens"] = usage_total_consumed_tokens(row)
+        row["cache_hit_rate"] = usage_cache_hit_rate(row)
         normalized_events.append(row)
 
     if (not normalized_events) and (not usage_cleared) and str(session.get("session_kind") or "").strip().lower() != "channel_process":
@@ -935,6 +1028,10 @@ def _normalize_token_usage_inplace(session):
 
     input_tokens = sum(int(ev.get("input_tokens", 0) or 0) for ev in normalized_events)
     output_tokens = sum(int(ev.get("output_tokens", 0) or 0) for ev in normalized_events)
+    input_side_tokens = sum(usage_input_side_tokens(ev) for ev in normalized_events)
+    usage_total_tokens = sum(usage_total_consumed_tokens(ev) for ev in normalized_events)
+    cache_creation_input_tokens = sum(int(ev.get("cache_creation_input_tokens", 0) or 0) for ev in normalized_events)
+    cache_read_input_tokens = sum(int(ev.get("cache_read_input_tokens", 0) or 0) for ev in normalized_events)
     cost_input = _safe_cost(sum(float(ev.get("cost_input", 0) or 0) for ev in normalized_events))
     cost_output = _safe_cost(sum(float(ev.get("cost_output", 0) or 0) for ev in normalized_events))
     cost_cache_read = _safe_cost(sum(float(ev.get("cost_cache_read", 0) or 0) for ev in normalized_events))
@@ -969,12 +1066,22 @@ def _normalize_token_usage_inplace(session):
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "total_tokens": input_tokens + output_tokens,
+        "input_side_tokens": input_side_tokens,
+        "usage_total_tokens": usage_total_tokens,
         "turns": sum(1 for ev in normalized_events if int(ev.get("input_tokens", 0) or 0) > 0),
         "events": normalized_events,
         "channel_id": default_channel,
         "channel_label": _usage_channel_label(default_channel),
         "last_model": str(usage.get("last_model") or "").strip(),
         "api_calls": sum(int(ev.get("api_calls", 0) or 0) for ev in normalized_events),
+        "cache_creation_input_tokens": cache_creation_input_tokens,
+        "cache_read_input_tokens": cache_read_input_tokens,
+        "cache_hit_rate": usage_cache_hit_rate(
+            {
+                "input_side_tokens": input_side_tokens,
+                "cache_read_input_tokens": cache_read_input_tokens,
+            }
+        ),
         "currency": usage_currency,
         "cost_input": cost_input,
         "cost_output": cost_output,

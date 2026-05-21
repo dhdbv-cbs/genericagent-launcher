@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
 from launcher_app import core as lz
 from launcher_app.theme import C, F
 
+from . import common as chat_common
 from .common import (
     _session_copy,
     capture_runtime_context,
@@ -71,29 +72,29 @@ class SidebarSessionsMixin:
         if selected:
             return marker + (
                 f"QPushButton {{ background: {palette['accent_soft_bg']}; color: {palette['text']}; "
-                f"border: 1px solid transparent; border-left: 2px solid {palette['accent']}; "
-                f"border-radius: {radius}px; padding: 8px 10px; font-size: 13px; font-weight: 600; text-align: left; }}"
-                f"QPushButton:hover {{ background: {palette['accent_soft_bg_hover']}; }}"
+                f"border: 1px solid {palette['stroke_default']}; "
+                f"border-radius: {radius}px; padding: 8px 12px; font-size: 13px; font-weight: 600; text-align: left; }}"
+                f"QPushButton:hover {{ background: {palette['accent_soft_bg_hover']}; border-color: {palette['stroke_hover']}; }}"
             )
         if primary:
             return marker + (
-                f"QPushButton {{ background: {palette['layer2']}; color: {palette['text']}; border: 1px solid {palette['stroke_default']}; "
+                f"QPushButton {{ background: {palette['field_bg']}; color: {palette['text']}; border: 1px solid {palette['stroke_default']}; "
                 f"border-radius: {radius}px; padding: 8px 12px; font-size: 13px; font-weight: 600; text-align: left; }}"
                 f"QPushButton:hover {{ background: {palette['layer3']}; border-color: {palette['stroke_hover']}; }}"
-                f"QPushButton:pressed {{ background: {palette['layer1']}; }}"
+                f"QPushButton:pressed {{ background: {palette['layer2']}; border-color: {palette['stroke_default']}; }}"
             )
         if subtle:
             return marker + (
                 f"QPushButton {{ background: transparent; color: {palette['text_soft']}; border: 1px solid transparent; "
                 f"border-radius: {radius}px; padding: 7px 10px; font-size: 13px; text-align: left; }}"
-                f"QPushButton:hover {{ background: {palette['layer2']}; color: {palette['text']}; }}"
-                f"QPushButton:pressed {{ background: {palette['layer1']}; }}"
+                f"QPushButton:hover {{ background: {palette['layer2']}; color: {palette['text']}; border-color: {palette['stroke_default']}; }}"
+                f"QPushButton:pressed {{ background: {palette['layer1']}; border-color: {palette['stroke_default']}; }}"
             )
         return marker + (
             f"QPushButton {{ background: transparent; color: {palette['text_soft']}; border: 1px solid transparent; "
             f"border-radius: {radius}px; padding: 7px 12px; font-size: 13px; text-align: center; }}"
-            f"QPushButton:hover {{ background: {palette['layer2']}; color: {palette['text']}; }}"
-            f"QPushButton:pressed {{ background: {palette['layer1']}; }}"
+            f"QPushButton:hover {{ background: {palette['layer2']}; color: {palette['text']}; border-color: {palette['stroke_default']}; }}"
+            f"QPushButton:pressed {{ background: {palette['layer1']}; border-color: {palette['stroke_default']}; }}"
         )
 
     def _normalize_remote_device(self, raw):
@@ -1129,10 +1130,11 @@ class SidebarSessionsMixin:
             {
                 "channel_id": str(spec.get("id") or "").strip(),
                 "channel_label": str(spec.get("label") or spec.get("id") or "").strip(),
-                "script_rel": ("frontends/" + str(spec.get("script") or "").strip()).replace("\\", "/"),
+                "script_rel": lz.channel_script_rel(spec),
+                "script_rel_candidates": list(lz.channel_script_rel_candidates(spec) or []),
             }
             for spec in getattr(lz, "COMM_CHANNEL_SPECS", [])
-            if str(spec.get("id") or "").strip() and str(spec.get("script") or "").strip()
+            if str(spec.get("id") or "").strip() and str(spec.get("script") or "").strip() and (not bool(spec.get("local_only")))
         ]
         client, _err_msg, _detail, _missing = self._open_vps_ssh_client(payload, timeout=8)
         if client is None:
@@ -1311,8 +1313,15 @@ class SidebarSessionsMixin:
                 "    if (not cid) or int(pid or 0) <= 0:\n"
                 "        return None\n"
                 "    spec = specs_by_channel.get(cid) or {}\n"
-                "    script_rel = str(spec.get('script_rel') or '').strip()\n"
-                "    if not script_rel:\n"
+                "    script_rel_candidates = [\n"
+                "        str(item or '').strip()\n"
+                "        for item in (spec.get('script_rel_candidates') or [])\n"
+                "        if str(item or '').strip()\n"
+                "    ]\n"
+                "    if not script_rel_candidates:\n"
+                "        script_rel = str(spec.get('script_rel') or '').strip()\n"
+                "        script_rel_candidates = [script_rel] if script_rel else []\n"
+                "    if not script_rel_candidates:\n"
                 "        return None\n"
                 "    target_base = os.getcwd()\n"
                 "    try:\n"
@@ -1321,7 +1330,12 @@ class SidebarSessionsMixin:
                 "        target_real = ''\n"
                 "    cwd = read_pid_cwd(pid)\n"
                 "    cmd = read_pid_cmdline(pid)\n"
-                "    if not process_cmdline_matches_agent_script(cmd, target_base, script_rel, cwd=cwd, agent_dir_real=target_real, cwd_real=cwd):\n"
+                "    matched_rel = ''\n"
+                "    for script_rel in script_rel_candidates:\n"
+                "        if process_cmdline_matches_agent_script(cmd, target_base, script_rel, cwd=cwd, agent_dir_real=target_real, cwd_real=cwd):\n"
+                "            matched_rel = script_rel\n"
+                "            break\n"
+                "    if not matched_rel:\n"
                 "        return None\n"
                 "    return {\n"
                 "        'channel_id': cid,\n"
@@ -1448,19 +1462,31 @@ class SidebarSessionsMixin:
                 "            cid = str(spec.get('channel_id') or '').strip().lower()\n"
                 "            if not cid or cid in found:\n"
                 "                continue\n"
-                "            script_rel = str(spec.get('script_rel') or '').strip()\n"
-                "            if (not script_rel) or (not process_cmdline_has_script(cmd, script_rel)):\n"
+                "            script_rel_candidates = [\n"
+                "                str(item or '').strip()\n"
+                "                for item in (spec.get('script_rel_candidates') or [])\n"
+                "                if str(item or '').strip()\n"
+                "            ]\n"
+                "            if not script_rel_candidates:\n"
+                "                script_rel = str(spec.get('script_rel') or '').strip()\n"
+                "                script_rel_candidates = [script_rel] if script_rel else []\n"
+                "            if (not script_rel_candidates) or (not any(process_cmdline_has_script(cmd, rel) for rel in script_rel_candidates)):\n"
                 "                continue\n"
-                "            candidate_specs.append((cid, spec, script_rel))\n"
+                "            candidate_specs.append((cid, spec, script_rel_candidates))\n"
                 "        if not candidate_specs:\n"
                 "            continue\n"
                 "        cwd = ''\n"
-                "        for cid, spec, script_rel in candidate_specs:\n"
+                "        for cid, spec, script_rel_candidates in candidate_specs:\n"
                 "            if cid in found:\n"
                 "                continue\n"
                 "            if not cwd:\n"
                 "                cwd = read_pid_cwd(pid)\n"
-                "            if not process_cmdline_matches_agent_script(cmd, target_base, script_rel, cwd=cwd, agent_dir_real=target_real, cwd_real=cwd):\n"
+                "            matched_rel = ''\n"
+                "            for script_rel in script_rel_candidates:\n"
+                "                if process_cmdline_matches_agent_script(cmd, target_base, script_rel, cwd=cwd, agent_dir_real=target_real, cwd_real=cwd):\n"
+                "                    matched_rel = script_rel\n"
+                "                    break\n"
+                "            if not matched_rel:\n"
                 "                continue\n"
                 "            found[cid] = {\n"
                 "                'channel_id': cid,\n"
@@ -1868,32 +1894,35 @@ class SidebarSessionsMixin:
             self.sidebar_layout.setSpacing(6)
 
         if collapsed:
-            toggle = QPushButton("⇥")
+            toggle = QPushButton()
             toggle.setCursor(Qt.PointingHandCursor)
             toggle.setFixedSize(48, 36)
             toggle.setToolTip("展开侧边栏")
             toggle.setStyleSheet(self._sidebar_button_style())
             toggle.clicked.connect(self._toggle_sidebar)
+            chat_common.set_button_svg_icon(toggle, "sidebar_expand", chat_common._SVG_CHEVRON_RIGHT, color="text_soft", size=16)
             self.sidebar_layout.addWidget(toggle, 0, Qt.AlignHCenter)
 
-            logo = QLabel("⚙")
+            logo = QLabel()
             logo.setFixedSize(48, 48)
             logo.setAlignment(Qt.AlignCenter)
             logo.setObjectName("sidebarLogo")
+            chat_common.set_label_svg_icon(logo, "sidebar_brand_compact", chat_common._SVG_WINDOW, color="accent_text", size=20)
             self.sidebar_layout.addWidget(logo, 0, Qt.AlignHCenter)
             self.sidebar_layout.addSpacing(6)
 
-            for text, handler, tip in (
-                ("＋", self._new_session, "新建会话"),
-                ("🔍", self._open_search_filter, "搜索历史消息"),
-                ("↻", self._refresh_session_list, "刷新会话列表"),
+            for key, svg, color, handler, tip in (
+                ("sidebar_new_compact", chat_common._SVG_PLUS, "accent_text", self._new_session, "新建会话"),
+                ("sidebar_search_compact", chat_common._SVG_SEARCH, "text_soft", self._open_search_filter, "搜索历史消息"),
+                ("sidebar_refresh_compact", chat_common._SVG_REFRESH, "text_soft", self._refresh_session_list, "刷新会话列表"),
             ):
-                btn = QPushButton(text)
+                btn = QPushButton()
                 btn.setCursor(Qt.PointingHandCursor)
                 btn.setFixedSize(48, 40)
                 btn.setToolTip(tip)
                 btn.setStyleSheet(self._sidebar_button_style())
                 btn.clicked.connect(handler)
+                chat_common.set_button_svg_icon(btn, key, svg, color=color, size=16)
                 self.sidebar_layout.addWidget(btn, 0, Qt.AlignHCenter)
         else:
             top = QFrame()
@@ -1902,12 +1931,13 @@ class SidebarSessionsMixin:
             top_row = QHBoxLayout(top)
             top_row.setContentsMargins(0, 8, 0, 0)
             top_row.setSpacing(0)
-            toggle = QPushButton("⇤")
+            toggle = QPushButton()
             toggle.setCursor(Qt.PointingHandCursor)
             toggle.setFixedSize(32, 32)
             toggle.setToolTip("收起侧边栏")
             toggle.setStyleSheet(self._sidebar_button_style())
             toggle.clicked.connect(self._toggle_sidebar)
+            chat_common.set_button_svg_icon(toggle, "sidebar_collapse", chat_common._SVG_CHEVRON_LEFT, color="text_soft", size=16)
             top_row.addWidget(toggle, 0, Qt.AlignLeft)
             top_row.addStretch(1)
             self.sidebar_layout.addWidget(top)
@@ -1917,32 +1947,36 @@ class SidebarSessionsMixin:
             brand_row = QHBoxLayout(brand)
             brand_row.setContentsMargins(0, 6, 0, 12)
             brand_row.setSpacing(10)
-            icon = QLabel("⚙")
+            icon = QLabel()
             icon.setFixedSize(42, 42)
             icon.setAlignment(Qt.AlignCenter)
             icon.setObjectName("sidebarLogo")
+            chat_common.set_label_svg_icon(icon, "sidebar_brand", chat_common._SVG_WINDOW, color="accent_text", size=18)
             brand_row.addWidget(icon, 0)
             title = QLabel("GenericAgent")
             title.setObjectName("cardTitle")
             brand_row.addWidget(title, 1)
             self.sidebar_layout.addWidget(brand)
 
-            new_btn = QPushButton("＋  新会话")
+            new_btn = QPushButton("新会话")
             new_btn.setCursor(Qt.PointingHandCursor)
             new_btn.setStyleSheet(self._sidebar_button_style(primary=True))
             new_btn.clicked.connect(self._new_session)
+            chat_common.set_button_svg_icon(new_btn, "sidebar_new", chat_common._SVG_PLUS, color="accent_text", size=16)
             self.sidebar_layout.addWidget(new_btn)
 
-            search_btn = QPushButton("🔍  搜索")
+            search_btn = QPushButton("搜索")
             search_btn.setCursor(Qt.PointingHandCursor)
             search_btn.setStyleSheet(self._sidebar_button_style(subtle=True))
             search_btn.clicked.connect(self._open_search_filter)
+            chat_common.set_button_svg_icon(search_btn, "sidebar_search", chat_common._SVG_SEARCH, color="text_soft", size=16)
             self.sidebar_layout.addWidget(search_btn)
 
-            refresh_btn = QPushButton("↻  刷新会话")
+            refresh_btn = QPushButton("刷新会话")
             refresh_btn.setCursor(Qt.PointingHandCursor)
             refresh_btn.setStyleSheet(self._sidebar_button_style(subtle=True))
             refresh_btn.clicked.connect(self._refresh_session_list)
+            chat_common.set_button_svg_icon(refresh_btn, "sidebar_refresh", chat_common._SVG_REFRESH, color="text_soft", size=16)
             self.sidebar_layout.addWidget(refresh_btn)
 
             group = QLabel("渠道")
@@ -1969,11 +2003,18 @@ class SidebarSessionsMixin:
         bottom_row = QHBoxLayout(bottom)
         bottom_row.setContentsMargins(0, 8, 0, 0)
         bottom_row.setSpacing(0)
-        settings = QPushButton("⚙" if collapsed else "⚙   设置")
+        settings = QPushButton("" if collapsed else "设置")
         settings.setCursor(Qt.PointingHandCursor)
         settings.setToolTip("设置" if collapsed else "")
         settings.setStyleSheet(self._sidebar_button_style(subtle=not collapsed))
         settings.clicked.connect(self._show_settings)
+        chat_common.set_button_svg_icon(
+            settings,
+            "sidebar_settings_compact" if collapsed else "sidebar_settings",
+            chat_common._SVG_SETTINGS,
+            color="text_soft",
+            size=16,
+        )
         if collapsed:
             settings.setFixedSize(48, 40)
             bottom_row.setContentsMargins(0, 6, 0, 0)

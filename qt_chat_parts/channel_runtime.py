@@ -11,11 +11,12 @@ import subprocess
 import threading
 import time
 import uuid
+import webbrowser
 from datetime import datetime
 from urllib.parse import urlparse
 
-from PySide6.QtCore import QTimer, Qt
-from PySide6.QtGui import QPixmap
+from PySide6.QtCore import QTimer, Qt, QUrl
+from PySide6.QtGui import QDesktopServices, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
@@ -312,6 +313,145 @@ class ChannelRuntimeMixin:
         configs = [dict(item) for item in (getattr(self, "_qt_channel_configs", []) or []) if isinstance(item, dict)]
         return [str(err or "").strip() for err in lz.validate_api_config_references(configs) if str(err or "").strip()]
 
+    def _channel_mykey_snapshot_from_path(self, path, *, source_name=""):
+        fp = str(path or "").strip()
+        if not fp or not os.path.isfile(fp):
+            return {}
+        parsed = lz.parse_mykey_source(fp)
+        configs = [dict(item) for item in (parsed.get("configs") or []) if isinstance(item, dict)]
+        errors = []
+        parse_error = str(parsed.get("error") or "").strip()
+        if parse_error:
+            errors.append(parse_error)
+        else:
+            errors.extend([str(err or "").strip() for err in lz.validate_runnable_api_configs(configs) if str(err or "").strip()])
+        return {
+            "ok": not errors,
+            "path": fp,
+            "configs": configs,
+            "extras": dict(parsed.get("extras") or {}),
+            "passthrough": list(parsed.get("passthrough") or []),
+            "errors": errors,
+            "source_name": str(source_name or os.path.basename(fp) or "mykey").strip() or "mykey",
+        }
+
+    def _channel_conductor_api_state_snapshot(self):
+        builder = getattr(self, "_api_build_save_configs", None)
+        if not callable(builder):
+            return {}
+        states = list(getattr(self, "_qt_api_state", []) or [])
+        if not states:
+            return {}
+        try:
+            configs = [dict(item) for item in (builder() or []) if isinstance(item, dict)]
+        except Exception as e:
+            return {"ok": False, "errors": [str(e or "").strip() or "读取 API 面板配置失败。"], "source_name": "API 面板"}
+        errors = [str(err or "").strip() for err in lz.validate_runnable_api_configs(configs) if str(err or "").strip()]
+        return {
+            "ok": not errors,
+            "configs": configs,
+            "extras": dict(getattr(self, "_qt_api_extras", {}) or {}),
+            "passthrough": list(getattr(self, "_qt_api_passthrough", []) or []),
+            "errors": errors,
+            "source_name": "API 面板",
+        }
+
+    def _channel_conductor_donor_paths(self):
+        root = os.path.normcase(os.path.normpath(str(getattr(self, "agent_dir", "") or "").strip()))
+        seen = {root}
+        out = []
+        api_path = str(getattr(self, "_qt_api_py_path", "") or "").strip()
+        if api_path and os.path.isfile(api_path):
+            norm = os.path.normcase(os.path.normpath(api_path))
+            if norm not in seen:
+                seen.add(norm)
+                out.append(api_path)
+        for directory in lz._iter_dir_with_parents(root, max_depth=8):
+            text = str(directory or "").strip()
+            if not text:
+                continue
+            norm_dir = os.path.normcase(os.path.normpath(text))
+            if norm_dir == root:
+                continue
+            if not lz.is_valid_agent_dir(text):
+                continue
+            for filename in ("mykey.py", "mykey.json"):
+                fp = os.path.join(text, filename)
+                norm_fp = os.path.normcase(os.path.normpath(fp))
+                if norm_fp in seen or (not os.path.isfile(fp)):
+                    continue
+                seen.add(norm_fp)
+                out.append(fp)
+        return out
+
+    def _channel_conductor_launch_snapshot(self):
+        cid_root = str(getattr(self, "agent_dir", "") or "").strip()
+        py_snapshot = self._channel_mykey_snapshot_from_path(os.path.join(cid_root, "mykey.py"), source_name="当前目录 mykey.py")
+        if py_snapshot.get("ok"):
+            return py_snapshot
+        json_snapshot = self._channel_mykey_snapshot_from_path(os.path.join(cid_root, "mykey.json"), source_name="当前目录 mykey.json")
+        if json_snapshot.get("ok"):
+            return json_snapshot
+        api_snapshot = self._channel_conductor_api_state_snapshot()
+        if api_snapshot.get("ok"):
+            return api_snapshot
+        for donor_path in self._channel_conductor_donor_paths():
+            donor_snapshot = self._channel_mykey_snapshot_from_path(donor_path, source_name=f"复用 {donor_path}")
+            if donor_snapshot.get("ok"):
+                return donor_snapshot
+        errors = []
+        for snapshot in (py_snapshot, json_snapshot, api_snapshot):
+            for err in list(snapshot.get("errors") or []):
+                text = str(err or "").strip()
+                if text and text not in errors:
+                    errors.append(text)
+        if not errors:
+            errors.append("当前目录没有可用的 mykey.py / mykey.json，且没有找到可复用的 API 配置。")
+        return {"ok": False, "errors": errors, "source_name": ""}
+
+    def _channel_prepare_launch_configs(self, channel_id):
+        cid = str(channel_id or "").strip().lower()
+        if cid != "conductor":
+            return True, []
+        snapshot = self._channel_conductor_launch_snapshot()
+        if not snapshot.get("ok"):
+            return False, [str(err or "").strip() for err in (snapshot.get("errors") or []) if str(err or "").strip()]
+        self._qt_channel_configs = list(snapshot.get("configs") or [])
+        self._qt_channel_extras = dict(snapshot.get("extras") or {})
+        self._qt_channel_passthrough = list(snapshot.get("passthrough") or [])
+        path_text = str(snapshot.get("path") or "").strip()
+        if path_text:
+            self._qt_channel_py_path = path_text
+        if snapshot.get("path"):
+            return True, []
+        text = lz.serialize_mykey_py(
+            configs=self._qt_channel_configs,
+            extras=self._qt_channel_extras,
+            passthrough=self._qt_channel_passthrough,
+        )
+        writer = getattr(self, "_settings_target_write_mykey_text", None)
+        if callable(writer):
+            ok, saved_path, err = writer(text)
+            if not ok:
+                return False, [str(err or "写入 mykey.py 失败。").strip() or "写入 mykey.py 失败。"]
+            self._qt_channel_py_path = str(saved_path or self._qt_channel_py_path)
+            return True, []
+        py_path = os.path.join(str(getattr(self, "agent_dir", "") or "").strip(), "mykey.py")
+        try:
+            with open(py_path, "w", encoding="utf-8") as f:
+                f.write(text)
+            self._qt_channel_py_path = py_path
+        except Exception as e:
+            return False, [str(e or "写入 mykey.py 失败。").strip() or "写入 mykey.py 失败。"]
+        return True, []
+
+    def _channel_launch_config_errors(self, channel_id):
+        cid = str(channel_id or "").strip().lower()
+        if cid != "conductor":
+            return []
+        snapshot = self._channel_conductor_launch_snapshot()
+        return [] if snapshot.get("ok") else [str(err or "").strip() for err in (snapshot.get("errors") or []) if str(err or "").strip()]
+
     def _channel_runtime_cfg(self, channel_id):
         bucket = self._channel_cfg_bucket()
         item = bucket.get(channel_id)
@@ -579,22 +719,43 @@ class ChannelRuntimeMixin:
 
     def _channel_script_rel(self, channel_id):
         cid = str(channel_id or "").strip()
-        spec = lz.COMM_CHANNEL_INDEX.get(cid) or {}
-        script = str(spec.get("script") or "").strip()
-        if (not spec) or (not script):
-            for item in getattr(lz, "COMM_CHANNEL_SPECS", []):
-                if str((item or {}).get("id") or "").strip() == cid:
-                    spec = dict(item)
-                    break
-        script = str(spec.get("script") or "").strip()
-        if not script:
-            return ""
-        return ("frontends/" + script).replace("\\", "/")
+        return lz.channel_script_rel(cid, agent_dir=self.agent_dir, existing_only=True)
 
     def _channel_launch_mode(self, channel_id):
         cid = str(channel_id or "").strip()
         spec = lz.COMM_CHANNEL_INDEX.get(cid) or {}
         return str(spec.get("launch_mode") or "").strip().lower()
+
+    def _channel_is_local_only(self, channel_id):
+        cid = str(channel_id or "").strip()
+        spec = lz.COMM_CHANNEL_INDEX.get(cid) or {}
+        return bool(spec.get("local_only"))
+
+    def _channel_web_url(self, channel_id):
+        cid = str(channel_id or "").strip()
+        spec = lz.COMM_CHANNEL_INDEX.get(cid) or {}
+        return str(spec.get("web_url") or "").strip()
+
+    def _open_channel_web_page(self, channel_id, *, show_errors=True):
+        label = self._remote_channel_label_text(channel_id)
+        url = self._channel_web_url(channel_id)
+        if not url:
+            if show_errors:
+                self._channel_warning("无法打开", f"{label} 当前没有可用的网页地址。")
+            return False
+        opened = False
+        try:
+            opened = bool(QDesktopServices.openUrl(QUrl(url)))
+        except Exception:
+            opened = False
+        if not opened:
+            try:
+                opened = bool(webbrowser.open(url))
+            except Exception:
+                opened = False
+        if (not opened) and show_errors:
+            self._channel_warning("打开失败", f"请手动打开：\n{url}")
+        return opened
 
     def _local_channel_external_pids(self, *, force=False):
         results: dict[str, list[int]] = {}
@@ -632,20 +793,73 @@ class ChannelRuntimeMixin:
                     continue
                 if pid in managed_by_channel.get(cid, set()):
                     continue
-                script = str((spec or {}).get("script") or "").strip()
-                script_rel = (("frontends/" + script).replace("\\", "/")) if script else self._channel_script_rel(cid)
-                if not script_rel:
+                script_rels = list(lz.channel_script_rel_candidates(spec) or [])
+                launcher_script = str(lz.channel_script_path(agent_dir, spec, existing_only=True) or "").strip()
+                if launcher_script and os.path.isabs(launcher_script) and launcher_script not in script_rels:
+                    script_rels.append(launcher_script)
+                if not script_rels:
                     continue
-                if process_cmdline_matches_agent_script(
-                    norm_cmd,
-                    agent_dir=agent_dir,
-                    script_rel=script_rel,
-                    cwd=proc_info.get("cwd") or "",
-                    agent_dir_real=agent_dir_real,
-                    cwd_real=proc_info.get("cwd_real") or "",
-                ):
-                    results.setdefault(cid, []).append(pid)
+                for script_rel in script_rels:
+                    if process_cmdline_matches_agent_script(
+                        norm_cmd,
+                        agent_dir=agent_dir,
+                        script_rel=script_rel,
+                        cwd=proc_info.get("cwd") or "",
+                        agent_dir_real=agent_dir_real,
+                        cwd_real=proc_info.get("cwd_real") or "",
+                    ):
+                        results.setdefault(cid, []).append(pid)
+                        break
         return results
+
+    def _channel_allows_local_external_takeover(self, channel_id) -> bool:
+        return str(channel_id or "").strip().lower() == "conductor"
+
+    def _find_local_channel_external_pids(self, channel_id, *, force=False):
+        cid = str(channel_id or "").strip()
+        if not cid:
+            return []
+        try:
+            external_map = self._local_channel_external_pids(force=force)
+        except TypeError:
+            external_map = self._local_channel_external_pids()
+        except Exception:
+            external_map = {}
+        return [int(pid or 0) for pid in list((external_map or {}).get(cid) or []) if int(pid or 0) > 0]
+
+    def _takeover_local_external_channel_instances(self, channel_id):
+        if not self._channel_allows_local_external_takeover(channel_id):
+            return True, [], []
+        candidates = self._find_local_channel_external_pids(channel_id, force=True)
+        if not candidates:
+            self._channel_set_external_running(channel_id, False, persist=True)
+            return True, [], []
+        killed = []
+        failed = []
+        for pid in candidates:
+            if self._terminate_pid_force(pid):
+                killed.append(int(pid))
+            else:
+                failed.append(int(pid))
+        remaining = []
+        if killed:
+            candidate_set = {int(pid) for pid in candidates if int(pid) > 0}
+            for _ in range(20):
+                current = self._find_local_channel_external_pids(channel_id, force=True)
+                remaining = [int(pid) for pid in current if int(pid) in candidate_set]
+                if not remaining:
+                    break
+                time.sleep(0.1)
+        else:
+            remaining = self._find_local_channel_external_pids(channel_id, force=True)
+        if remaining:
+            for pid in remaining:
+                if int(pid) not in failed:
+                    failed.append(int(pid))
+        snapshot = self._scan_local_channel_external_snapshot(force=True)
+        self._apply_local_channel_external_snapshot(snapshot, persist=True)
+        ok = not failed
+        return ok, killed, failed
 
     def _wechat_singleton_locked(self):
         lock_sock = None
@@ -2113,6 +2327,8 @@ class ChannelRuntimeMixin:
             return "暂无"
 
     def _remote_channel_check_hint(self, device_id, channel_id):
+        if self._channel_is_local_only(channel_id):
+            return f"{self._remote_channel_label_text(channel_id)} 当前仅支持启动器本机托管，不参与远端探测或远端启停。"
         auto_checker = getattr(self, "_remote_device_auto_ssh_enabled", None)
         if callable(auto_checker):
             try:
@@ -2280,6 +2496,8 @@ class ChannelRuntimeMixin:
         return f"已读取远端 {label} 日志；当前还没有新的日志输出。"
 
     def _remote_channel_status(self, device_id, channel_id):
+        if self._channel_is_local_only(channel_id):
+            return "仅本机", C["muted"]
         data = self._remote_channel_cached_session(device_id, channel_id)
         channel_age, device_age = self._remote_channel_status_check_age(device_id, channel_id)
         sync_running = bool(getattr(self, "_remote_channel_sync_running", False))
@@ -2357,6 +2575,7 @@ class ChannelRuntimeMixin:
         if not ctx:
             _is_remote, _dev, ctx = self._channel_target_context()
         is_remote = bool(ctx.get("is_remote"))
+        launch_mode = self._channel_launch_mode(channel_id)
         if is_remote:
             did = str(ctx.get("device_id") or "").strip()
             return self._remote_channel_status(did, channel_id)
@@ -2370,7 +2589,10 @@ class ChannelRuntimeMixin:
         missing = self._channel_missing_required(channel_id, values)
         if missing:
             return "待配置", C["danger_text"]
-        if self._channel_launch_mode(channel_id) == "terminal":
+        launch_errors = self._channel_launch_config_errors(channel_id)
+        if launch_errors:
+            return "待配置", C["danger_text"]
+        if launch_mode == "terminal":
             return "终端入口", C["muted"]
         info = self._channel_procs.get(channel_id) or {}
         proc = info.get("proc")
@@ -2378,6 +2600,8 @@ class ChannelRuntimeMixin:
             return f"已退出 ({proc.returncode})", C["danger_text"]
         if self._channel_is_auto_start(channel_id):
             return self._local_channel_autostart_status(channel_id)
+        if launch_mode == "web":
+            return "网页入口", C["muted"]
         return "未启动", C["muted"]
 
     def _channel_missing_fields_text(self, channel_id, values):
@@ -2391,14 +2615,17 @@ class ChannelRuntimeMixin:
         if not ctx:
             _is_remote, _dev, ctx = self._channel_target_context()
         is_remote = bool(ctx.get("is_remote"))
+        label = self._remote_channel_label_text(channel_id)
         if is_remote:
+            if self._channel_is_local_only(channel_id):
+                return f"{label} 当前只支持在启动器本机运行，不支持远端托管。"
             remote_dev = dict(ctx.get("device") or {})
             if not remote_dev:
                 return "当前远端设备信息不可用，请先检查设备配置。"
             did = str(ctx.get("device_id") or "").strip()
             if self._remote_channel_is_running(did, channel_id):
                 if self._remote_channel_is_external_running(did, channel_id):
-                    return f"检测到远端外部 {self._remote_channel_label_text(channel_id)} 进程正在运行；启动器不会重复启动。"
+                    return f"检测到远端外部 {label} 进程正在运行；启动器不会重复启动。"
                 return ""
             return ""
         if not lz.is_valid_agent_dir(self.agent_dir):
@@ -2406,13 +2633,18 @@ class ChannelRuntimeMixin:
         if self._channel_proc_alive(channel_id):
             return ""
         if self._channel_external_running(channel_id):
-            return f"检测到外部 {self._remote_channel_label_text(channel_id)} 进程正在运行；请先关闭外部实例。"
+            if self._channel_allows_local_external_takeover(channel_id):
+                return ""
+            return f"检测到外部 {label} 进程正在运行；请先关闭外部实例。"
         conflict = self._channel_conflict_message(channel_id)
         if conflict:
             return conflict
         missing_text = self._channel_missing_fields_text(channel_id, values)
         if missing_text:
             return missing_text
+        launch_errors = self._channel_launch_config_errors(channel_id)
+        if launch_errors:
+            return launch_errors[0]
         return ""
 
     def _channel_stop_disabled_reason(self, channel_id, values, *, target_ctx=None):
@@ -2420,29 +2652,34 @@ class ChannelRuntimeMixin:
         if not ctx:
             _is_remote, _dev, ctx = self._channel_target_context()
         is_remote = bool(ctx.get("is_remote"))
+        label = self._remote_channel_label_text(channel_id)
         if is_remote:
+            if self._channel_is_local_only(channel_id):
+                return f"{label} 当前只支持在启动器本机运行，不支持远端托管。"
             remote_dev = dict(ctx.get("device") or {})
             if not remote_dev:
                 return "当前远端设备信息不可用，请先检查设备配置。"
             did = str(ctx.get("device_id") or "").strip()
             if not self._remote_channel_is_running(did, channel_id):
-                return f"当前未检测到远端 {self._remote_channel_label_text(channel_id)} 运行中进程。"
+                return f"当前未检测到远端 {label} 运行中进程。"
             if self._remote_channel_is_external_running(did, channel_id):
                 pid = self._remote_channel_process_pid(did, channel_id)
                 if pid > 0:
                     return ""
                 return (
-                    f"当前远端 {self._remote_channel_label_text(channel_id)} 为外部启动进程，"
+                    f"当前远端 {label} 为外部启动进程，"
                     "但暂未获取到 PID，无法安全停止。"
                 )
             return ""
         if self._channel_proc_alive(channel_id):
             return ""
         if self._channel_external_running(channel_id):
-            return f"当前是外部启动的 {self._remote_channel_label_text(channel_id)} 进程，启动器无法直接停止。"
+            if self._channel_allows_local_external_takeover(channel_id):
+                return ""
+            return f"当前是外部启动的 {label} 进程，启动器无法直接停止。"
         if self._channel_launch_mode(channel_id) == "terminal":
-            return f"{self._remote_channel_label_text(channel_id)} 是终端入口，启动器不托管该进程；请直接关闭终端窗口。"
-        return f"当前没有由启动器托管的 {self._remote_channel_label_text(channel_id)} 运行中进程。"
+            return f"{label} 是终端入口，启动器不托管该进程；请直接关闭终端窗口。"
+        return f"当前没有由启动器托管的 {label} 运行中进程。"
 
     def _channel_bind_disabled_reason(self, channel_id, *, target_ctx=None):
         ctx = target_ctx if isinstance(target_ctx, dict) else {}
@@ -2461,10 +2698,28 @@ class ChannelRuntimeMixin:
             _is_remote, _dev, ctx = self._channel_target_context()
         if not bool(ctx.get("is_remote")):
             return ""
+        if self._channel_is_local_only(channel_id):
+            return f"{self._remote_channel_label_text(channel_id)} 当前仅支持启动器本机使用。"
         remote_dev = dict(ctx.get("device") or {})
         if remote_dev:
             return ""
         return f"当前远端设备信息不可用，无法读取 {self._remote_channel_label_text(channel_id)} 的远端状态或日志。"
+
+    def _channel_open_disabled_reason(self, channel_id, *, target_ctx=None):
+        ctx = target_ctx if isinstance(target_ctx, dict) else {}
+        if not ctx:
+            _is_remote, _dev, ctx = self._channel_target_context()
+        label = self._remote_channel_label_text(channel_id)
+        url = self._channel_web_url(channel_id)
+        if not url:
+            return f"{label} 当前没有可打开的网页地址。"
+        if bool(ctx.get("is_remote")):
+            if self._channel_is_local_only(channel_id):
+                return f"{label} 当前仅支持在启动器本机打开网页。"
+            return ""
+        if self._channel_proc_alive(channel_id) or self._channel_external_running(channel_id):
+            return ""
+        return f"请先启动 {label} 后再打开网页。"
 
     def _apply_channel_button_state(self, button, enabled, *, enabled_tooltip="", disabled_tooltip=""):
         if button is None:
@@ -2532,7 +2787,10 @@ class ChannelRuntimeMixin:
         if not isinstance(states, dict):
             return
         for spec in lz.COMM_CHANNEL_SPECS:
-            terminal_mode = self._channel_launch_mode(spec["id"]) == "terminal"
+            launch_mode = self._channel_launch_mode(spec["id"])
+            terminal_mode = launch_mode == "terminal"
+            web_mode = launch_mode == "web"
+            local_only = self._channel_is_local_only(spec["id"])
             state = states.get(spec["id"]) or {}
             status_widget = state.get("status_label")
             hint_widget = state.get("status_hint_label")
@@ -2545,7 +2803,10 @@ class ChannelRuntimeMixin:
             if hint_widget is not None:
                 if is_remote_target:
                     did = str((target_ctx or {}).get("device_id") or "").strip()
-                    hint_widget.setText(self._remote_channel_check_hint(did, spec["id"]))
+                    if local_only:
+                        hint_widget.setText(f"{spec['label']} 当前只支持启动器本机托管，远端目标下不会探测或启动该网页控制台。")
+                    else:
+                        hint_widget.setText(self._remote_channel_check_hint(did, spec["id"]))
                     hint_widget.setVisible(True)
                 else:
                     hint_widget.setVisible(False)
@@ -2553,10 +2814,40 @@ class ChannelRuntimeMixin:
             stop_btn = state.get("stop_btn")
             log_btn = state.get("log_btn")
             detail_btn = state.get("detail_btn")
+            open_btn = state.get("open_btn")
             if is_remote_target:
                 did = str((target_ctx or {}).get("device_id") or "").strip()
                 remote_dev = dict((target_ctx or {}).get("device") or {})
                 remote_actions_ready = bool(remote_dev)
+                if local_only:
+                    disabled_reason = self._channel_start_disabled_reason(spec["id"], values, target_ctx=target_ctx)
+                    self._apply_channel_button_state(
+                        start_btn,
+                        False,
+                        disabled_tooltip=disabled_reason,
+                    )
+                    self._apply_channel_button_state(
+                        stop_btn,
+                        False,
+                        disabled_tooltip=self._channel_stop_disabled_reason(spec["id"], values, target_ctx=target_ctx),
+                    )
+                    self._apply_channel_button_state(
+                        log_btn,
+                        False,
+                        disabled_tooltip=self._channel_remote_aux_disabled_reason(spec["id"], target_ctx=target_ctx),
+                    )
+                    self._apply_channel_button_state(
+                        detail_btn,
+                        False,
+                        disabled_tooltip=self._channel_remote_aux_disabled_reason(spec["id"], target_ctx=target_ctx),
+                    )
+                    if open_btn is not None:
+                        self._apply_channel_button_state(
+                            open_btn,
+                            False,
+                            disabled_tooltip=self._channel_open_disabled_reason(spec["id"], target_ctx=target_ctx),
+                        )
+                    continue
                 if terminal_mode:
                     self._apply_channel_button_state(
                         start_btn,
@@ -2595,14 +2886,22 @@ class ChannelRuntimeMixin:
                     enabled_tooltip=f"查看远端 {spec.get('label', spec['id'])} 的最近校验详情。",
                     disabled_tooltip=self._channel_remote_aux_disabled_reason(spec["id"], target_ctx=target_ctx),
                 )
+                if open_btn is not None:
+                    self._apply_channel_button_state(
+                        open_btn,
+                        remote_actions_ready,
+                        enabled_tooltip=f"打开远端 {spec.get('label', spec['id'])} 网页入口。",
+                        disabled_tooltip=self._channel_open_disabled_reason(spec["id"], target_ctx=target_ctx),
+                    )
             else:
                 managed_running = self._channel_proc_alive(spec["id"])
                 external_running = self._channel_external_running(spec["id"])
+                allow_external_takeover = self._channel_allows_local_external_takeover(spec["id"])
                 conflict = self._channel_conflict_message(spec["id"])
                 missing = self._channel_missing_required(spec["id"], values)
                 can_start = (
                     lz.is_valid_agent_dir(self.agent_dir)
-                    and (not external_running)
+                    and ((not external_running) or allow_external_takeover)
                     and (not conflict)
                     and (not missing)
                 )
@@ -2618,7 +2917,9 @@ class ChannelRuntimeMixin:
                     start_btn,
                     bool(can_start),
                     enabled_tooltip=(
-                        f"重启 {spec.get('label', spec['id'])} 渠道。"
+                        f"接管并重启 {spec.get('label', spec['id'])} 渠道。"
+                        if external_running and allow_external_takeover
+                        else f"重启 {spec.get('label', spec['id'])} 渠道。"
                         if managed_running
                         else f"启动 {spec.get('label', spec['id'])} 渠道。"
                     ),
@@ -2626,7 +2927,7 @@ class ChannelRuntimeMixin:
                 )
                 self._apply_channel_button_state(
                     stop_btn,
-                    bool(managed_running),
+                    bool(managed_running or (external_running and allow_external_takeover)),
                     enabled_tooltip=f"停止 {spec.get('label', spec['id'])} 渠道。",
                     disabled_tooltip=self._channel_stop_disabled_reason(spec["id"], values, target_ctx=target_ctx),
                 )
@@ -2635,6 +2936,14 @@ class ChannelRuntimeMixin:
                     True,
                     enabled_tooltip=f"查看 {spec.get('label', spec['id'])} 日志尾部。",
                 )
+                if open_btn is not None:
+                    can_open = bool((managed_running or external_running) and self._channel_web_url(spec["id"]))
+                    self._apply_channel_button_state(
+                        open_btn,
+                        can_open,
+                        enabled_tooltip=f"打开 {spec.get('label', spec['id'])} 本机网页控制台。",
+                        disabled_tooltip=self._channel_open_disabled_reason(spec["id"], target_ctx=target_ctx),
+                    )
             if spec["id"] == "wechat":
                 bind_btn = state.get("bind_btn")
                 if bind_btn is not None:
@@ -2715,7 +3024,10 @@ class ChannelRuntimeMixin:
         remote_dev = dict((target_ctx or {}).get("device") or {}) if is_remote_target else {}
         remote_actions_ready = (not is_remote_target) or bool(remote_dev)
         for spec in lz.COMM_CHANNEL_SPECS:
-            terminal_mode = self._channel_launch_mode(spec["id"]) == "terminal"
+            launch_mode = self._channel_launch_mode(spec["id"])
+            terminal_mode = launch_mode == "terminal"
+            web_mode = launch_mode == "web"
+            local_only = self._channel_is_local_only(spec["id"])
             values = {field["key"]: self._qt_channel_extras.get(field["key"]) for field in spec.get("fields", [])}
             status_text, status_color = self._channel_status(spec["id"], values, target_ctx=target_ctx)
             card = self._panel_card()
@@ -2744,7 +3056,10 @@ class ChannelRuntimeMixin:
             status_hint.setWordWrap(True)
             status_hint.setObjectName("softTextSmall")
             if is_remote_target:
-                status_hint.setText(self._remote_channel_check_hint(str((target_ctx or {}).get("device_id") or "").strip(), spec["id"]))
+                if local_only:
+                    status_hint.setText(f"{spec['label']} 当前只支持启动器本机托管，远端目标下不会探测或启动该网页控制台。")
+                else:
+                    status_hint.setText(self._remote_channel_check_hint(str((target_ctx or {}).get("device_id") or "").strip(), spec["id"]))
             body.addWidget(status_hint)
             status_hint.setVisible(bool(is_remote_target))
 
@@ -2861,6 +3176,17 @@ class ChannelRuntimeMixin:
                     disabled_tooltip=self._channel_remote_aux_disabled_reason(spec["id"], target_ctx=target_ctx),
                 )
                 controls.addWidget(log_btn, 0)
+                open_btn = None
+                if web_mode:
+                    open_btn = QPushButton("打开网页")
+                    open_btn.setStyleSheet(self._action_button_style(kind="subtle"))
+                    open_btn.clicked.connect(
+                        lambda _=False, cid=spec["id"]: self._safe_channel_ui_call(
+                            "打开网页",
+                            lambda: self._open_channel_web_page(cid),
+                        )
+                    )
+                    controls.addWidget(open_btn, 0)
                 if is_remote_target:
                     detail_btn = QPushButton("校验详情")
                     detail_btn.setStyleSheet(self._action_button_style(kind="subtle"))
@@ -2878,6 +3204,8 @@ class ChannelRuntimeMixin:
                     )
                     controls.addWidget(detail_btn, 0)
                     state["detail_btn"] = detail_btn
+                if open_btn is not None:
+                    state["open_btn"] = open_btn
             body.addLayout(controls)
 
             self._qt_channel_states[spec["id"]] = state
@@ -2988,7 +3316,7 @@ class ChannelRuntimeMixin:
                 pass
 
     def _remote_start_channel_process_blocking(self, device, channel_id, spec):
-        script_rel = ("frontends/" + str(spec.get("script") or "").strip()).replace("\\", "/")
+        script_rel = lz.channel_script_rel(spec)
         label = str(spec.get("label") or channel_id).strip() or channel_id
         conflicts = [lz._normalize_usage_channel_id(x, "") for x in (spec.get("conflicts_with") or []) if str(x or "").strip()]
         script = (
@@ -3535,6 +3863,12 @@ class ChannelRuntimeMixin:
         if not spec:
             return False
         label = self._remote_channel_label_text(channel_id)
+        if self._channel_is_local_only(channel_id):
+            msg = f"{label} 当前只支持在启动器本机运行，不支持远端托管。"
+            self._set_status(msg)
+            if show_errors:
+                self._channel_warning("无法启动", msg)
+            return False
         _is_remote, dev, ctx = self._channel_target_context()
         if not bool(ctx.get("is_remote")):
             return False
@@ -3548,6 +3882,22 @@ class ChannelRuntimeMixin:
             self._set_status(msg)
             if show_errors:
                 self._channel_warning("API 配置无效", msg, detail="\n".join(ref_errors))
+            return False
+        prepared, prepare_errors = self._channel_prepare_launch_configs(channel_id)
+        if not prepared:
+            msg = str((prepare_errors or ["无法准备渠道配置。"])[0] or "无法准备渠道配置。").strip() or "无法准备渠道配置。"
+            self._set_status(msg)
+            if show_errors:
+                title = "Conductor 未就绪" if str(channel_id or "").strip().lower() == "conductor" else "无法启动"
+                self._channel_warning(title, msg, detail="\n".join([str(err or "").strip() for err in (prepare_errors or []) if str(err or "").strip()]))
+            return False
+        launch_errors = self._channel_launch_config_errors(channel_id)
+        if launch_errors:
+            msg = launch_errors[0]
+            self._set_status(msg)
+            if show_errors:
+                title = "Conductor 未就绪" if str(channel_id or "").strip().lower() == "conductor" else "无法启动"
+                self._channel_warning(title, msg, detail="\n".join(launch_errors))
             return False
         if not self._qt_channels_save(silent=True, apply_running=False):
             return False
@@ -3724,6 +4074,11 @@ class ChannelRuntimeMixin:
         _is_remote, dev, ctx = self._channel_target_context()
         if not bool(ctx.get("is_remote")):
             return False
+        if self._channel_is_local_only(channel_id):
+            msg = f"{self._remote_channel_label_text(channel_id)} 当前只支持在启动器本机运行，不支持远端托管。"
+            self._set_status(msg)
+            self._channel_warning("无法停止", msg)
+            return False
         if not isinstance(dev, dict) or (not dev):
             self._channel_warning("无法停止", "当前远端设备信息不可用，请先检查设备配置。")
             return False
@@ -3893,6 +4248,22 @@ class ChannelRuntimeMixin:
             if show_errors:
                 self._channel_warning("API 配置无效", msg, detail="\n".join(ref_errors))
             return False
+        prepared, prepare_errors = self._channel_prepare_launch_configs(channel_id)
+        if not prepared:
+            msg = str((prepare_errors or ["无法准备渠道配置。"])[0] or "无法准备渠道配置。").strip() or "无法准备渠道配置。"
+            self._set_status(msg)
+            if show_errors:
+                title = "Conductor 未就绪" if str(channel_id or "").strip().lower() == "conductor" else "无法启动"
+                self._channel_warning(title, msg, detail="\n".join([str(err or "").strip() for err in (prepare_errors or []) if str(err or "").strip()]))
+            return False
+        launch_errors = self._channel_launch_config_errors(channel_id)
+        if launch_errors:
+            msg = launch_errors[0]
+            self._set_status(msg)
+            if show_errors:
+                title = "Conductor 未就绪" if str(channel_id or "").strip().lower() == "conductor" else "无法启动"
+                self._channel_warning(title, msg, detail="\n".join(launch_errors))
+            return False
         if not self._qt_channels_save(silent=True, apply_running=False):
             return False
         restarting_managed = bool(self._channel_proc_alive(channel_id))
@@ -3960,16 +4331,27 @@ class ChannelRuntimeMixin:
             if show_errors:
                 self._channel_warning("配置不完整", f"{spec.get('label', channel_id)} 还缺少这些字段：\n- " + "\n- ".join(missing))
             return False
-        agent_dir_text = str(self.agent_dir or "").strip()
-        script_name = str(spec.get("script", "") or "").strip()
-        if re.match(r"^[A-Za-z]:[\\/]", agent_dir_text):
-            script_path = ntpath.join(agent_dir_text, "frontends", script_name)
-        else:
-            script_path = os.path.join(agent_dir_text, "frontends", script_name)
+        script_path = lz.channel_script_path(self.agent_dir, spec, existing_only=True)
         if not os.path.isfile(script_path):
             if show_errors:
-                self._channel_critical("脚本不存在", f"未找到渠道脚本：\n{script_path}")
+                missing_rel = lz.channel_script_rel(spec) or self._channel_script_rel(channel_id)
+                self._channel_critical("脚本不存在", f"未找到渠道脚本：\n{script_path or missing_rel}")
             return False
+        if self._channel_external_running(channel_id) and self._channel_allows_local_external_takeover(channel_id):
+            ok, killed, failed = self._takeover_local_external_channel_instances(channel_id)
+            if killed:
+                self._set_status(
+                    f"已关闭 {len(killed)} 个外部 {spec.get('label', channel_id)} 进程；接下来将由启动器重新拉起。"
+                )
+            if failed:
+                msg = (
+                    f"检测到外部 {spec.get('label', channel_id)} 进程，但自动关闭失败："
+                    + ", ".join(str(pid) for pid in failed)
+                )
+                self._set_status(msg)
+                if show_errors:
+                    self._channel_warning("无法启动", msg)
+                return False
         if self._channel_launch_mode(channel_id) == "terminal":
             try:
                 lz.launch_visible_terminal_script(
@@ -3990,6 +4372,8 @@ class ChannelRuntimeMixin:
             log_handle = open(log_path, "a", encoding="utf-8", buffering=1)
             log_handle.write(f"\n==== {time.strftime('%Y-%m-%d %H:%M:%S')} start {channel_id} ====\n")
             py_env = lz._external_subprocess_env()
+            if str(channel_id or "").strip().lower() == "conductor":
+                py_env["GA_LAUNCHER_AGENT_DIR"] = str(self.agent_dir or "").strip()
             proc = lz._popen_external_subprocess(
                 [py, "-u", script_path],
                 cwd=self.agent_dir,
@@ -4032,6 +4416,8 @@ class ChannelRuntimeMixin:
         self._reload_channels_editor_state()
         self._last_session_list_signature = None
         self._refresh_sessions()
+        if self._channel_launch_mode(channel_id) == "web":
+            self._set_status(f"{spec.get('label', channel_id)} 已启动；上游会自动尝试打开浏览器，之后也可点击“打开网页”重新进入。")
         return True
 
     def _after_channel_launch_check(self, channel_id, show_errors=True, context=None):
@@ -4084,6 +4470,13 @@ class ChannelRuntimeMixin:
             return self._stop_remote_channel_process(channel_id)
         info = self._channel_procs.get(channel_id)
         if not info:
+            if self._channel_external_running(channel_id) and self._channel_allows_local_external_takeover(channel_id):
+                ok, killed, _failed = self._takeover_local_external_channel_instances(channel_id)
+                if ok and killed:
+                    self._reload_channels_editor_state()
+                    self._last_session_list_signature = None
+                    self._refresh_sessions()
+                    return True
             self._channel_set_external_running(channel_id, False, persist=True)
             self._reload_channels_editor_state()
             return False
@@ -4248,7 +4641,7 @@ class ChannelRuntimeMixin:
                 continue
             if self._channel_proc_alive(cid):
                 continue
-            if self._channel_external_running(cid):
+            if self._channel_external_running(cid) and (not self._channel_allows_local_external_takeover(cid)):
                 continue
             pending.append(cid)
         if not pending:

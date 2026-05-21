@@ -1036,6 +1036,7 @@ class LauncherUiPerformanceGuardTests(unittest.TestCase):
         dummy = DummyUsage()
         with mock.patch("qt_chat_parts.personal_usage.QLabel", DummyLabel), \
              mock.patch("qt_chat_parts.personal_usage.capture_runtime_context", return_value={"token": 1}), \
+             mock.patch("qt_chat_parts.personal_usage.runtime_context_matches", return_value=True), \
              mock.patch("qt_chat_parts.personal_usage.lz.is_valid_agent_dir", return_value=True), \
              mock.patch("qt_chat_parts.personal_usage.threading.Thread", FakeThread):
             dummy._reload_usage_panel()
@@ -1045,6 +1046,83 @@ class LauncherUiPerformanceGuardTests(unittest.TestCase):
         self.assertEqual(len(dummy.settings_usage_list_layout.items), 1)
         self.assertEqual(len(created), 1)
         self.assertEqual(len(started), 1)
+
+    def test_usage_panel_render_failure_shows_fallback_message(self):
+        class DummyLabel:
+            def __init__(self, text=""):
+                self.text = str(text or "")
+                self.word_wrap = False
+                self.object_name = ""
+
+            def setText(self, value):
+                self.text = str(value or "")
+
+            def setWordWrap(self, enabled):
+                self.word_wrap = bool(enabled)
+
+            def setObjectName(self, name):
+                self.object_name = str(name or "")
+
+        class DummyLayout:
+            def __init__(self):
+                self.items = []
+
+            def addWidget(self, widget):
+                self.items.append(widget)
+
+        class DummyUsage(PersonalUsageMixin):
+            _reload_usage_panel = PersonalUsageMixin._reload_usage_panel
+
+            def __init__(self):
+                self.agent_dir = "C:\\demo"
+                self.settings_usage_notice = DummyLabel()
+                self.settings_usage_list_layout = DummyLayout()
+                self.calls = []
+                self.statuses = []
+                self._api_on_ui_thread = lambda fn: fn()
+
+            def _clear_layout(self, layout):
+                self.calls.append("clear")
+                layout.items.clear()
+
+            def _settings_data_target_context(self):
+                return {"label": "本机", "scope": "local", "device_id": "local", "is_remote": False}
+
+            def _collect_usage_stats(self, **_kwargs):
+                self.calls.append("collect")
+                return {"today": {}, "recent": {}, "all": {}, "activity": {}}
+
+            def _load_langfuse_status(self):
+                self.calls.append("langfuse")
+                return {}
+
+            def _render_usage_panel_content(self, stats, target, langfuse):
+                self.calls.append(("render", stats, target, langfuse))
+                raise RuntimeError("boom")
+
+            def _set_status(self, text):
+                self.statuses.append(str(text))
+
+        class FakeThread:
+            def __init__(self, target=None, name=None, daemon=None):
+                self._target = target
+
+            def start(self):
+                if callable(self._target):
+                    self._target()
+
+        dummy = DummyUsage()
+        with mock.patch("qt_chat_parts.personal_usage.QLabel", DummyLabel), \
+             mock.patch("qt_chat_parts.personal_usage.capture_runtime_context", return_value={"token": 1}), \
+             mock.patch("qt_chat_parts.personal_usage.runtime_context_matches", return_value=True), \
+             mock.patch("qt_chat_parts.personal_usage.lz.is_valid_agent_dir", return_value=True), \
+             mock.patch("qt_chat_parts.personal_usage.threading.Thread", FakeThread):
+            dummy._reload_usage_panel()
+
+        self.assertIn("使用日志渲染失败", dummy.settings_usage_notice.text)
+        self.assertEqual(len(dummy.settings_usage_list_layout.items), 1)
+        self.assertEqual(dummy.settings_usage_list_layout.items[0].text, "当前使用日志面板渲染失败，请稍后重试。若问题持续出现，请反馈这个错误。")
+        self.assertIn("使用日志渲染失败：boom", dummy.statuses[-1])
 
     def test_hidden_channels_status_refresh_skips_background_widget_updates(self):
         class DummyLabel:

@@ -10,6 +10,7 @@ from PySide6.QtCore import QEvent
 from PySide6.QtWidgets import QMessageBox
 
 from launcher_app import core as lz
+from launcher_app.theme import C, F
 from .common import (
     process_cmdline_matches_agent_script,
     remote_device_agent_dir,
@@ -19,6 +20,23 @@ from .common import (
 
 
 class SessionShellMixin:
+    def _refresh_info_popup_style(self):
+        popup = getattr(self, "_info_popup", None)
+        if popup is None:
+            return
+        radius = max(6, int(F.get("radius_sm", 8) or 8))
+        popup.setStyleSheet(
+            f"QLabel#infoPopup {{ background: {C['panel']}; color: {C['text']};"
+            f" border: 1px solid {C['border']}; padding: 8px 10px;"
+            f" border-radius: {radius}px; font-size: 12px; }}"
+        )
+        refresher = getattr(self, "_refresh_info_tooltip", None)
+        if callable(refresher):
+            try:
+                refresher()
+            except Exception:
+                pass
+
     def _apply_composer_widget_state(self, widget, enabled, *, enabled_tooltip="", disabled_tooltip=""):
         if widget is None:
             return

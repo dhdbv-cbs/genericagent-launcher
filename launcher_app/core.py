@@ -100,6 +100,7 @@ class _LazyRequestsModule:
 requests = _LazyRequestsModule()
 
 from launcher_core_parts import channels as _channels
+from launcher_core_parts import conductor_runtime as _conductor_runtime
 from launcher_core_parts import constants as _constants
 from launcher_core_parts import markup as _markup
 from launcher_core_parts import model_api as _model_api
@@ -119,6 +120,7 @@ _MODULES = (
     _model_api,
     _sessions,
     _channels,
+    _conductor_runtime,
     _upstream_dependencies,
     _markup,
 )

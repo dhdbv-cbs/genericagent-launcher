@@ -263,11 +263,13 @@ class WindowShellMixin:
         self._welcome_page = self._build_welcome_page()
         self._locate_page = self._build_locate_page()
         self._download_page = self._build_lazy_page_placeholder("下载页准备中…")
+        self._official_gui_page = self._build_official_gui_page()
         self._chat_page = self._build_ui()
         self._settings_page = self._build_lazy_page_placeholder("设置页准备中…")
         self.pages.addWidget(self._welcome_page)
         self.pages.addWidget(self._locate_page)
         self.pages.addWidget(self._download_page)
+        self.pages.addWidget(self._official_gui_page)
         self.pages.addWidget(self._chat_page)
         self.pages.addWidget(self._settings_page)
         if lz.is_valid_agent_dir(self.agent_dir):
@@ -378,33 +380,33 @@ class WindowShellMixin:
         marker = f"QPushButton[factoryKey=\"action-{style}\"] {{ }}"
         if style == "primary":
             return marker + (
-                f"QPushButton {{ background: {C['accent']}; color: white; border: 1px solid {C['accent']}; "
-                f"border-radius: {radius}px; padding: 7px 18px; font-size: 14px; font-weight: 600; }}"
+                f"QPushButton {{ background: {C['accent']}; color: white; border: 1px solid transparent; "
+                f"border-radius: {radius}px; padding: 8px 18px; font-size: 13px; font-weight: 600; }}"
                 f"QPushButton:hover {{ background: {C['accent_hover']}; border-color: {C['accent_hover']}; }}"
                 f"QPushButton:pressed {{ background: {C['accent_pressed']}; border-color: {C['accent_pressed']}; }}"
                 f"QPushButton:disabled {{ background: {C['accent_disabled']}; border-color: {C['accent_disabled']}; color: rgba(255,255,255,0.70); }}"
             )
         if style == "destructive":
             return marker + (
-                f"QPushButton {{ background: {C['danger']}; color: white; border: 1px solid {C['danger']}; "
-                f"border-radius: {radius}px; padding: 7px 18px; font-size: 14px; font-weight: 600; }}"
-                f"QPushButton:hover {{ background: {C['danger_hover']}; border-color: {C['danger_hover']}; }}"
-                f"QPushButton:pressed {{ background: {C['danger_hover']}; border-color: {C['danger_hover']}; }}"
-                f"QPushButton:disabled {{ background: {C['layer1']}; color: {C['muted']}; border-color: {C['stroke_default']}; }}"
+                f"QPushButton {{ background: transparent; color: {C['danger_text']}; border: 1px solid transparent; "
+                f"border-radius: {radius}px; padding: 7px 16px; font-size: 13px; font-weight: 600; }}"
+                f"QPushButton:hover {{ background: {C['error_soft']}; border-color: rgba(194,72,72,0.24); }}"
+                f"QPushButton:pressed {{ background: {C['error_soft']}; border-color: rgba(194,72,72,0.36); }}"
+                f"QPushButton:disabled {{ background: transparent; color: {C['muted']}; border-color: transparent; }}"
             )
         if style == "subtle":
             return marker + (
                 f"QPushButton {{ background: transparent; color: {C['text_soft']}; border: 1px solid transparent; "
-                f"border-radius: {radius}px; padding: 7px 14px; font-size: 14px; font-weight: 500; }}"
-                f"QPushButton:hover {{ background: {C['layer2']}; color: {C['text']}; }}"
-                f"QPushButton:pressed {{ background: {C['layer1']}; }}"
+                f"border-radius: {radius}px; padding: 7px 14px; font-size: 13px; font-weight: 500; }}"
+                f"QPushButton:hover {{ background: {C['layer2']}; color: {C['text']}; border-color: {C['stroke_default']}; }}"
+                f"QPushButton:pressed {{ background: {C['layer1']}; border-color: {C['stroke_default']}; }}"
                 f"QPushButton:disabled {{ color: {C['muted']}; }}"
             )
         return marker + (
-            f"QPushButton {{ background: {C['layer2']}; color: {C['text']}; border: 1px solid {C['stroke_default']}; "
-            f"border-radius: {radius}px; padding: 7px 16px; font-size: 14px; font-weight: 500; }}"
-            f"QPushButton:hover {{ background: {C['layer3']}; border-color: {C['stroke_hover']}; }}"
-            f"QPushButton:pressed {{ background: {C['layer1']}; border-color: {C['stroke_default']}; }}"
+            f"QPushButton {{ background: {C['field_bg']}; color: {C['text_soft']}; border: 1px solid {C['stroke_default']}; "
+            f"border-radius: {radius}px; padding: 7px 16px; font-size: 13px; font-weight: 500; }}"
+            f"QPushButton:hover {{ background: {C['layer2']}; border-color: {C['stroke_hover']}; color: {C['text']}; }}"
+            f"QPushButton:pressed {{ background: {C['layer1']}; border-color: {C['stroke_default']}; color: {C['text']}; }}"
             f"QPushButton:disabled {{ background: {C['layer1']}; color: {C['muted']}; border-color: {C['stroke_default']}; }}"
         )
 
@@ -416,7 +418,14 @@ class WindowShellMixin:
         if btn is None:
             return
         mode = self._normalize_appearance_mode(self.cfg.get("appearance_mode", "light"))
-        btn.setText("🌙" if mode == "dark" else "☀")
+        btn.setText("")
+        chat_common.set_button_svg_icon(
+            btn,
+            "theme_toggle_dark" if mode == "dark" else "theme_toggle_light",
+            chat_common._SVG_MOON if mode == "dark" else chat_common._SVG_SUN,
+            color="text_soft",
+            size=16,
+        )
         btn.setToolTip("切换为浅色主题" if mode == "dark" else "切换为深色主题")
 
     def _apply_theme(self, mode: str):
@@ -432,6 +441,7 @@ class WindowShellMixin:
         qt_theme.configure_visual_preferences(self.cfg)
         app = QApplication.instance()
         if app is not None:
+            qt_theme.apply_tooltip_palette(app)
             app.setStyleSheet(qt_theme.build_qss())
         try:
             chat_common.set_md_css(chat_common._build_md_css())
@@ -442,6 +452,9 @@ class WindowShellMixin:
         refresh_server_status = getattr(self, "_refresh_server_status_indicator", None)
         if callable(refresh_server_status):
             refresh_server_status()
+        refresh_info_popup_style = getattr(self, "_refresh_info_popup_style", None)
+        if callable(refresh_info_popup_style):
+            refresh_info_popup_style()
         self._restyle_factory_widgets()
         try:
             self.style().unpolish(self)
@@ -500,6 +513,7 @@ class WindowShellMixin:
                     except Exception:
                         pass
                     break
+        chat_common.refresh_svg_icons(self)
         combo_styler = getattr(self, "_api_combo_style", None)
         if callable(combo_styler):
             combo_style = combo_styler()
@@ -560,12 +574,7 @@ class WindowShellMixin:
                 msg_root.setStyleSheet(f"background: {chat_bg};")
             except Exception:
                 pass
-        wi = getattr(self, "welcome_icon", None)
-        if wi is not None:
-            try:
-                wi.setStyleSheet(f"font-size: 42px; color: {C['accent']}; background: transparent;")
-            except Exception:
-                pass
+        chat_common.refresh_message_row_avatars(self)
         for browser in self.findChildren(QTextBrowser):
             try:
                 is_bot = str(getattr(browser, "objectName", lambda: "")() or "") == "botMsgBrowser"
@@ -629,25 +638,28 @@ class WindowShellMixin:
     def _open_functions_menu(self):
         menu = QMenu(self)
         auto_on = bool(self.cfg.get("autonomous_enabled", False))
-        settings_action = menu.addAction("⚙  设置")
-        welcome_action = menu.addAction("⌂  欢迎页")
-        floating_action_text = "🗕  缩小到托盘，仅保留悬浮窗"
+        settings_action = menu.addAction(chat_common._svg_icon("menu_settings", chat_common._SVG_SETTINGS, color=C["text_soft"], size=16), "设置")
+        welcome_action = menu.addAction(chat_common._svg_icon("menu_home", chat_common._SVG_HOME, color=C["text_soft"], size=16), "欢迎页")
+        floating_action_text = "缩小到托盘，仅保留悬浮窗"
         floating_label_getter = getattr(self, "_functions_menu_floating_action_text", None)
         if callable(floating_label_getter):
             try:
                 floating_action_text = str(floating_label_getter() or floating_action_text)
             except Exception:
-                floating_action_text = "🗕  缩小到托盘，仅保留悬浮窗"
-        tray_action = menu.addAction(floating_action_text)
+                floating_action_text = "缩小到托盘，仅保留悬浮窗"
+        tray_action = menu.addAction(chat_common._svg_icon("menu_floating", chat_common._SVG_WINDOW, color=C["text_soft"], size=16), floating_action_text)
         menu.addSeparator()
-        reinject_action = menu.addAction("🛠  重新注入工具示范")
-        pet_action = menu.addAction("🐱  启动桌面宠物")
+        reinject_action = menu.addAction(chat_common._svg_icon("menu_tools", chat_common._SVG_WRENCH, color=C["text_soft"], size=16), "重新注入工具示范")
+        pet_action = menu.addAction(chat_common._svg_icon("menu_pet", chat_common._SVG_SPARKLE, color=C["text_soft"], size=16), "启动桌面宠物")
         menu.addSeparator()
-        trigger_action = menu.addAction("🤖  立即触发自主任务")
-        auto_action = menu.addAction("⏸  禁止空闲自主行动" if auto_on else "▶  允许空闲自主行动")
+        trigger_action = menu.addAction(chat_common._svg_icon("menu_trigger", chat_common._SVG_BOT, color=C["text_soft"], size=16), "立即触发自主任务")
+        auto_action = menu.addAction(
+            chat_common._svg_icon("menu_auto_off" if auto_on else "menu_auto_on", chat_common._SVG_PAUSE if auto_on else chat_common._SVG_PLAY, color=C["text_soft"], size=16),
+            "禁止空闲自主行动" if auto_on else "允许空闲自主行动",
+        )
         menu.addSeparator()
-        refresh_action = menu.addAction("↻  刷新会话列表")
-        restart_action = menu.addAction("♻  重启内核")
+        refresh_action = menu.addAction(chat_common._svg_icon("menu_refresh", chat_common._SVG_REFRESH, color=C["text_soft"], size=16), "刷新会话列表")
+        restart_action = menu.addAction(chat_common._svg_icon("menu_restart", chat_common._SVG_REFRESH, color=C["text_soft"], size=16), "重启内核")
         chosen = menu.exec(self.gear_btn.mapToGlobal(self.gear_btn.rect().bottomRight()))
         if chosen is settings_action:
             self._show_settings()
@@ -741,31 +753,37 @@ class WindowShellMixin:
         title_box.addWidget(title)
         title_box.addWidget(subtitle)
         head.addLayout(title_box, 1)
-        close_btn = QPushButton("×")
+        close_btn = QPushButton()
         close_btn.setCursor(Qt.PointingHandCursor)
         close_btn.setFixedSize(34, 34)
         close_btn.setStyleSheet(self._sidebar_button_style())
         close_btn.clicked.connect(dlg.reject)
+        chat_common.set_button_svg_icon(close_btn, "search_close", chat_common._SVG_CLOSE, color="text_soft", size=14)
         head.addWidget(close_btn, 0, Qt.AlignTop)
         layout.addLayout(head)
 
         search_bar = QFrame()
-        search_bar.setStyleSheet(f"QFrame {{ background: {C['field_alt']}; border-radius: 12px; }}")
+        search_bar.setStyleSheet(
+            f"QFrame {{ background: {C['field_alt']}; border: 1px solid {C['stroke_default']}; border-radius: 14px; }}"
+        )
         search_row = QHBoxLayout(search_bar)
         search_row.setContentsMargins(12, 8, 10, 8)
         search_row.setSpacing(6)
-        search_icon = QLabel("🔍")
-        search_icon.setObjectName("mutedText")
+        search_icon = QLabel()
+        search_icon.setFixedSize(18, 18)
+        search_icon.setAlignment(Qt.AlignCenter)
+        chat_common.set_label_svg_icon(search_icon, "search_bar_icon", chat_common._SVG_SEARCH, color="muted", size=14)
         search_row.addWidget(search_icon, 0)
         entry = QLineEdit()
         entry.setPlaceholderText("输入关键词开始检索")
         entry.setText(self._session_filter_keyword)
         entry.setStyleSheet("QLineEdit { background: transparent; border: none; padding: 6px 4px; }")
         search_row.addWidget(entry, 1)
-        clear_btn = QPushButton("×")
+        clear_btn = QPushButton()
         clear_btn.setCursor(Qt.PointingHandCursor)
         clear_btn.setFixedSize(30, 30)
         clear_btn.setStyleSheet(self._sidebar_button_style())
+        chat_common.set_button_svg_icon(clear_btn, "search_clear", chat_common._SVG_CLOSE, color="muted", size=12)
         search_row.addWidget(clear_btn, 0)
         layout.addWidget(search_bar)
 
@@ -774,23 +792,25 @@ class WindowShellMixin:
             f"""
             QListWidget {{
                 background: {C['field_bg']};
-                border: none;
-                border-radius: 12px;
+                border: 1px solid {C['stroke_default']};
+                border-radius: 14px;
                 padding: 8px;
                 outline: none;
             }}
             QListWidget::item {{
                 background: {C['card']};
-                border: 1px solid transparent;
+                border: 1px solid {C['stroke_default']};
                 border-radius: 10px;
                 padding: 12px 14px;
                 margin: 4px 0;
             }}
             QListWidget::item:hover {{
                 background: {C['card_hover']};
+                border-color: {C['stroke_hover']};
             }}
             QListWidget::item:selected {{
-                background: {C['active']};
+                background: {C['accent_soft_bg']};
+                border-color: {C['stroke_hover']};
             }}
             """
             + _SCROLLBAR_STYLE
@@ -860,7 +880,7 @@ class WindowShellMixin:
                                     {
                                         "sid": meta.get("id"),
                                         "bubble_index": idx,
-                                        "role": "🙂" if bubble.get("role") == "user" else "🤖",
+                                        "role": "用户" if bubble.get("role") == "user" else "助手",
                                         "title": str(meta.get("title") or "(未命名)")[:38],
                                         "when": time.strftime("%m-%d %H:%M", time.localtime(meta.get("updated_at", 0) or 0)),
                                         "source": _session_source_label(data),
@@ -879,7 +899,7 @@ class WindowShellMixin:
                             return
                         for row in hits:
                             item_text = (
-                                f"{row['role']}  {row['title']} · 第 {int(row['bubble_index']) + 1} 条消息\n"
+                                f"{row['role']} · {row['title']} · 第 {int(row['bubble_index']) + 1} 条消息\n"
                                 f"{row['source']} · {row['when']}\n{row['body']}"
                             )
                             item = QListWidgetItem(item_text)

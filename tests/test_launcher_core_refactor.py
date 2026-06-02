@@ -1185,6 +1185,79 @@ class LauncherCoreFacadeTests(unittest.TestCase):
         self.assertEqual(dummy.notifications, [])
         self.assertFalse(dummy._abort_requested)
 
+    def test_handle_event_aborted_finishes_turn_and_restores_controls(self):
+        class Button:
+            def __init__(self):
+                self.enabled = None
+
+            def setEnabled(self, value):
+                self.enabled = bool(value)
+
+        class Row:
+            def __init__(self):
+                self.updates = []
+
+            def update_content(self, text, *, finished):
+                self.updates.append((str(text), bool(finished)))
+
+        class DummyBridge(BridgeRuntimeMixin):
+            _handle_event = BridgeRuntimeMixin._handle_event
+            _stream_done = BridgeRuntimeMixin._stream_done
+            _format_interrupted_text = BridgeRuntimeMixin._format_interrupted_text
+
+            def __init__(self):
+                self._abort_requested = True
+                self._suppress_next_done_after_abort = False
+                self._stream_row = Row()
+                self._busy = True
+                self._current_stream_text = "partial output"
+                self._pending_stream_text = None
+                self.send_btn = Button()
+                self.stop_btn = Button()
+                self.statuses = []
+                self.current_session = None
+                self.cfg = {}
+
+            def _handle_download_event(self, _ev):
+                return False
+
+            def _set_status(self, text):
+                self.statuses.append(str(text))
+
+            def _refresh_composer_enabled(self):
+                pass
+
+            def _clear_active_turn_attachments(self):
+                pass
+
+            def _refresh_token_label(self):
+                pass
+
+            def _scroll_to_bottom(self):
+                pass
+
+            def _notify_reply_done(self, _final_text):
+                raise AssertionError("abort must not trigger reply-done notification")
+
+        dummy = DummyBridge()
+        row = dummy._stream_row
+
+        dummy._handle_event({"event": "aborted"})
+
+        self.assertFalse(dummy._busy)
+        self.assertFalse(dummy._abort_requested)
+        self.assertTrue(dummy.send_btn.enabled)
+        self.assertFalse(dummy.stop_btn.enabled)
+        self.assertEqual(dummy.statuses[-1], "已中断。")
+        self.assertTrue(dummy._suppress_next_done_after_abort)
+        self.assertEqual(len(row.updates), 1)
+        self.assertIn("已按用户请求中断", row.updates[0][0])
+
+        dummy._handle_event({"event": "done", "text": "late backend text"})
+
+        self.assertEqual(len(row.updates), 1)
+        self.assertFalse(dummy._suppress_next_done_after_abort)
+
     def test_stream_done_clears_active_turn_attachments(self):
         class Button:
             def setEnabled(self, _value):
@@ -5855,9 +5928,9 @@ class LauncherCoreFacadeTests(unittest.TestCase):
         terminal_spec = {
             "id": "tui",
             "label": "终端 TUI",
-            "script": "tuiapp_v2.py",
-            "script_candidates": ["tuiapp_v2.py", "tuiapp.py"],
-            "pip": "textual",
+            "script": "tui_v3.py",
+            "script_candidates": ["tui_v3.py", "tuiapp_v2.py", "tuiapp.py"],
+            "pip": "prompt_toolkit rich Pillow textual",
             "fields": [],
             "launch_mode": "terminal",
         }

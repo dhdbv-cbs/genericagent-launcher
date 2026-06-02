@@ -6,7 +6,6 @@ from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
-    QComboBox,
     QDialog,
     QHBoxLayout,
     QLabel,
@@ -22,7 +21,7 @@ from shiboken6 import isValid
 from launcher_app import core as lz
 from launcher_app.theme import C, F
 
-from .common import capture_runtime_context, runtime_context_matches
+from .common import NoWheelComboBox, capture_runtime_context, runtime_context_matches
 
 _API_ADVANCED_FIELD_META = {
     "fake_cc_system_prompt": {
@@ -843,13 +842,13 @@ class ApiEditorMixin:
             name_edit.setText(str(state.get("name") or ""))
             row1.addWidget(name_edit, 1)
             row1.addWidget(QLabel("协议"), 0)
-            format_box = QComboBox()
+            format_box = NoWheelComboBox()
             format_box.addItems(self._api_format_options())
             format_box.setCurrentText(lz.SIMPLE_FORMAT_LABEL.get(state.get("format"), lz.SIMPLE_FORMAT_LABEL["oai_chat"]))
             format_box.setStyleSheet(self._api_combo_style())
             row1.addWidget(format_box, 1)
             row1.addWidget(QLabel("模板"), 0)
-            tpl_box = QComboBox()
+            tpl_box = NoWheelComboBox()
             tpl_choices = self._api_template_choices(state.get("format"))
             tpl_map = {k: lbl for k, lbl in tpl_choices}
             tpl_box.addItems([lbl for _, lbl in tpl_choices])
@@ -887,7 +886,7 @@ class ApiEditorMixin:
                 row3 = QHBoxLayout()
                 row3.setSpacing(10)
                 row3.addWidget(QLabel("模型"), 0)
-                model_box = QComboBox()
+                model_box = NoWheelComboBox()
                 model_box.setEditable(True)
                 model_box.setStyleSheet(self._api_combo_style())
                 model_choices = list(state.get("model_choices") or [])
@@ -1039,7 +1038,7 @@ class ApiEditorMixin:
                         widget.setChecked(bool(current_value))
                         widget.toggled.connect(lambda checked, st=s, k=key: self._api_set_advanced_value(st, k, checked))
                     elif kind == "choice":
-                        widget = QComboBox()
+                        widget = NoWheelComboBox()
                         widget.setStyleSheet(self._api_combo_style())
                         widget.addItem("跟随模板/默认", "")
                         for choice in meta.get("choices", []):

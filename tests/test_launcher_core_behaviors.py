@@ -29,6 +29,7 @@ from launcher_core_parts import upstream_dependencies
 from qt_chat_parts import personal_usage as personal_usage_mod
 from qt_chat_parts.api_editor import ApiEditorMixin
 from qt_chat_parts import common
+from qt_chat_parts import settings_panel
 
 
 def _workflow_named_steps(path: str) -> list[dict[str, object]]:
@@ -720,6 +721,53 @@ class LauncherCoreBehaviorTests(unittest.TestCase):
         self.assertIn("chat_common.refresh_theme_aware_popup_surfaces(self, combo_style=combo_style)", shell_src)
         self.assertIn("chat_common.refresh_theme_aware_popup_surfaces(self, combo_style=combo_style)", window_src)
         self.assertIn("chat_common.apply_menu_popup_theme(menu)", settings_src)
+
+    def test_config_value_controls_ignore_incidental_wheel_events(self):
+        app = QApplication.instance() or QApplication([])
+        self.addCleanup(lambda: app.processEvents())
+
+        class Wheel:
+            def __init__(self):
+                self.ignored = False
+
+            def ignore(self):
+                self.ignored = True
+
+        combo = common.NoWheelComboBox()
+        combo_wheel = Wheel()
+        combo.wheelEvent(combo_wheel)
+        self.assertTrue(combo_wheel.ignored)
+
+        spin = common.NoWheelSpinBox()
+        spin_wheel = Wheel()
+        spin.wheelEvent(spin_wheel)
+        self.assertTrue(spin_wheel.ignored)
+
+        stable_combo = settings_panel._StablePopupComboBox()
+        stable_wheel = Wheel()
+        stable_combo.wheelEvent(stable_wheel)
+        self.assertTrue(stable_wheel.ignored)
+
+        root = os.path.dirname(os.path.dirname(__file__))
+        files = {}
+        for rel in (
+            "qt_chat_parts/api_editor.py",
+            "qt_chat_parts/schedule_runtime.py",
+            "qt_chat_parts/personal_usage.py",
+            "qt_chat_parts/setup_pages.py",
+            "qt_chat_parts/settings_panel.py",
+        ):
+            with open(os.path.join(root, rel), "r", encoding="utf-8") as f:
+                files[rel] = f.read()
+        self.assertIn("format_box = NoWheelComboBox()", files["qt_chat_parts/api_editor.py"])
+        self.assertIn("tpl_box = NoWheelComboBox()", files["qt_chat_parts/api_editor.py"])
+        self.assertIn("model_box = NoWheelComboBox()", files["qt_chat_parts/api_editor.py"])
+        self.assertIn("repeat_box = NoWheelComboBox()", files["qt_chat_parts/schedule_runtime.py"])
+        self.assertIn("delay_spin = NoWheelSpinBox()", files["qt_chat_parts/schedule_runtime.py"])
+        self.assertIn("spin = NoWheelSpinBox()", files["qt_chat_parts/personal_usage.py"])
+        self.assertIn("self.locate_dependency_installer_combo = NoWheelComboBox()", files["qt_chat_parts/setup_pages.py"])
+        self.assertIn("self.settings_vps_port_spin = chat_common.NoWheelSpinBox()", files["qt_chat_parts/settings_panel.py"])
+        self.assertIn("self.settings_lan_port_spin = chat_common.NoWheelSpinBox()", files["qt_chat_parts/settings_panel.py"])
 
     def test_runtime_theme_switch_refreshes_transient_popup_surfaces(self):
         app = QApplication.instance() or QApplication([])
@@ -2298,6 +2346,9 @@ tg_bot_token = '123'
         self.assertEqual(lz.TEMPLATE_INDEX["crs-claude"]["defaults"]["model"], "claude-opus-4-7[1m]")
         self.assertEqual(lz.TEMPLATE_INDEX["crs-gemini"]["defaults"]["model"], "claude-opus-4-7-thinking")
         self.assertEqual(lz.TEMPLATE_INDEX["openrouter"]["defaults"]["model"], "anthropic/claude-opus-4-7")
+        self.assertEqual(lz.TEMPLATE_INDEX["commonstack"]["defaults"]["apibase"], "https://api.commonstack.ai/v1")
+        self.assertEqual(lz.TEMPLATE_INDEX["commonstack"]["defaults"]["api_mode"], "chat_completions")
+        self.assertIn("commonstack", lz.SIMPLE_FORMAT_RULES["oai_chat"]["templates"])
 
     def test_custom_importlib_resources_hook_guards_missing_trees_module(self):
         root = os.path.dirname(os.path.dirname(__file__))
@@ -3217,7 +3268,7 @@ tg_bot_token = '123'
                     "  'bottle>=0.12',\n"
                     "]\n"
                     "[project.optional-dependencies]\n"
-                    "ui = ['streamlit>=1.28', 'pywebview>=4.0', 'textual>=0.70']\n"
+                    "ui = ['streamlit>=1.28', 'pywebview>=4.0', 'textual>=0.70', 'prompt_toolkit>=3.0,<4', 'rich>=13.0', 'pillow>=9.0']\n"
                     "all-frontends = ['pycryptodome>=3.19', 'qrcode>=7.4']\n"
                 )
             manifest = upstream_dependencies.resolve_upstream_dependency_manifest(td)
@@ -3227,6 +3278,9 @@ tg_bot_token = '123'
         self.assertIn("beautifulsoup4>=4.12", manifest["sync_specs"])
         self.assertIn("charset-normalizer>=3.3", manifest["sync_specs"])
         self.assertIn("streamlit>=1.28", manifest["remote_fallback_specs"])
+        self.assertIn("prompt_toolkit>=3.0,<4", manifest["remote_fallback_specs"])
+        self.assertIn("rich>=13.0", manifest["remote_fallback_specs"])
+        self.assertIn("pillow>=9.0", manifest["remote_fallback_specs"])
         self.assertIn("qrcode>=7.4", manifest["remote_fallback_specs"])
         groups = {str(group.get("id") or ""): group for group in manifest["frontend_groups"]}
         launch_items = [str(item.get("package") or "") for item in groups["launch_web_ui"]["items"]]
@@ -3237,6 +3291,9 @@ tg_bot_token = '123'
         self.assertTrue(any(item.startswith("uvicorn") for item in conductor_items))
         self.assertIn("pydantic", conductor_items)
         self.assertTrue(any(str(item.get("source") or "") == "frontends/conductor.py" for item in manifest["dependency_sources"]))
+        self.assertTrue(any(str(item.get("source") or "") == "frontends/tui_v3.py" for item in manifest["dependency_sources"]))
+        self.assertTrue(any(str(item.get("source") or "") == "frontends/slash_cmds.py" for item in manifest["dependency_sources"]))
+        self.assertTrue(any(str(item.get("source") or "") == "ga_cli/cli.py" for item in manifest["dependency_sources"]))
 
     def test_prepare_python_runtime_candidate_rejects_version_outside_upstream_requires_python(self):
         with tempfile.TemporaryDirectory() as td:
@@ -3288,9 +3345,9 @@ tg_bot_token = '123'
 
     def test_channel_registry_includes_terminal_tui_channel(self):
         spec = lz.COMM_CHANNEL_INDEX.get("tui") or {}
-        self.assertEqual(spec.get("script"), "tuiapp_v2.py")
-        self.assertEqual(list(spec.get("script_candidates") or []), ["tuiapp_v2.py", "tuiapp.py"])
-        self.assertEqual(spec.get("pip"), "textual")
+        self.assertEqual(spec.get("script"), "tui_v3.py")
+        self.assertEqual(list(spec.get("script_candidates") or []), ["tui_v3.py", "tuiapp_v2.py", "tuiapp.py"])
+        self.assertEqual(spec.get("pip"), "prompt_toolkit rich Pillow textual")
         self.assertEqual(spec.get("launch_mode"), "terminal")
         self.assertEqual(spec.get("fields"), [])
         self.assertEqual(spec.get("required"), [])
@@ -3314,13 +3371,13 @@ tg_bot_token = '123'
             with open(legacy, "w", encoding="utf-8") as f:
                 f.write("print('legacy')\n")
 
-            self.assertEqual(lz.resolve_channel_script("tui"), "tuiapp_v2.py")
+            self.assertEqual(lz.resolve_channel_script("tui"), "tui_v3.py")
             self.assertEqual(lz.resolve_channel_script("tui", agent_dir=td, existing_only=True), "tuiapp.py")
-            self.assertEqual(lz.channel_script_rel("tui"), "frontends/tuiapp_v2.py")
+            self.assertEqual(lz.channel_script_rel("tui"), "frontends/tui_v3.py")
             self.assertEqual(lz.channel_script_rel("tui", agent_dir=td, existing_only=True), "frontends/tuiapp.py")
             self.assertEqual(
                 lz.channel_script_rel_candidates("tui"),
-                ["frontends/tuiapp_v2.py", "frontends/tuiapp.py"],
+                ["frontends/tui_v3.py", "frontends/tuiapp_v2.py", "frontends/tuiapp.py"],
             )
             self.assertTrue(str(lz.channel_script_path(td, "tui", existing_only=True)).endswith(os.path.join("frontends", "tuiapp.py")))
 
@@ -3355,7 +3412,9 @@ tg_bot_token = '123'
         with open(py_env_path, "r", encoding="utf-8") as f:
             py_env_src = f.read()
         self.assertNotIn("terminal_frontend", dep_src)
+        self.assertIn("frontends/tui_v3.py", dep_src)
         self.assertIn("frontends/tuiapp_v2.py", dep_src)
+        self.assertIn("frontends/slash_cmds.py", dep_src)
         self.assertIn("desktop_bridge.py", dep_src)
         self.assertIn("genericagent_acp_bridge.py", py_env_src)
         self.assertIn("tui_v3.py", py_env_src)
@@ -3391,6 +3450,9 @@ tg_bot_token = '123'
         self.assertIn("genericagent_acp_bridge.py", frontend_names)
         optional_section = next((section for section in report.get("sections") or [] if section.get("title") == "渠道专属可选"), {})
         items = list(optional_section.get("items") or [])
+        self.assertTrue(any(str(item.get("name") or "") == "终端 TUI 依赖 prompt_toolkit" for item in items))
+        self.assertTrue(any(str(item.get("name") or "") == "终端 TUI 依赖 rich" for item in items))
+        self.assertTrue(any(str(item.get("name") or "") == "终端 TUI 依赖 Pillow" for item in items))
         self.assertTrue(any(str(item.get("name") or "") == "终端 TUI 依赖 textual" for item in items))
 
     def test_private_python_installer_has_source_precheck_logs(self):

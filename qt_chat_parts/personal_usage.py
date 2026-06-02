@@ -17,12 +17,12 @@ from datetime import datetime
 
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, QUrl
 from PySide6.QtGui import QColor, QDesktopServices, QFontMetrics, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap
-from PySide6.QtWidgets import QApplication, QCheckBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QSizePolicy, QSpinBox, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QCheckBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QSizePolicy, QVBoxLayout, QWidget
 
 from launcher_app import core as lz
 from launcher_app.theme import C, F
 
-from .common import capture_runtime_context, runtime_context_matches
+from .common import NoWheelSpinBox, capture_runtime_context, runtime_context_matches
 
 
 class _ResponsivePixmapLabel(QLabel):
@@ -2906,7 +2906,7 @@ class PersonalUsageMixin:
             title.setFixedWidth(110)
             title.setObjectName("bodyText")
             row.addWidget(title, 0)
-            spin = QSpinBox()
+            spin = NoWheelSpinBox()
             spin.setRange(0, 9999)
             spin.setValue(self._archive_limit_for_channel(cid, target["scope"], target["device_id"]))
             spin.setSingleStep(10)

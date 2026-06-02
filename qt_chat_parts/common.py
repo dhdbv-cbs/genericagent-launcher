@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QPushButton,
     QSizePolicy,
+    QSpinBox,
     QTextBrowser,
     QTextEdit,
     QVBoxLayout,
@@ -87,6 +88,25 @@ _SSH_DISCONNECT_HINTS = (
     "eof during negotiation",
     "channel closed",
 )
+
+
+class NoWheelComboBox(QComboBox):
+    def wheelEvent(self, event):
+        try:
+            view = self.view()
+            if view is not None and view.isVisible():
+                super().wheelEvent(event)
+                return
+        except Exception:
+            pass
+        if event is not None:
+            event.ignore()
+
+
+class NoWheelSpinBox(QSpinBox):
+    def wheelEvent(self, event):
+        if event is not None:
+            event.ignore()
 
 
 def remote_agent_dir_default(username: str) -> str:

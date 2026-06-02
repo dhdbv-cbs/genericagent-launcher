@@ -35,7 +35,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSlider,
-    QSpinBox,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -348,6 +347,17 @@ class _StablePopupComboBox(QComboBox):
 
     def _repair_popup_geometry(self):
         return
+
+    def wheelEvent(self, event):
+        try:
+            view = self.view()
+            if view is not None and view.isVisible():
+                super().wheelEvent(event)
+                return
+        except Exception:
+            pass
+        if event is not None:
+            event.ignore()
 
 
 class SettingsPanelMixin:
@@ -923,7 +933,7 @@ class SettingsPanelMixin:
         port_label.setMinimumWidth(92)
         port_label.setObjectName("bodyText")
         port_row.addWidget(port_label, 0)
-        self.settings_vps_port_spin = QSpinBox()
+        self.settings_vps_port_spin = chat_common.NoWheelSpinBox()
         self.settings_vps_port_spin.setRange(1, 65535)
         self.settings_vps_port_spin.setValue(22)
         self.settings_vps_port_spin.setFixedWidth(140)
@@ -1443,7 +1453,7 @@ class SettingsPanelMixin:
         lan_port_label = QLabel("端口")
         lan_port_label.setObjectName("softTextSmall")
         lan_row.addWidget(lan_port_label, 0)
-        self.settings_lan_port_spin = QSpinBox()
+        self.settings_lan_port_spin = chat_common.NoWheelSpinBox()
         self.settings_lan_port_spin.setRange(1024, 65535)
         self.settings_lan_port_spin.setValue(8501)
         self.settings_lan_port_spin.setStyleSheet(

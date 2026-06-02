@@ -1929,6 +1929,7 @@ class BridgeRuntimeMixin:
         self._arm_current_turn_auto_jump(user_row)
         self._busy = True
         self._abort_requested = False
+        self._suppress_next_done_after_abort = False
         self._current_stream_text = ""
         self._pending_stream_text = None
         self.send_btn.setEnabled(False)
@@ -2091,6 +2092,7 @@ class BridgeRuntimeMixin:
         self._arm_current_turn_auto_jump(user_row)
         self._busy = True
         self._abort_requested = False
+        self._suppress_next_done_after_abort = False
         self._current_stream_text = ""
         self._pending_stream_text = None
         self.send_btn.setEnabled(False)
@@ -2201,6 +2203,7 @@ class BridgeRuntimeMixin:
         was_aborted = bool(self._abort_requested)
         if self._abort_requested:
             final_text = self._format_interrupted_text(final_text)
+        self._suppress_next_done_after_abort = False
         finished_row = self._stream_row
         if finished_row is not None:
             finished_row.update_content(final_text or "…", finished=True)
@@ -2304,6 +2307,8 @@ class BridgeRuntimeMixin:
         try:
             self._send_cmd({"cmd": "abort"})
         except Exception as e:
+            self._stream_done("", provider_usage=None)
+            self._set_status("中断失败，已恢复输入。")
             QMessageBox.warning(self, "中断失败", str(e))
 
     def _drain_events(self):
@@ -2481,11 +2486,21 @@ class BridgeRuntimeMixin:
             self._stream_update(ev.get("text", ""))
             return
         if et == "done":
+            if bool(getattr(self, "_suppress_next_done_after_abort", False)) and not bool(getattr(self, "_busy", False)):
+                self._suppress_next_done_after_abort = False
+                return
+            if (not bool(getattr(self, "_busy", False))) and getattr(self, "_stream_row", None) is None:
+                return
             provider_usage = ev.get("usage") if isinstance(ev.get("usage"), dict) else None
             self._stream_done(ev.get("text", ""), provider_usage=provider_usage)
             return
         if et == "aborted":
-            self._set_status("已发送中断请求。")
+            if bool(getattr(self, "_busy", False)) and bool(getattr(self, "_abort_requested", False)):
+                self._stream_done("", provider_usage=None)
+                self._suppress_next_done_after_abort = True
+                self._set_status("已中断。")
+            else:
+                self._set_status("已发送中断请求。")
             return
         if et == "state":
             self._apply_state_to_session(

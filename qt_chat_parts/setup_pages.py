@@ -6,7 +6,6 @@ import threading
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QCheckBox,
-    QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -22,7 +21,7 @@ from PySide6.QtWidgets import (
 from launcher_app import core as lz
 
 from . import common as chat_common
-from .common import OptionCard, _probe_download_requirements
+from .common import NoWheelComboBox, OptionCard, _probe_download_requirements
 
 _SCROLLBAR_STYLE = """
 QScrollBar:vertical { width: 10px; background: transparent; border: none; margin: 2px; }
@@ -440,7 +439,7 @@ class SetupPagesMixin:
         card_box.addWidget(installer_label)
         installer_row = QHBoxLayout()
         installer_row.setSpacing(8)
-        self.locate_dependency_installer_combo = QComboBox()
+        self.locate_dependency_installer_combo = NoWheelComboBox()
         self.locate_dependency_installer_combo.addItem("自动（优先 uv，失败回退 pip）", "auto")
         self.locate_dependency_installer_combo.addItem("强制 uv", "uv")
         self.locate_dependency_installer_combo.addItem("强制 pip", "pip")

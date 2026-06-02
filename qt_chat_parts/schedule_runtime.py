@@ -10,7 +10,6 @@ import time
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QCheckBox,
-    QComboBox,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -18,7 +17,6 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
-    QSpinBox,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -27,7 +25,7 @@ from PySide6.QtWidgets import (
 from launcher_app import core as lz
 from launcher_app.theme import C, F
 
-from .common import capture_runtime_context, runtime_context_matches
+from .common import NoWheelComboBox, NoWheelSpinBox, capture_runtime_context, runtime_context_matches
 
 
 class ScheduleRuntimeMixin:
@@ -1634,7 +1632,7 @@ class ScheduleRuntimeMixin:
             schedule_edit.setText(str(state.get("schedule") or "08:00"))
             row2.addWidget(schedule_edit, 1)
             row2.addWidget(QLabel("重复"), 0)
-            repeat_box = QComboBox()
+            repeat_box = NoWheelComboBox()
             repeat_box.setEditable(True)
             repeat_box.setStyleSheet(self._schedule_combo_style())
             repeat_box.addItem("", "")
@@ -1689,7 +1687,7 @@ class ScheduleRuntimeMixin:
             adv_row = QHBoxLayout()
             adv_row.setSpacing(10)
             adv_row.addWidget(QLabel("max_delay_hours"), 0)
-            delay_spin = QSpinBox()
+            delay_spin = NoWheelSpinBox()
             delay_spin.setRange(0, 168)
             delay_spin.setValue(int(state.get("max_delay_hours") or 0))
             delay_spin.setStyleSheet(self._schedule_spin_style())

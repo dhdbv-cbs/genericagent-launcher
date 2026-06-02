@@ -35,7 +35,7 @@ LAUNCHER_BOOTSTRAP_DEPENDENCIES = [
 UPSTREAM_DEPENDENCY_SOURCES = [
     {
         "source": "README.md",
-        "evidence": "Quick Start / Usage -> uv pip install -e \".[ui]\"；desktop 入口 python launch.pyw；Terminal UI 入口 python frontends/tuiapp_v2.py",
+        "evidence": "Quick Start / Usage -> uv pip install -e \".[ui]\"；desktop 入口 python launch.pyw；Terminal UI 推荐入口 python frontends/tui_v3.py",
     },
     {
         "source": "docs/installation.md",
@@ -43,11 +43,11 @@ UPSTREAM_DEPENDENCY_SOURCES = [
     },
     {
         "source": "docs/installation_zh.md",
-        "evidence": "中文安装说明与 README 保持一致：launch.pyw / tuiapp_v2.py / assets/configure_mykey.py",
+        "evidence": "中文安装说明与 README 保持一致：launch.pyw / tui_v3.py / assets/configure_mykey.py",
     },
     {
         "source": "pyproject.toml",
-        "evidence": "核心依赖含 aiohttp；ui extra 含 streamlit / pywebview / textual",
+        "evidence": "核心依赖含 aiohttp；ui extra 含 streamlit / pywebview / textual / prompt_toolkit / rich / pillow",
     },
     {
         "source": "frontends/dcapp.py",
@@ -62,8 +62,16 @@ UPSTREAM_DEPENDENCY_SOURCES = [
         "evidence": "依赖: pip install PySide6；可选: pip install markdown",
     },
     {
+        "source": "frontends/tui_v3.py",
+        "evidence": "最新 Terminal UI；README 推荐入口；依赖 rich / prompt_toolkit，图片粘贴需要 pillow",
+    },
+    {
         "source": "frontends/tuiapp_v2.py",
-        "evidence": "增强版 Terminal UI；自动补装 rich / textual",
+        "evidence": "Textual Terminal UI v2；作为 tui_v3 不存在时的兼容回退",
+    },
+    {
+        "source": "frontends/slash_cmds.py",
+        "evidence": "TUI v2/v3 共用 slash 命令包：/update、/scheduler、/goal、/hive、/morphling、/conductor 等",
     },
     {
         "source": "frontends/conductor.py",
@@ -71,7 +79,11 @@ UPSTREAM_DEPENDENCY_SOURCES = [
     },
     {
         "source": "assets/configure_mykey.py",
-        "evidence": "交互式 mykey 配置向导入口",
+        "evidence": "交互式 mykey 配置向导入口；新增 CommonStack 统一网关模板",
+    },
+    {
+        "source": "ga_cli/cli.py",
+        "evidence": "上游全局 ga 命令分发入口；当前仍提供 tui/tui2，未提供 tui3 子命令",
     },
 ]
 
@@ -190,6 +202,10 @@ _SYNC_FALLBACK_DEPENDENCIES = [
 _REMOTE_FALLBACK_EXTRA_DEPENDENCIES = [
     "streamlit>=1.37",
     "markdown>=3.6",
+    "textual>=0.70",
+    "prompt_toolkit>=3.0,<4",
+    "rich>=13.0",
+    "pillow>=9.0",
     "qrcode>=8.0",
     "pycryptodome>=3.20",
 ]
@@ -198,11 +214,12 @@ _PYPROJECT_FRONTEND_GROUP_SELECTIONS = {
     "streamlit_frontends": ("ui", {"streamlit"}),
 }
 _PYPROJECT_REMOTE_OPTIONAL_TARGETS = {
-    "ui": {"streamlit"},
+    "ui": {"streamlit", "textual", "prompt_toolkit", "rich", "pillow"},
     "all-frontends": {"qrcode", "pycryptodome"},
 }
 _PYPROJECT_IMPORT_NAME_MAP = {
     "pywebview": "webview",
+    "pillow": "PIL",
 }
 
 

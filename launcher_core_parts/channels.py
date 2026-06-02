@@ -41,7 +41,7 @@ EXTRA_KEYS = {
 }
 
 
-COMM_CHANNEL_SPECS = [
+COMM_CHANNEL_SPECS: list[dict[str, object]] = [
     {
         "id": "wechat",
         "label": "微信",
@@ -180,7 +180,9 @@ COMM_CHANNEL_SPECS = [
     },
 ]
 
-COMM_CHANNEL_INDEX = {spec["id"]: spec for spec in COMM_CHANNEL_SPECS}
+COMM_CHANNEL_INDEX: dict[str, dict[str, object]] = {
+    str(spec.get("id") or ""): spec for spec in COMM_CHANNEL_SPECS
+}
 
 
 def _channel_spec_row(channel_or_spec):
@@ -609,7 +611,7 @@ def sync_config_var_kind(kind, current_var, existing_vars):
     return auto_config_var(kind, existing)
 
 
-CHANNEL_TEMPLATES = [
+CHANNEL_TEMPLATES: list[tuple[str, str, str, dict[str, object]]] = [
     ("anthropic", "Anthropic 官方", "native_claude", {"apibase": "https://api.anthropic.com", "model": "claude-opus-4-7[1m]"}),
     ("cc-switch", "CC Switch / 反代中转", "native_claude", {"apibase": "", "model": "claude-opus-4-7", "fake_cc_system_prompt": True}),
     ("crs-claude", "CRS 反代 Claude Max", "native_claude", {"apibase": "", "model": "claude-opus-4-7[1m]", "fake_cc_system_prompt": True, "max_tokens": 32768, "read_timeout": 180}),

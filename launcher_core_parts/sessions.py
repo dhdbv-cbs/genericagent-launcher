@@ -10,7 +10,7 @@ from .channels import COMM_CHANNEL_INDEX
 from .constants import TOKEN_ESTIMATE_DIVISOR, TOKEN_USAGE_VERSION
 
 
-_SESSION_INDEX_CACHE = {}
+_SESSION_INDEX_CACHE: dict[str, dict[str, object]] = {}
 
 
 def sessions_dir(agent_dir):
@@ -281,6 +281,66 @@ def _session_meta_from_payload(payload, *, sid="", path=""):
         "session_kind": str(data.get("session_kind") or "").strip().lower(),
         "path": str(path or "").strip(),
     }
+
+
+def _canonical_recency_value(value):
+    if isinstance(value, dict):
+        return {
+            str(key): _canonical_recency_value(val)
+            for key, val in sorted(value.items(), key=lambda item: str(item[0]))
+        }
+    if isinstance(value, (list, tuple)):
+        return [_canonical_recency_value(item) for item in value]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
+def _session_history_value(data, key):
+    value = data.get(key) if isinstance(data, dict) else None
+    return value if isinstance(value, list) else []
+
+
+def _session_recency_signature(session):
+    data = session if isinstance(session, dict) else {}
+    title = str(data.get("title") or "(未命名)").strip() or "(未命名)"
+    reasoning_effort = str(data.get("reasoning_effort") or "").strip().lower()
+    return {
+        "title": title,
+        "pinned": _safe_bool(data.get("pinned", False)),
+        "reasoning_effort": reasoning_effort,
+        "bubbles": _canonical_recency_value(_session_history_value(data, "bubbles")),
+        "backend_history": _canonical_recency_value(_session_history_value(data, "backend_history")),
+        "agent_history": _canonical_recency_value(_session_history_value(data, "agent_history")),
+    }
+
+
+def _session_has_semantic_recency_change(existing, session):
+    if not isinstance(existing, dict):
+        return True
+    return _session_recency_signature(existing) != _session_recency_signature(session)
+
+
+def _read_session_payload_for_recency(fp):
+    path = str(fp or "").strip()
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _preserved_session_updated_at(existing, session):
+    existing_ts = _safe_float((existing or {}).get("updated_at"), 0.0)
+    if existing_ts > 0:
+        return existing_ts
+    current_ts = _safe_float((session or {}).get("updated_at"), 0.0)
+    if current_ts > 0:
+        return current_ts
+    return time.time()
 
 
 def _load_session_meta_file(path):
@@ -624,11 +684,15 @@ def save_session(agent_dir, session, *, touch=True):
 
 
 def save_session_file(fp, session, *, touch=True):
+    existing = _read_session_payload_for_recency(fp) if touch else None
     _normalize_session_paths_inplace(session)
     _normalize_token_usage_inplace(session)
     _normalize_snapshot_inplace(session)
     if touch:
-        session["updated_at"] = time.time()
+        if _session_has_semantic_recency_change(existing, session):
+            session["updated_at"] = time.time()
+        else:
+            session["updated_at"] = _preserved_session_updated_at(existing, session)
     os.makedirs(os.path.dirname(fp), exist_ok=True)
     with open(fp, "w", encoding="utf-8") as f:
         json.dump(session, f, ensure_ascii=False, indent=2)

@@ -61,6 +61,18 @@ def _workflow_step_map(path: str) -> dict[str, str]:
 
 
 class LauncherCoreBehaviorTests(unittest.TestCase):
+    def _read_session_payload_meta_and_index(self, root, sid):
+        session_path = os.path.join(root, "temp", "launcher_sessions", f"{sid}.json")
+        meta_path = os.path.join(root, "temp", "launcher_sessions_meta", f"{sid}.json")
+        index_path = sessions_mod.sessions_index_path(root)
+        with open(session_path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        with open(meta_path, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+        with open(index_path, "r", encoding="utf-8") as f:
+            index = json.load(f)
+        return payload, meta, index[str(sid)]
+
     def test_option_card_children_allow_parent_click_handling_and_release_triggers_command(self):
         app = QApplication.instance() or QApplication([])
         self.addCleanup(lambda: app.processEvents())
@@ -1009,6 +1021,104 @@ class LauncherCoreBehaviorTests(unittest.TestCase):
 
             meta_path = os.path.join(td, "temp", "launcher_sessions_meta", "abc123.json")
             self.assertTrue(os.path.isfile(meta_path))
+
+    def test_save_session_runtime_metadata_preserves_recency_in_payload_meta_and_index(self):
+        with tempfile.TemporaryDirectory() as td:
+            original_updated_at = 1700000000.0
+            session = {
+                "id": "viewonly",
+                "title": "Old review",
+                "created_at": 1699999990.0,
+                "updated_at": original_updated_at,
+                "pinned": False,
+                "channel_id": "launcher",
+                "device_scope": "local",
+                "device_id": "local",
+                "device_name": "本机",
+                "bubbles": [
+                    {"role": "user", "text": "hello"},
+                    {"role": "assistant", "text": "world"},
+                ],
+            }
+            sessions_mod.save_session(td, dict(session), touch=False)
+
+            loaded = sessions_mod.load_session(td, "viewonly")
+            self.assertIsNotNone(loaded)
+            loaded["updated_at"] = 1900000000.0
+            loaded["process_pid"] = 4242
+            loaded["llm_idx"] = 3
+            loaded["device_name"] = "renamed runtime target"
+            loaded["snapshot"] = {
+                "version": 1,
+                "kind": "turn_complete",
+                "captured_at": 1900000000.0,
+                "turns": 99,
+                "llm_idx": 3,
+                "process_pid": 4242,
+            }
+            loaded["token_usage"] = {
+                "events": [
+                    {
+                        "ts": 1900000000.0,
+                        "input_tokens": 10,
+                        "output_tokens": 20,
+                        "total_tokens": 30,
+                        "usage_source": "provider",
+                    }
+                ],
+                "last_model": "runtime-refresh",
+            }
+
+            with mock.patch.object(sessions_mod.time, "time", return_value=1900000000.0):
+                sessions_mod.save_session(td, loaded)
+
+            payload, meta, index_row = self._read_session_payload_meta_and_index(td, "viewonly")
+            self.assertEqual(payload["updated_at"], original_updated_at)
+            self.assertEqual(meta["updated_at"], original_updated_at)
+            self.assertEqual(index_row["updated_at"], original_updated_at)
+            self.assertEqual(payload["process_pid"], 4242)
+            self.assertEqual(payload["snapshot"]["process_pid"], 4242)
+            self.assertEqual(payload["token_usage"]["last_model"], "runtime-refresh")
+            self.assertEqual(meta["device_name"], "renamed runtime target")
+            self.assertEqual(index_row["device_name"], "renamed runtime target")
+
+    def test_save_session_semantic_changes_refresh_recency_in_payload_meta_and_index(self):
+        with tempfile.TemporaryDirectory() as td:
+            original_updated_at = 1700000000.0
+            refreshed_updated_at = 1900000000.0
+            session = {
+                "id": "semantic",
+                "title": "Semantic",
+                "created_at": 1699999990.0,
+                "updated_at": original_updated_at,
+                "pinned": False,
+                "channel_id": "launcher",
+                "bubbles": [{"role": "user", "text": "hello"}],
+            }
+            cases = (
+                ("message", lambda data: data.setdefault("bubbles", []).append({"role": "assistant", "text": "reply"})),
+                ("backend_history", lambda data: data.setdefault("backend_history", []).append({"role": "user", "content": "hi"})),
+                ("agent_history", lambda data: data.setdefault("agent_history", []).append({"role": "assistant", "content": "done"})),
+                ("reasoning_effort", lambda data: data.update({"reasoning_effort": "high"})),
+                ("title", lambda data: data.update({"title": "Renamed"})),
+                ("pinned", lambda data: data.update({"pinned": True})),
+            )
+
+            for label, mutate in cases:
+                with self.subTest(label=label):
+                    sessions_mod.save_session(td, dict(session), touch=False)
+                    data = sessions_mod.load_session(td, "semantic")
+                    self.assertIsNotNone(data)
+                    data["updated_at"] = original_updated_at
+                    mutate(data)
+
+                    with mock.patch.object(sessions_mod.time, "time", return_value=refreshed_updated_at):
+                        sessions_mod.save_session(td, data)
+
+                    payload, meta, index_row = self._read_session_payload_meta_and_index(td, "semantic")
+                    self.assertEqual(payload["updated_at"], refreshed_updated_at)
+                    self.assertEqual(meta["updated_at"], refreshed_updated_at)
+                    self.assertEqual(index_row["updated_at"], refreshed_updated_at)
 
     def test_list_sessions_quick_read_keeps_remote_device_fields(self):
         with tempfile.TemporaryDirectory() as td:

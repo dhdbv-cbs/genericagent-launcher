@@ -163,7 +163,7 @@ class LauncherCoreFacadeTests(unittest.TestCase):
         self.assertEqual(os.path.normpath(stored), os.path.normpath(python_exe))
 
     def test_runtime_python_exe_helpers_resolve_path_command_name(self):
-        with tempfile.TemporaryDirectory() as td:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
             original_app_dir = runtime.APP_DIR
             original_data_root = runtime.DATA_ROOT
             runtime.APP_DIR = os.path.join(td, "launcher")
@@ -185,7 +185,7 @@ class LauncherCoreFacadeTests(unittest.TestCase):
         self.assertEqual(os.path.normpath(stored), os.path.normpath(python_exe))
 
     def test_runtime_python_exe_helpers_ignore_non_python_command_name(self):
-        with tempfile.TemporaryDirectory() as td:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
             original_app_dir = runtime.APP_DIR
             original_data_root = runtime.DATA_ROOT
             runtime.APP_DIR = os.path.join(td, "launcher")

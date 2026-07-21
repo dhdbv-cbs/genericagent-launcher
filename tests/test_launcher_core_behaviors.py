@@ -2208,7 +2208,13 @@ tg_bot_token = '123'
         self.assertNotIn("powershell.exe", src)
         self.assertNotIn("def _show_reply_done_popup", src)
         self.assertIn("1500", src)
-        self.assertIn("if not was_aborted", src)
+        # Source may parenthesize the guard after error-banner work.
+        self.assertTrue(
+            ("if not was_aborted" in src) or ("if (not was_aborted)" in src),
+            "expected was_aborted guard in _stream_done notify path",
+        )
+        self.assertIn("and (not err_text)", src)
+        self.assertIn("self._notify_reply_done(final_text)", src)
 
     def test_launcher_main_sets_windows_app_identity_for_notifications(self):
         root = os.path.dirname(os.path.dirname(__file__))
@@ -2325,8 +2331,9 @@ tg_bot_token = '123'
         path = os.path.join(root, "qt_chat_parts", "bridge_runtime.py")
         with open(path, "r", encoding="utf-8") as f:
             src = f.read()
-        self.assertIn('trace = ev.get("trace", "")', src)
-        self.assertIn("box.setDetailedText(str(trace))", src)
+        self.assertIn('trace = str(ev.get("trace") or "").strip()', src)
+        self.assertIn("box.setDetailedText(trace)", src)
+        self.assertIn('box.setWindowTitle("桥接错误")', src)
 
     def test_api_editor_has_theme_aware_combo_style(self):
         root = os.path.dirname(os.path.dirname(__file__))
